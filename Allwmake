@@ -1,0 +1,47 @@
+#!/bin/bash
+#------------------------------------------------------------------------------
+# RGP-13 Real Fluid Models - Build Script
+#
+# Usage (inside OpenFOAM-13 container):
+#   openfoam13
+#   cd /home/openfoam/RGP-13/RGP-13-realFluid
+#   ./Allwmake
+#------------------------------------------------------------------------------
+set -e
+
+# Verify OpenFOAM environment
+if [ -z "$WM_PROJECT_DIR" ]; then
+    echo "ERROR: OpenFOAM environment not loaded."
+    echo "Run this inside the OpenFOAM-13 container (openfoam13)."
+    exit 1
+fi
+
+echo "============================================"
+echo " RGP-13 Real Fluid Models for OpenFOAM-13"
+echo "============================================"
+echo " FOAM_SRC       = $FOAM_SRC"
+echo " FOAM_USER_LIBBIN = $FOAM_USER_LIBBIN"
+echo "============================================"
+echo ""
+
+# Create user lib directory if needed
+mkdir -p "$FOAM_USER_LIBBIN"
+
+# Build
+wmake libso
+
+echo ""
+echo "============================================"
+echo " Build complete!"
+echo " Library: $FOAM_USER_LIBBIN/libRGP13realFluid.so"
+echo "============================================"
+echo ""
+echo " To use in a case, add to system/controlDict:"
+echo '   libs ("libRGP13realFluid.so");'
+echo ""
+echo " And set thermoType in constant/physicalProperties:"
+echo "   mixture  SRKchungTakaMixture;"
+echo "   transport chung;"
+echo "   equationOfState SRKGas;"
+echo "   specie   rfSpecie;"
+echo "============================================"
