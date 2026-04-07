@@ -1,0 +1,74 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  13
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      postWriteMuDict;
+}
+
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+functions
+{
+  writeMu
+  {
+    name writeMu;
+    type coded;
+    libs ("libutilityFunctionObjects.so");
+
+    codeInclude
+    #{
+      #include "fvCFD.H"
+      #include "basicThermo.H"
+      #include "fluidThermo.H"
+    #};
+
+    codeOptions
+    #{
+      -I$(LIB_SRC)/physicalProperties/lnInclude -I$(LIB_SRC)/thermophysicalModels/specie/lnInclude -I$(LIB_SRC)/thermophysicalModels/basic/lnInclude -I$(LIB_SRC)/thermophysicalModels/multicomponentThermo/lnInclude -I$(LIB_SRC)/finiteVolume/lnInclude
+    #};
+    codeLibs
+    #{
+      -lfiniteVolume -lmeshTools -lfluidThermophysicalModels -lmulticomponentThermophysicalModels
+    #};
+
+    executeControl  writeTime;
+    writeControl    writeTime;
+
+    codeWrite
+    #{
+      const fvMesh& mesh = refCast<const fvMesh>(obr_);
+      const Time& runTime(mesh.time());
+      const word thermoName("physicalProperties");
+
+      if (!mesh.foundObject<fluidThermo>(thermoName))
+      {
+        Info<< "writeMu: fluidThermo '"<<thermoName<<"' not found" << nl;
+        return false;
+      }
+
+      const fluidThermo& th = mesh.lookupObject<fluidThermo>(thermoName);
+
+      volScalarField mu
+      (
+        IOobject("mu", runTime.timeName(), mesh,
+                 IOobject::NO_READ, IOobject::AUTO_WRITE),
+        th.mu()
+      );
+
+      mu.write();
+      Info<< "writeMu: wrote mu at time " << runTime.timeName() << nl;
+      return true;
+    #};
+  }
+}
+
+// ************************************************************************* //

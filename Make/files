@@ -1,3 +1,4 @@
 src/rfSpecie/rfSpecie.C
+src/realFluidThermos.C
 
 LIB = $(FOAM_USER_LIBBIN)/libRGP13realFluid
