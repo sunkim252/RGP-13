@@ -79,6 +79,7 @@ src/
 ## References
 
 - Oefelein, J.C. (2006). "Mixing and combustion of cryogenic oxygen-hydrogen shear-coaxial jet flames at supercritical pressure"
+- Oefelein, J.C. (2019). "Advances in modeling supercritical fluid behavior and combustion in high-pressure propulsion systems." AIAA SciTech 2019 Forum (p. 0634)
 - Chung, T.H. et al. (1988). "Generalized Multiparameter Correlation for Nonpolar and Polar Fluid Transport Properties"
 - Takahashi, S. (1975). "Preparation of a Generalized Chart for the Diffusion Coefficients of Gases at High Pressures"
 - Soave, G. (1972). "Equilibrium constants from a modified Redlich-Kwong equation of state"
