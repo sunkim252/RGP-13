@@ -98,6 +98,7 @@ specie
 codeOptions
 #{
 EXE_INC = \
+    -I$(LIB_RGP13_SRC)/rfSpecie -I$(LIB_RGP13_SRC)/SRKGas -I$(LIB_RGP13_SRC)/chungTransport -I$(LIB_RGP13_SRC)/SRKchungTakaMixture -I$(LIB_RGP13_SRC)/include \
     -I$(LIB_SRC)/physicalProperties/lnInclude \
     -I$(LIB_SRC)/thermophysicalModels/specie/lnInclude \
     -I$(LIB_SRC)/thermophysicalModels/basic/lnInclude \

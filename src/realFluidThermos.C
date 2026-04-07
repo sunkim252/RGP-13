@@ -11,6 +11,7 @@ Description
 \*---------------------------------------------------------------------------*/
 
 #include "psiMulticomponentThermo.H"
+#include "rhoFluidMulticomponentThermo.H"
 #include "SRKchungTakaMixture.H"
 #include "forRealFluidGases.H"
 #include "makeFluidMulticomponentThermo.H"
@@ -19,11 +20,21 @@ Description
 
 namespace Foam
 {
+    // psi-based (compressible)
     forRealFluidGases
     (
         makeFluidMulticomponentThermos,
         psiThermo,
         psiMulticomponentThermo,
+        SRKchungTakaMixture
+    );
+
+    // rho-based (density-direct)
+    forRealFluidGases
+    (
+        makeFluidMulticomponentThermos,
+        rhoFluidThermo,
+        rhoFluidMulticomponentThermo,
         SRKchungTakaMixture
     );
 }
