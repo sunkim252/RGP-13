@@ -85,5 +85,5 @@ src/
 
 ## Acknowledgments
 
-Based on [realFluidFoam-8](https://github.com/) by Combustion & Propulsion Lab, UNIST (Prof. Chun Sang Yoo).
+Based on [realFluidFoam-8](https://github.com/danhnam11/realFluidFoam-8) by Nam Danh Nguyen, Combustion & Propulsion Lab, UNIST (Prof. Chun Sang Yoo).
 Ported to OpenFOAM-13 with bug fixes, API adaptation, and performance optimizations.
