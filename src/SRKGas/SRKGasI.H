@@ -336,8 +336,8 @@ inline Foam::scalar Foam::SRKGas<Specie>::sv
     const scalar T
 ) const
 {
-    NotImplemented;
-    return 0;
+    // sv = sp - CpMCv/T (approximate)
+    return sp(p, T) - CpMCv(p, T)/max(T, small);
 }
 
 
@@ -455,8 +455,19 @@ inline Foam::scalar Foam::SRKGas<Specie>::alphav
     const scalar T
 ) const
 {
-    NotImplemented;
-    return 0;
+    // Numerical differentiation: alphav = -(1/rho)(drho/dT)_p
+    const scalar dT = min(T*1e-6, 1e-4);
+    const scalar rhoT = rho(p, T);
+
+    if (mag(rhoT) < small)
+    {
+        return 0;
+    }
+
+    const scalar rhoTp = rho(p, T + dT);
+    const scalar rhoTm = rho(p, T - dT);
+
+    return -(rhoTp - rhoTm)/(2*dT*rhoT);
 }
 
 
