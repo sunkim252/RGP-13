@@ -1,0 +1,8 @@
+FoamFile { format ascii; class dictionary; object combustionProperties; }
+
+combustionModel FGM;
+
+FGMCoeffs
+{
+    progressVariable PV;
+}
