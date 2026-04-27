@@ -41,7 +41,6 @@ inline Foam::elyHanleyTransport<Thermo>::elyHanleyTransport
     //   (Source: NIST Chemistry WebBook; consistent with Hanley-McCarty-
     //    Haynes 1975 reference state.)
     TcO_(190.564), VcO_(0.0992), MO_(16.043), omegaO_(0.011), ZcO_(0.286),
-    sigmaM_(0), epsilonkM_(0), miuiM_(0), kappaiM_(0),
     Ymd_(Ymd), Xmd_(Xmd),
     Tcmd_(Tcmd), Pcmd_(Pcmd), Mmd_(Mmd), sigmd_(sigmd)
 {}
@@ -59,8 +58,6 @@ inline Foam::elyHanleyTransport<Thermo>::elyHanleyTransport
     omegaM_(tr.omegaM_), ZcM_(tr.ZcM_),
     TcO_(tr.TcO_), VcO_(tr.VcO_), MO_(tr.MO_),
     omegaO_(tr.omegaO_), ZcO_(tr.ZcO_),
-    sigmaM_(tr.sigmaM_), epsilonkM_(tr.epsilonkM_),
-    miuiM_(tr.miuiM_), kappaiM_(tr.kappaiM_),
     Ymd_(tr.Ymd_), Xmd_(tr.Xmd_),
     Tcmd_(tr.Tcmd_), Pcmd_(tr.Pcmd_),
     Mmd_(tr.Mmd_), sigmd_(tr.sigmd_)
@@ -306,158 +303,6 @@ inline Foam::scalar Foam::elyHanleyTransport<Thermo>::enskogXlam
 }
 
 
-// * * * * * * * * Chung-Lee-Starling fallback (non-polar) * * * * * * * * //
-
-template<class Thermo>
-inline Foam::scalar Foam::elyHanleyTransport<Thermo>::muChung
-(
-    const scalar p,
-    const scalar T
-) const
-{
-    // Full Chung-Lee-Starling 1988 viscosity using the mixture
-    // parameters saved by the Chung-signature updateTRANS adapter.
-    // Reproduces Foam::chungTransport<Thermo>::mu() to machine precision
-    // when the same (sigmaM, epsilonkM, MM, VcM, TcM, omegaM, miuiM,
-    // kappaiM) are supplied.
-    //
-    // References:
-    //   Chung, T.-H., Ajlan, M., Lee, L. L. & Starling, K. E.
-    //   Ind. Eng. Chem. Res. 27 (1988) 671-679.
-
-    const scalar A=1.16145 , B=0.14874, C=0.52487 , D=0.77320 , E=2.16178;
-    const scalar F=2.43787 , G=-6.435e-4, H=7.27371, Scol=18.0323, W=-0.76830;
-
-    // Chung's unit-bearing constants (4.0785e-5, 40.785e-6) assume
-    // VcM in cm^3/mol; convert from our m^3/kmol storage.
-    const scalar VcM_cc = VcM_*1000.0;    // m^3/kmol -> cm^3/mol
-
-    const scalar Tstar = T/max(epsilonkM_, 1e-20);
-    const scalar mur = 131.3*miuiM_/sqrt(max(VcM_cc*TcM_, 1e-20));
-    const scalar mur2 = sqr(mur);
-    const scalar Fc = 1.0 - 0.2756*omegaM_ + 0.059035*sqr(mur2) + kappaiM_;
-
-    const scalar Omegast =
-        A*pow(Tstar, -B) + C*exp(-D*Tstar) + E*exp(-F*Tstar)
-      + G*pow(Tstar, B)*sin(Scol*pow(Tstar, W) - H);
-
-    const scalar VcM23 = cbrt(sqr(VcM_cc));
-    const scalar eta0 = 4.0785e-5*sqrt(MM_*T)*Fc
-                       /(max(Omegast, 1e-20)*VcM23);
-
-    // Reduced density Y = rho V_c / 6  with rho in mol/L and Vc in cm^3/mol
-    // (units from Chung 1988 Eq. 10).
-    const scalar rho_molL = 1e-3*this->rho(p, T)/max(this->W(), 1e-20);
-    const scalar Y = rho_molL*VcM_cc/6.0;
-    const scalar oneMinusY = 1.0 - Y;
-    const scalar G1 = (1.0 - 0.5*Y)/pow(oneMinusY, 3);
-
-    const scalar a0[10] = {6.32402, 0.0012102, 5.28346, 6.62263, 19.74540,
-                          -1.89992, 24.27450, 0.79716, -0.23816, 0.068629};
-    const scalar a1[10] = {50.41190, -0.0011536, 254.209, 38.0957, 7.63034,
-                          -12.53670, 3.44945, 1.11764, 0.067695, 0.34793};
-    const scalar a2[10] = {-51.68, -0.0062571, -168.481, -8.46414, -14.35440,
-                           4.98529, -11.29130, 0.012348, -0.8163, 0.59256};
-    const scalar a3[10] = {1189.02, 0.037283, 3898.270, 31.4178, 31.52670,
-                          -18.1507, 69.3464, -4.1161, 4.02528, -0.72663};
-
-    scalar MA[10];
-    const scalar mur4 = sqr(mur2);
-    for (int i=0; i<10; i++)
-    {
-        MA[i] = a0[i] + a1[i]*omegaM_ + a2[i]*mur4 + a3[i]*kappaiM_;
-    }
-
-    const scalar G2 =
-        (MA[0]*(1.0 - exp(-MA[3]*Y))/max(Y, 1e-12)
-         + MA[1]*G1*exp(MA[4]*Y) + MA[2]*G1)
-       /(MA[0]*MA[3] + MA[1] + MA[2]);
-
-    const scalar etak = eta0*(1.0/G2 + MA[5]*Y);
-    const scalar etap =
-        (40.785e-6/sqrt(max(Tstar, 1e-20)))*sqrt(MM_*T)/VcM23
-       *MA[6]*sqr(Y)*G2*exp(MA[7] + MA[8]/Tstar + MA[9]/sqr(Tstar));
-
-    return 0.1*(etak + etap);   // poise -> Pa.s
-}
-
-
-template<class Thermo>
-inline Foam::scalar Foam::elyHanleyTransport<Thermo>::kappaChung
-(
-    const scalar p,
-    const scalar T
-) const
-{
-    // Full Chung-Lee-Starling 1988 thermal conductivity, reproducing
-    // Foam::chungTransport<Thermo>::kappa() exactly.
-    const scalar A=1.16145 , B=0.14874, C=0.52487 , D=0.77320 , E=2.16178;
-    const scalar F=2.43787 , G=-6.435e-4, H=7.27371, Scol=18.0323, W=-0.76830;
-
-    const scalar VcM_cc = VcM_*1000.0;    // m^3/kmol -> cm^3/mol
-
-    const scalar Tstar = T/max(epsilonkM_, 1e-20);
-    const scalar mur = 131.3*miuiM_/sqrt(max(VcM_cc*TcM_, 1e-20));
-    const scalar mur2 = sqr(mur);
-    const scalar Fc = 1.0 - 0.2756*omegaM_ + 0.059035*sqr(mur2) + kappaiM_;
-
-    const scalar Omegast =
-        A*pow(Tstar, -B) + C*exp(-D*Tstar) + E*exp(-F*Tstar)
-      + G*pow(Tstar, B)*sin(Scol*pow(Tstar, W) - H);
-
-    const scalar VcM23 = cbrt(sqr(VcM_cc));
-    const scalar eta0 = 4.0785e-5*sqrt(MM_*T)*Fc
-                       /(max(Omegast, 1e-20)*VcM23);
-
-    const scalar rho_molL = 1e-3*this->rho(p, T)/max(this->W(), 1e-20);
-    const scalar Y = rho_molL*VcM_cc/6.0;
-    const scalar oneMinusY = 1.0 - Y;
-    const scalar G1 = (1.0 - 0.5*Y)/pow(oneMinusY, 3);
-
-    // Chung b-coefficients (Table IV of 1988 paper)
-    const scalar b0[7] = {2.41657, -0.50924, 6.61069, 14.54250, 0.79274,
-                         -5.8634, 81.171};
-    const scalar b1[7] = {0.74824, -1.50936, 5.62073, -8.91387, 0.82019,
-                          12.8005, 114.1580};
-    const scalar b2[7] = {-0.91858, -49.99120, 64.7599, -5.63794, -0.69369,
-                           9.58926, -60.841};
-    const scalar b3[7] = {121.721, 69.9834, 27.0389, 74.3435, 6.31734,
-                         -65.5292, 466.7750};
-
-    scalar MB[7];
-    const scalar mur4 = sqr(mur2);
-    for (int j=0; j<7; j++)
-    {
-        MB[j] = b0[j] + b1[j]*omegaM_ + b2[j]*mur4 + b3[j]*kappaiM_;
-    }
-
-    // Chung psi factor uses ideal Cv -> Cv = Cp - R (ideal-gas)
-    const scalar CvIdeal = this->Cp(p, T) - this->R();
-    const scalar Cv = CvIdeal*this->W()*0.2388e-3;  // cal/mol/K
-    const scalar Rcal = Foam::constant::thermodynamic::RR/(4.186*1e3);
-    const scalar alpha = Cv/max(Rcal, 1e-20) - 1.5;
-    const scalar beta  = 0.7862 - 0.7109*omegaM_ + 1.1368*sqr(omegaM_);
-    const scalar Tr = T/max(TcM_, 1e-20);
-    const scalar Zterm = 2.0 + 10.5*sqr(Tr);
-    const scalar Psi =
-        1.0 + alpha*(0.215 + 0.28288*alpha - 1.061*beta + 0.26665*Zterm)
-             /(0.6366 + beta*Zterm + 1.061*alpha*beta);
-
-    const scalar lamda0 = 7.452*(eta0/MM_)*Psi;
-
-    const scalar H2 =
-        (MB[0]*(1.0 - exp(-MB[3]*Y))/max(Y, 1e-12)
-         + MB[1]*G1*exp(MB[4]*Y) + MB[2]*G1)
-       /(MB[0]*MB[3] + MB[1] + MB[2]);
-
-    const scalar lamdak = lamda0*(1.0/H2 + MB[5]*Y);
-    const scalar lamdap =
-        (3.039e-4*sqrt(TcM_/MM_)/VcM23)*MB[6]*sqr(Y)*H2*sqrt(Tr);
-
-    return 418.6798*(lamdak + lamdap);  // cal/cm/s/K -> W/m/K
-}
-
-
 // * * * * * * * * * * Public mu, kappa, phi, Dimix * * * * * * * * * * * //
 
 template<class Thermo>
@@ -467,13 +312,10 @@ inline Foam::scalar Foam::elyHanleyTransport<Thermo>::mu
     const scalar T
 ) const
 {
-    // Hybrid dispatch: polar/near-critical species use the ECS / Ely-
-    // Hanley branch (better for H2O); non-polar species fall back to
-    // Chung-Lee-Starling 1988 internally (better for O2/N2/H2).
-    if (!useElyHanleyBranch())
-    {
-        return muChung(p, T);
-    }
+    // Pure ECS / Ely-Hanley evaluation for every species. The previous
+    // hybrid Chung short-circuit produced step jumps in mu(Y_mix) where
+    // the polarity selector flipped (e.g. Y_H2O ~ 0.86 in O2/H2O), so it
+    // has been removed in favour of a single continuous formula.
     // Mixture reducing ratios f_x, h_x via shape factors of a pseudo-
     // pure fluid with mixture critical parameters.
     const scalar Vri    = (this->rho(p, T) > 0)
@@ -515,11 +357,8 @@ inline Foam::scalar Foam::elyHanleyTransport<Thermo>::kappa
     const scalar T
 ) const
 {
-    // Hybrid dispatch (see mu() comment).
-    if (!useElyHanleyBranch())
-    {
-        return kappaChung(p, T);
-    }
+    // Pure ECS / Ely-Hanley evaluation; see mu() for the rationale
+    // behind dropping the hybrid Chung short-circuit.
 
     const scalar Vri    = (this->rho(p, T) > 0)
                         ? (MM_/this->rho(p, T))/VcM_ : 1.0;
@@ -710,16 +549,11 @@ inline void Foam::elyHanleyTransport<Thermo>::updateTRANS
     const List<List<scalar>>& sigmd
 )
 {
-    // Chung-signature adapter: compute ZcM via Pitzer correlation
-    //   Z_c ~= 0.291 - 0.08 * omega.
-    // sigmaM, epsilonkM, miuiM, kappaiM are intentionally unused by
-    // the Ely-Hanley branch (kept in signature for drop-in replacement
-    // of chungTransport inside SRKchungTakaMixture).
-    // Persist Chung auxiliary parameters for the non-polar fallback branch.
-    sigmaM_    = sigmaM;
-    epsilonkM_ = epsilonkM;
-    miuiM_     = miuiM;
-    kappaiM_   = kappaiM;
+    // Chung-signature adapter: kept so SRKchungTakaMixture can drive
+    // either chungTransport or elyHanleyTransport without changes.
+    // sigmaM, epsilonkM, miuiM, kappaiM are unused by the Ely-Hanley
+    // branch (no Chung fallback after the standalone refactor).
+    (void)sigmaM; (void)epsilonkM; (void)miuiM; (void)kappaiM;
     // VcM arrives from SRKchungTakaMixture in cm^3/mol (rfSpecie units);
     // convert to m^3/kmol for internal consistency with the elyHanley
     // class, where the reference VcO_ is stored in m^3/kmol.

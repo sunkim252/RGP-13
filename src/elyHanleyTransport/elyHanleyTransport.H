@@ -127,13 +127,6 @@ protected:
         //- Reference fluid (methane) critical compressibility [-]
         scalar ZcO_;
 
-        //- Chung auxiliary parameters stored for the non-polar fallback
-        //  branch (see mu(), kappa() below).
-        scalar sigmaM_;      // effective LJ diameter [Angstrom]
-        scalar epsilonkM_;   // effective LJ epsilon/k [K]
-        scalar miuiM_;       // reduced dipole moment
-        scalar kappaiM_;     // association factor
-
         //- Members for diffusivity evaluation (Fuller + Takahashi).
         //  Kept for API compatibility with chungTransport.
 
@@ -215,45 +208,6 @@ protected:
             const scalar fx,
             const scalar dfxdT
         ) const;
-
-        //- Chung-Lee-Starling viscosity (fallback for non-polar species).
-        //  Self-contained copy of the Chung formula using the stored
-        //  sigmaM, epsilonkM, omegaM, miuiM, kappaiM coefficients.
-        inline scalar muChung
-        (
-            const scalar p,
-            const scalar T
-        ) const;
-
-        //- Chung-Lee-Starling thermal conductivity fallback.
-        inline scalar kappaChung
-        (
-            const scalar p,
-            const scalar T
-        ) const;
-
-        //- Polarity test. Returns true if ECS/Ely-Hanley should be used;
-        //  false to fall back to Chung-Lee-Starling.
-        //
-        //  Criterion (tightened for multi-component mixtures):
-        //      |omega_mix| >= 0.30  AND  miuiM_mix > 0
-        //
-        //  Rationale based on measured mixture RMSE:
-        //    - Pure H2O (omega=0.344, miui=1.844):       use Ely-Hanley
-        //    - Pure O2  (omega=0.025):                    use Chung
-        //    - Pure H2  (omega=-0.217, miui=0):           use Chung
-        //    - O2/H2O mix with Y_H2O ~ 0.5 (omega_mix ~ 0.23):
-        //          use Chung (mid-comp ECS causes mu regression)
-        //    - O2/H2O mix with Y_H2O ~ 0.9 (omega_mix ~ 0.32):
-        //          use Ely-Hanley (delivers -100 pp kappa improvement)
-        //
-        //  The 0.30 threshold isolates the regime where the mixture
-        //  really is dominated by a strongly polar species.
-        inline bool useElyHanleyBranch() const
-        {
-            return (mag(omegaM_) >= 0.30) && (miuiM_ > 1e-12);
-        }
-
 
 public:
 

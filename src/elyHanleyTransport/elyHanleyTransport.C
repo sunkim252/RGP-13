@@ -31,12 +31,6 @@ Foam::elyHanleyTransport<Thermo>::elyHanleyTransport
     MO_(16.043),
     omegaO_(0.011),
     ZcO_(0.286),
-    // Chung fallback auxiliaries (per-species values; overwritten by
-    // SRKchungTakaMixture::calcMixture through updateTRANS for mixtures).
-    sigmaM_(0.809*pow(this->Vc(), 1.0/3)),
-    epsilonkM_(this->Tc()/1.2593),
-    miuiM_(this->miui()),
-    kappaiM_(this->kappai()),
     Ymd_(2),
     Xmd_(2),
     Tcmd_(2),
@@ -105,10 +99,6 @@ Foam::elyHanleyTransport<Thermo>::elyHanleyTransport
     omegaM_(this->omega()),
     ZcM_(0.0),
     TcO_(190.564), VcO_(0.0992), MO_(16.043), omegaO_(0.011), ZcO_(0.286),
-    sigmaM_(0.809*pow(this->Vc(), 1.0/3)),
-    epsilonkM_(this->Tc()/1.2593),
-    miuiM_(this->miui()),
-    kappaiM_(this->kappai()),
     Ymd_(2), Xmd_(2), Tcmd_(2), Pcmd_(2), Mmd_(2), sigmd_(2)
 {
     const scalar Ru = 8.31446;
