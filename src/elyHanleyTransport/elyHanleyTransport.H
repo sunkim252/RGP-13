@@ -147,6 +147,25 @@ protected:
 
     // Protected Member Functions
 
+        //- C^1-continuous clamp of x to [lo, hi] with a quadratic
+        //  Hermite blend over a transition half-width w at each
+        //  boundary. Returns x exactly on [lo + w, hi - w] and
+        //  saturates smoothly to lo / hi outside [lo - w, hi + w].
+        //
+        //  Replaces hard max/min clipping of the reduced volume V_r
+        //  and reduced temperature T_r inside phiShape / thetaShape:
+        //  the hard clip leaves d(phi)/dT and d(theta)/dT C^0 but
+        //  not C^1, which shows up as visible kinks in mu(T) and
+        //  kappa(T) plots whenever T_r crosses the clip boundary
+        //  (e.g. for H2O at T ~ 0.5 Tc ~ 324 K and T ~ 2 Tc ~ 1294 K).
+        inline static scalar softClamp
+        (
+            const scalar x,
+            const scalar lo,
+            const scalar hi,
+            const scalar w
+        );
+
         //- Leach-Chappelear-Leland shape factor phi(V_r, T_r, omega).
         //  Returns the factor such that h_i = (Vc_i/Vc_o) * phi.
         inline scalar phiShape

@@ -81,6 +81,40 @@ Foam::elyHanleyTransport<Thermo>::clone() const
 // * * * * * * * * * * * * Shape factors (Leach 1968) * * * * * * * * * * * //
 
 template<class Thermo>
+inline Foam::scalar Foam::elyHanleyTransport<Thermo>::softClamp
+(
+    const scalar x,
+    const scalar lo,
+    const scalar hi,
+    const scalar w
+)
+{
+    // Piecewise quadratic Hermite blend.
+    //   x <= lo - w           : lo                          (constant)
+    //   lo - w < x <= lo + w  : lo + (x - (lo - w))^2/(4 w) (smooth ramp)
+    //   lo + w  < x <  hi - w : x                           (identity)
+    //   hi - w <= x <  hi + w : hi - (hi + w - x)^2/(4 w)   (smooth ramp)
+    //   x >= hi + w           : hi                          (constant)
+    // Continuity (C^0) and slope continuity (C^1) are exact at every
+    // junction, so derivatives propagated downstream (dfx/dT, X_eta,
+    // X_lam, mu, kappa) are smooth across the boundaries.
+    if (x <= lo - w) return lo;
+    if (x >= hi + w) return hi;
+    if (x < lo + w)
+    {
+        const scalar t = x - (lo - w);
+        return lo + t*t/(4.0*w);
+    }
+    if (x > hi - w)
+    {
+        const scalar t = x - (hi - w);
+        return (hi - w) + t - t*t/(4.0*w);
+    }
+    return x;
+}
+
+
+template<class Thermo>
 inline Foam::scalar Foam::elyHanleyTransport<Thermo>::phiShape
 (
     const scalar Vri,
@@ -89,10 +123,15 @@ inline Foam::scalar Foam::elyHanleyTransport<Thermo>::phiShape
 ) const
 {
     // Leach, Chappelear & Leland 1968 (AIChE J. 14, 568) correlation
-    // for the volume shape factor phi. Clipping bounds on V_r, T_r from
-    // Oefelein (AIAA 2019-0634) Eqs. (45)-(46).
-    const scalar Vp = max(0.5, min(Vri, 2.0));
-    const scalar Tp = max(0.5, min(Tri, 2.0));
+    // for the volume shape factor phi. Bounds on V_r, T_r are taken
+    // from Oefelein (AIAA 2019-0634) Eqs. (45)-(46) but applied via a
+    // C^1-continuous soft clamp so dphi/dT remains continuous when
+    // T_r leaves the [0.5, 2.0] band.
+    // Transition half-width w = 0.05 keeps the polynomial unchanged on
+    // [0.55, 1.95] and removes the kinks at T_r = 0.5 and T_r = 2.0.
+    const scalar w = 0.05;
+    const scalar Vp = softClamp(Vri, 0.5, 2.0, w);
+    const scalar Tp = softClamp(Tri, 0.5, 2.0, w);
     // Leach-Chappelear-Leland 1968 Table 1 coefficients (methane ref).
     const scalar a1 =  0.3409;  // c_phi1
     const scalar a2 =  1.0054;  // c_phi2
@@ -113,9 +152,11 @@ inline Foam::scalar Foam::elyHanleyTransport<Thermo>::thetaShape
 ) const
 {
     // Leach, Chappelear & Leland 1968 correlation for theta (Oefelein
-    // Eq. 44).
-    const scalar Vp = max(0.5, min(Vri, 2.0));
-    const scalar Tp = max(0.5, min(Tri, 2.0));
+    // Eq. 44). Soft-clamped on V_r, T_r as in phiShape so that dtheta/dT
+    // (and the downstream Enskog correction) stays C^1.
+    const scalar w = 0.05;
+    const scalar Vp = softClamp(Vri, 0.5, 2.0, w);
+    const scalar Tp = softClamp(Tri, 0.5, 2.0, w);
     const scalar b1 =  0.0892;  // c_theta1
     const scalar b2 = -0.3680;  // c_theta2
     const scalar b3 =  0.8464;  // c_theta3
