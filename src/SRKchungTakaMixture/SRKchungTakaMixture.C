@@ -36,6 +36,7 @@ void Foam::SRKchungTakaMixture<ThermoType>::calculateRealGas
     scalar& coef1,
     scalar& coef2,
     scalar& coef3,
+    scalar& cM,
     scalar& sigmaM,
     scalar& epsilonkM,
     scalar& MM,
@@ -50,6 +51,15 @@ void Foam::SRKchungTakaMixture<ThermoType>::calculateRealGas
     forAll(BM_, i)
     {
         bM = bM + X[i]*BM_[i];
+    }
+
+    // Linear mole-fraction mixing for Peneloux volume shift.
+    // Peneloux et al. (1982) showed the translation c can be applied to
+    // mixtures directly as sum_i X_i c_i without affecting vapour
+    // pressures.
+    forAll(CM_, i)
+    {
+        cM = cM + X[i]*CM_[i];
     }
 
     // Quadratic mixing for all pair-interaction parameters
@@ -149,18 +159,18 @@ Foam::SRKchungTakaMixture<ThermoType>::calcMixture
     }
 
     // Calculate real-gas mixture parameters
-    scalar bM = 0, coef1 = 0, coef2 = 0, coef3 = 0;
+    scalar bM = 0, coef1 = 0, coef2 = 0, coef3 = 0, cM = 0;
     scalar sigmaM = 0, epsilonkM = 0, VcM = 0, TcM = 0;
     scalar omegaM = 0, MM = 0, miuiM = 0, kappaiM = 0;
 
     calculateRealGas
     (
-        X, bM, coef1, coef2, coef3,
+        X, bM, coef1, coef2, coef3, cM,
         sigmaM, epsilonkM, MM, VcM, TcM, omegaM, miuiM, kappaiM
     );
 
     // Update coefficients for mixture in SRK
-    mixture_.updateEoS(bM, coef1, coef2, coef3);
+    mixture_.updateEoS(bM, coef1, coef2, coef3, cM);
 
     // Correct mole fractions for mass diffusivity calculation
     scalar WmixCorrect = 0.0, sumXcorrected = 0.0;
@@ -251,6 +261,8 @@ Foam::SRKchungTakaMixture<ThermoType>::SRKchungTakaMixture
     COEF1_(numberOfSpecies_),
     COEF2_(numberOfSpecies_),
     COEF3_(numberOfSpecies_),
+    CM_(numberOfSpecies_, scalar(0)),
+    KIJ_(numberOfSpecies_),
     //- For visc. and cond. in Chung's model
     SIGMA3M_(numberOfSpecies_),
     EPSILONKM0_(numberOfSpecies_),
@@ -275,6 +287,61 @@ Foam::SRKchungTakaMixture<ThermoType>::SRKchungTakaMixture
                     /this->specieThermos()[i].Pc();
         ListTc_[i] = this->specieThermos()[i].Tc();
         ListPc_[i] = this->specieThermos()[i].Pc();
+        CM_[i]     = this->specieThermos()[i].c();
+    }
+
+    // Initialise k_ij matrix with zeros
+    forAll(KIJ_, i)
+    {
+        KIJ_[i].setSize(numberOfSpecies_, scalar(0));
+    }
+
+    // Optional binaryInteraction subDict:
+    //   binaryInteraction
+    //   {
+    //       O2_H2O  { kij -0.015; }
+    //       H2_N2   { kij  0.093; }
+    //       default { kij  0;     }
+    //   }
+    // Each entry name "A_B" identifies the pair (A, B); the scalar kij is
+    // applied symmetrically. Species names are resolved against the
+    // multicomponent species list.
+    if (dict.found("binaryInteraction"))
+    {
+        const dictionary& bd = dict.subDict("binaryInteraction");
+        forAllConstIter(dictionary, bd, iter)
+        {
+            if (!iter().isDict())
+            {
+                continue;
+            }
+            const word& pair = iter().keyword();
+            if (pair == "default")
+            {
+                continue;
+            }
+            const std::size_t sep = pair.find('_');
+            if (sep == std::string::npos)
+            {
+                continue;
+            }
+            const word a = pair.substr(0, sep);
+            const word b = pair.substr(sep + 1);
+            label ia = -1, ib = -1;
+            forAll(this->specieThermos(), s)
+            {
+                if (this->specieThermos()[s].name() == a) ia = s;
+                if (this->specieThermos()[s].name() == b) ib = s;
+            }
+            if (ia < 0 || ib < 0)
+            {
+                continue;
+            }
+            const scalar kij =
+                iter().dict().lookupOrDefault<scalar>("kij", 0);
+            KIJ_[ia][ib] = kij;
+            KIJ_[ib][ia] = kij;
+        }
     }
 
     // Pre-compute pair-interaction matrices
@@ -296,6 +363,10 @@ Foam::SRKchungTakaMixture<ThermoType>::SRKchungTakaMixture
     {
         forAll(nCOEF1, j)
         {
+            // SRK binary interaction factor (1 - k_ij) applied to the
+            // cross terms only (i != j). Oefelein Eq. (25).
+            const scalar oneMinusKij = (i == j) ? 1.0 : (1.0 - KIJ_[i][j]);
+
             //- For SRK
             nCOEF1[j] =
                 sqrt
@@ -310,7 +381,8 @@ Foam::SRKchungTakaMixture<ThermoType>::SRKchungTakaMixture
                     - 0.15613*pow(this->specieThermos()[i].omega(), 2)))
                *(1 + (0.48508
                     + 1.5517*this->specieThermos()[j].omega()
-                    - 0.15613*pow(this->specieThermos()[j].omega(), 2)));
+                    - 0.15613*pow(this->specieThermos()[j].omega(), 2)))
+               *oneMinusKij;
 
             nCOEF2[j] =
                 sqrt
@@ -339,7 +411,8 @@ Foam::SRKchungTakaMixture<ThermoType>::SRKchungTakaMixture
                     - 0.15613*pow(this->specieThermos()[j].omega(), 2))
                    /sqrt(this->specieThermos()[j].Tc())
                   )
-                );
+                )
+               *oneMinusKij;
 
             nCOEF3[j] =
                 sqrt
@@ -359,7 +432,8 @@ Foam::SRKchungTakaMixture<ThermoType>::SRKchungTakaMixture
                 (
                     this->specieThermos()[i].Tc()
                    *this->specieThermos()[j].Tc()
-                );
+                )
+               *oneMinusKij;
 
             //- For visc. and cond. in Chung's model
             nSIGMA3M[j] =

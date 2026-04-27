@@ -1,6 +1,34 @@
 #!/bin/bash
 #------------------------------------------------------------------------------
 # RGP-13 Real Fluid Models - Clean Script
+#
+# Removes build artefacts (Make/$WM_OPTIONS, lnInclude) and the installed
+# library $FOAM_USER_LIBBIN/libRGP13realFluid.so.
 #------------------------------------------------------------------------------
-wclean
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+if [ -z "${WM_PROJECT_DIR:-}" ]; then
+    if [ -f "${FOAM_BASHRC:-}" ]; then
+        # shellcheck disable=SC1090
+        set +u; source "$FOAM_BASHRC"; set -u
+    elif [ -f /opt/openfoam13/etc/bashrc ]; then
+        # shellcheck disable=SC1091
+        set +u; source /opt/openfoam13/etc/bashrc; set -u
+    fi
+fi
+
+if command -v wclean >/dev/null 2>&1; then
+    wclean
+fi
+
+rm -rf lnInclude Make/linux*
+
+if [ -n "${FOAM_USER_LIBBIN:-}" ] && [ -f "$FOAM_USER_LIBBIN/libRGP13realFluid.so" ]; then
+    rm -f "$FOAM_USER_LIBBIN/libRGP13realFluid.so"
+    echo "Removed $FOAM_USER_LIBBIN/libRGP13realFluid.so"
+fi
+
 echo "Cleaned RGP-13 build files."

@@ -101,6 +101,17 @@ private:
         List<List<scalar>> COEF2_;
         List<List<scalar>> COEF3_;
 
+        //- Per-species Peneloux volume shift [m^3/kmol].
+        //  Combined linearly on a mole-fraction basis for mixtures.
+        List<scalar> CM_;
+
+        //- Binary interaction matrix k_ij applied to the SRK a_m cross
+        //  terms as (1 - k_ij). Diagonal = 0. Parsed from an optional
+        //  top-level "binaryInteraction" subDict at construction time.
+        //  Reference: Reid, Prausnitz & Poling (1987) Ch. 4; Oefelein
+        //  (AIAA 2019-0634) Eqs. (24)-(25).
+        List<List<scalar>> KIJ_;
+
         //- For viscosity and thermal conductivity (Chung's model)
         List<List<scalar>> SIGMA3M_;
         List<List<scalar>> EPSILONKM0_;
@@ -126,6 +137,7 @@ private:
             scalar& coef1,
             scalar& coef2,
             scalar& coef3,
+            scalar& cM,
             scalar& sigmaM,
             scalar& epsilonkM,
             scalar& MM,

@@ -110,6 +110,12 @@ class SRKGas
         scalar coef2_;
         scalar coef3_;
 
+        //- Peneloux volume translation constant [m^3/kmol].
+        //  Effective specific volume: v_eff = v_SRK - c_.
+        //  Default 0 preserves the original SRK behaviour.
+        //  Reference: Peneloux, Rauzy & Freze, Fluid Phase Equilib. 8 (1982) 7-23.
+        scalar c_;
+
 
     // Private Member Functions
 
@@ -132,14 +138,15 @@ public:
 
     // Constructors
 
-        //- Construct from components
+        //- Construct from components (Peneloux shift defaults to 0)
         inline SRKGas
         (
             const Specie& sp,
             const scalar& b,
             const scalar& coef1,
             const scalar& coef2,
-            const scalar& coef3
+            const scalar& coef3,
+            const scalar& c = 0
         );
 
         //- Construct from name and dictionary
@@ -201,19 +208,37 @@ public:
             //- Return volumetric coefficient of thermal expansion [1/T]
             inline scalar alphav(const scalar p, const scalar T) const;
 
+            //- Return speed of sound squared [m^2/s^2].
+            //  Derived from Oefelein (AIAA 2019-0634) Eqs. (88)-(91),
+            //  c^2 = gamma R T / (Zp/Z) with Zp, Z_T evaluated from the SRK
+            //  compressibility factor and its partial derivatives.
+            inline scalar c2(const scalar p, const scalar T) const;
+
+            //- Return pure-species natural logarithm of fugacity coefficient.
+            //  SRK closed-form of Oefelein Eq. (99) specialised to a pure fluid
+            //  (b_i = b_m, delta_i = 1) giving the classical
+            //  ln(phi) = (Z-1) - ln(Z-B) - (A/B) ln((Z+B)/Z).
+            //  Reference: Soave, Chem. Eng. Sci. 27 (1972) 1197-1203.
+            inline scalar lnPhi(const scalar p, const scalar T) const;
+
+            //- Access the Peneloux volume shift [m^3/kmol]
+            inline scalar c() const { return c_; }
+
             //- Update coefficients for mixture
             void updateEoS
             (
                 const scalar& b,
                 const scalar& coef1,
                 const scalar& coef2,
-                const scalar& coef3
+                const scalar& coef3,
+                const scalar& c = 0
             )
             {
                 b_ = b;
                 coef1_ = coef1;
                 coef2_ = coef2;
                 coef3_ = coef3;
+                c_ = c;
             }
 
 

@@ -2,6 +2,7 @@ EXE_INC = \
     -Isrc/rfSpecie \
     -Isrc/SRKGas \
     -Isrc/chungTransport \
+    -Isrc/elyHanleyTransport \
     -Isrc/SRKchungTakaMixture \
     -Isrc/FGM \
     -Isrc/include \

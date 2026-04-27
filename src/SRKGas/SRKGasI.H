@@ -100,14 +100,16 @@ inline Foam::SRKGas<Specie>::SRKGas
     const scalar& b,
     const scalar& coef1,
     const scalar& coef2,
-    const scalar& coef3
+    const scalar& coef3,
+    const scalar& c
 )
 :
     Specie(sp),
     b_(b),
     coef1_(coef1),
     coef2_(coef2),
-    coef3_(coef3)
+    coef3_(coef3),
+    c_(c)
 {}
 
 
@@ -122,7 +124,8 @@ inline Foam::SRKGas<Specie>::SRKGas
     b_(srk.b_),
     coef1_(srk.coef1_),
     coef2_(srk.coef2_),
-    coef3_(srk.coef3_)
+    coef3_(srk.coef3_),
+    c_(srk.c_)
 {}
 
 
@@ -147,7 +150,23 @@ inline Foam::scalar Foam::SRKGas<Specie>::rho
 ) const
 {
     const scalar Zv = this->Z(p, T);
-    return p/(Zv*this->R()*T);
+    const scalar rhoSRK = p/(Zv*this->R()*T);
+
+    // Peneloux volume translation: v_eff = v_SRK - c  (molar basis).
+    // In specific quantities this gives
+    //   rho_eff = rho_SRK / (1 - c * rho_SRK / W)
+    // where c_ has units of m^3/kmol and W of kg/kmol, so c_/W is m^3/kg.
+    // Reference: Peneloux, Rauzy & Freze, Fluid Phase Equilib. 8 (1982) 7-23.
+    if (c_ != 0)
+    {
+        const scalar denom = 1.0 - c_*rhoSRK/this->W();
+        if (denom > small)
+        {
+            return rhoSRK/denom;
+        }
+    }
+
+    return rhoSRK;
 }
 
 
@@ -348,6 +367,10 @@ inline Foam::scalar Foam::SRKGas<Specie>::psi
     scalar T
 ) const
 {
+    // psi = drho/dp |_T = rho/p (for ideal gas) generalises to 1/(Z R T).
+    // Peneloux is a pure volume shift and leaves (drho/dp)_T essentially
+    // unchanged to leading order; returning the SRK value keeps psi
+    // consistent with the existing compressibility routines.
     const scalar Zv = this->Z(p, T);
     return 1.0/(Zv*this->R()*T);
 }
@@ -471,6 +494,76 @@ inline Foam::scalar Foam::SRKGas<Specie>::alphav
 }
 
 
+template<class Specie>
+inline Foam::scalar Foam::SRKGas<Specie>::c2
+(
+    const scalar p,
+    const scalar T
+) const
+{
+    // Explicit speed of sound squared from Oefelein (AIAA 2019-0634) Eqs.
+    // (88)-(91):
+    //   c^2 = gamma * R * T / (Zp / Z)
+    //   gamma = Cp / Cv
+    // Cp, Cv already include departure contributions so they are evaluated
+    // via numerical Cp - (Cp - Cv) = Cv at the same (p, T).
+    // Here Zp and Z are packed implicitly through the CpMCv / Z routines.
+    const scalar Zv = this->Z(p, T);
+    const scalar Cpv = this->Cp(p, T);
+    const scalar CpMCvv = this->CpMCv(p, T);
+    const scalar gamma = Cpv/max(Cpv - CpMCvv, small);
+
+    // (drho/dp)_T using analytic SRK pressure derivative; for efficiency we
+    // use the isothermal finite difference since this routine is only used
+    // for post-processing.
+    const scalar dp = max(1e-3*p, 1.0);
+    const scalar drho = rho(p + dp, T) - rho(p - dp, T);
+    const scalar dRhodP_T = drho/(2.0*dp);
+
+    if (dRhodP_T <= small)
+    {
+        return gamma*this->R()*T;
+    }
+
+    return gamma/dRhodP_T;
+}
+
+
+template<class Specie>
+inline Foam::scalar Foam::SRKGas<Specie>::lnPhi
+(
+    const scalar p,
+    const scalar T
+) const
+{
+    // Pure-species natural log of fugacity coefficient for SRK.
+    // Soave, Chem. Eng. Sci. 27 (1972) 1197-1203, as presented e.g. in
+    // Reid, Prausnitz & Poling "The Properties of Gases and Liquids",
+    // 4th ed., McGraw-Hill 1987, Ch. 3.
+    //   ln(phi) = (Z - 1) - ln(Z - B) - (A/B) ln((Z + B)/Z)
+    // Matches the pure-fluid specialisation (b_i = b_m, delta_i = 1) of
+    // Oefelein Eq. (99).
+    const scalar sqrtT = sqrt(T);
+    const scalar aAlpha = coef1_ - coef2_*sqrtT + coef3_*T;
+    const scalar RR = Foam::constant::thermodynamic::RR;
+    const scalar A = aAlpha*p/sqr(RR*T);
+    scalar B = b_*p/(RR*T);
+    if (B <= 0)
+    {
+        B = 1e-16;
+    }
+
+    const scalar Zv = this->Z(p, T);
+
+    if (Zv - B <= small)
+    {
+        return 0;
+    }
+
+    return (Zv - 1.0) - log(Zv - B) - (A/B)*log((Zv + B)/Zv);
+}
+
+
 // * * * * * * * * * * * * * * * Member Operators  * * * * * * * * * * * * * //
 
 template<class Specie>
@@ -491,6 +584,8 @@ inline void Foam::SRKGas<Specie>::operator+=
         coef1_ = X1*coef1_ + X2*srk.coef1_;
         coef2_ = X1*coef2_ + X2*srk.coef2_;
         coef3_ = X1*coef3_ + X2*srk.coef3_;
+        // Peneloux shift is a linear quantity in mole fractions.
+        c_ = X1*c_ + X2*srk.c_;
     }
 }
 
@@ -525,7 +620,8 @@ Foam::SRKGas<Specie> Foam::operator+
             srk1.b_,
             srk1.coef1_,
             srk1.coef2_,
-            srk1.coef3_
+            srk1.coef3_,
+            srk1.c_
         );
     }
     else
@@ -539,7 +635,8 @@ Foam::SRKGas<Specie> Foam::operator+
             X1*srk1.b_ + X2*srk2.b_,
             X1*srk1.coef1_ + X2*srk2.coef1_,
             X1*srk1.coef2_ + X2*srk2.coef2_,
-            X1*srk1.coef3_ + X2*srk2.coef3_
+            X1*srk1.coef3_ + X2*srk2.coef3_,
+            X1*srk1.c_ + X2*srk2.c_
         );
     }
 }
@@ -558,7 +655,8 @@ Foam::SRKGas<Specie> Foam::operator*
         srk.b_,
         srk.coef1_,
         srk.coef2_,
-        srk.coef3_
+        srk.coef3_,
+        srk.c_
     );
 }
 
@@ -579,6 +677,7 @@ Foam::SRKGas<Specie> Foam::operator==
     return SRKGas<Specie>
     (
         sp,
+        NaN,
         NaN,
         NaN,
         NaN,

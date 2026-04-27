@@ -1,47 +1,142 @@
 #!/bin/bash
 #------------------------------------------------------------------------------
-# RGP-13 Real Fluid Models - Build Script
+# RGP-13 Real Fluid Models - Automatic build & install script
 #
-# Usage (inside OpenFOAM-13 container):
-#   openfoam13
-#   cd /home/openfoam/RGP-13/RGP-13-realFluid
-#   ./Allwmake
+# Builds the plug-in shared library  $FOAM_USER_LIBBIN/libRGP13realFluid.so
+# from the modified Phase-1 + Phase-2 sources shipped in src/.
+#
+# Sources are kept self-contained; nothing under $WM_PROJECT_DIR is touched.
+# Cases load the result with
+#     libs ("libRGP13realFluid.so");
+# in system/controlDict.
+#
+# Usage
+#   ./Allwmake                           # auto-detect and build
+#   ./Allwmake clean                     # wclean then rebuild
+#   ./Allwmake -j 8                      # forwarded to wmake
+#   FOAM_BASHRC=/opt/openfoam13/etc/bashrc ./Allwmake
 #------------------------------------------------------------------------------
 set -e
 
-# Verify OpenFOAM environment
-if [ -z "$WM_PROJECT_DIR" ]; then
-    echo "ERROR: OpenFOAM environment not loaded."
-    echo "Run this inside the OpenFOAM-13 container (openfoam13)."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+# -----------------------------------------------------------------------------
+# Auto-source OpenFOAM environment if not already loaded
+# -----------------------------------------------------------------------------
+if [ -z "${WM_PROJECT_DIR:-}" ]; then
+    CANDIDATES=(
+        "${FOAM_BASHRC:-}"
+        "/opt/openfoam13/etc/bashrc"
+        "/usr/lib/openfoam/openfoam13/etc/bashrc"
+        "$HOME/OpenFOAM/OpenFOAM-13/etc/bashrc"
+        "$SCRIPT_DIR/../OpenFOAM-13/etc/bashrc"
+    )
+    for bashrc in "${CANDIDATES[@]}"; do
+        if [ -n "$bashrc" ] && [ -f "$bashrc" ]; then
+            echo "[info] Sourcing OpenFOAM environment: $bashrc"
+            # shellcheck disable=SC1090
+            set +u; source "$bashrc"; set -u
+            break
+        fi
+    done
+fi
+
+if [ -z "${WM_PROJECT_DIR:-}" ]; then
+    echo "ERROR: OpenFOAM-13 environment not loaded and no etc/bashrc was found."
+    echo "       Either run inside the OpenFOAM-13 container/environment, or set"
+    echo "       FOAM_BASHRC=/path/to/OpenFOAM-13/etc/bashrc before invoking."
     exit 1
 fi
 
-echo "============================================"
-echo " RGP-13 Real Fluid Models for OpenFOAM-13"
-echo "============================================"
-echo " FOAM_SRC       = $FOAM_SRC"
-echo " FOAM_USER_LIBBIN = $FOAM_USER_LIBBIN"
-echo "============================================"
-echo ""
+# -----------------------------------------------------------------------------
+# Argument parsing: pass-through to wmake, plus our own 'clean' flag
+# -----------------------------------------------------------------------------
+WMAKE_ARGS=()
+DO_CLEAN=false
+for arg in "$@"; do
+    case "$arg" in
+        clean|--clean) DO_CLEAN=true ;;
+        *)             WMAKE_ARGS+=("$arg") ;;
+    esac
+done
 
-# Create user lib directory if needed
+echo "============================================================"
+echo " RGP-13 Real Fluid Models  -  build & install"
+echo "============================================================"
+echo " WM_PROJECT_DIR    : $WM_PROJECT_DIR"
+echo " WM_OPTIONS        : ${WM_OPTIONS:-?}"
+echo " FOAM_USER_LIBBIN  : ${FOAM_USER_LIBBIN:-?}"
+echo " Source root       : $SCRIPT_DIR/src"
+echo "============================================================"
+
+# Sanity check: required source modules
+REQUIRED=(
+    "src/rfSpecie/rfSpecie.C"
+    "src/SRKGas/SRKGas.H"
+    "src/chungTransport/chungTransport.H"
+    "src/elyHanleyTransport/elyHanleyTransport.H"
+    "src/SRKchungTakaMixture/SRKchungTakaMixture.H"
+    "src/include/forRealFluidGases.H"
+    "src/include/forRealFluidGasesElyHanley.H"
+    "src/realFluidThermos.C"
+)
+for f in "${REQUIRED[@]}"; do
+    if [ ! -f "$f" ]; then
+        echo "ERROR: required source missing: $f"
+        exit 1
+    fi
+done
+
+# Ensure user lib dir exists
 mkdir -p "$FOAM_USER_LIBBIN"
 
+# Refresh lnInclude so wmake re-links against the latest headers
+if [ -d lnInclude ]; then
+    rm -rf lnInclude
+fi
+
+# Optional clean
+if $DO_CLEAN; then
+    echo "[info] wclean before rebuild"
+    wclean || true
+fi
+
+# -----------------------------------------------------------------------------
 # Build
-wmake libso
+# -----------------------------------------------------------------------------
+echo "[info] Compiling libRGP13realFluid.so ..."
+wmake libso "${WMAKE_ARGS[@]}"
+
+# -----------------------------------------------------------------------------
+# Verify and report
+# -----------------------------------------------------------------------------
+LIB="$FOAM_USER_LIBBIN/libRGP13realFluid.so"
+if [ ! -f "$LIB" ]; then
+    echo "ERROR: build appeared to succeed but $LIB is missing."
+    exit 1
+fi
 
 echo ""
-echo "============================================"
-echo " Build complete!"
-echo " Library: $FOAM_USER_LIBBIN/libRGP13realFluid.so"
-echo "============================================"
+echo "============================================================"
+echo " Build complete."
+echo "   library : $LIB"
+echo "   size    : $(du -h "$LIB" | cut -f1)"
+echo "============================================================"
 echo ""
-echo " To use in a case, add to system/controlDict:"
-echo '   libs ("libRGP13realFluid.so");'
+echo " To use in a case:"
+echo "   1) system/controlDict:"
+echo '        libs ("libRGP13realFluid.so");'
 echo ""
-echo " And set thermoType in constant/physicalProperties:"
-echo "   mixture  SRKchungTakaMixture;"
-echo "   transport chung;"
-echo "   equationOfState SRKGas;"
-echo "   specie   rfSpecie;"
-echo "============================================"
+echo "   2) constant/physicalProperties:"
+echo "        thermoType"
+echo "        {"
+echo "            type            heRhoThermo;        // or hePsiThermo"
+echo "            mixture         SRKchungTakaMixture;"
+echo "            transport       elyHanley;          // or chung"
+echo "            thermo          janaf;"
+echo "            energy          sensibleEnthalpy;"
+echo "            equationOfState SRKGas;"
+echo "            specie          rfSpecie;"
+echo "        }"
+echo "============================================================"

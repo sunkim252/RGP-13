@@ -25,6 +25,7 @@ License
 
 #include "SRKGas.H"
 #include "IOstreams.H"
+#include "Switch.H"
 
 // * * * * * * * * * * * * * * * * Constructors  * * * * * * * * * * * * * * //
 
@@ -35,7 +36,8 @@ Foam::SRKGas<Specie>::SRKGas
     const dictionary& dict
 )
 :
-    Specie(name, dict)
+    Specie(name, dict),
+    c_(0)
 {
     const scalar Tc = this->Tc();
     const scalar Pc = this->Pc();
@@ -53,6 +55,27 @@ Foam::SRKGas<Specie>::SRKGas
     coef2_ = a*2*S*(1 + S)/sqrt(Tc);
 
     coef3_ = a*sqr(S)/Tc;
+
+    // Optional Peneloux volume translation
+    // (Peneloux, Rauzy & Freze, Fluid Phase Equilib. 8 (1982) 7-23).
+    // Entry forms accepted inside the species subDict "rfProperties":
+    //   1. Explicit shift:   c  <scalar>;            // [m^3/kmol]
+    //   2. Automatic form:   penelouxShift true;     // uses Rackett Z_RA
+    // Rackett compressibility Z_RA from Spencer & Danner, J. Chem. Eng. Data
+    // 17 (1972) 236-241:  Z_RA = 0.29056 - 0.08775 * omega.
+    // Recommended shift (Peneloux 1982, Eq. 10):
+    //   c = 0.40768 * (0.29441 - Z_RA) * R * Tc / Pc
+    const dictionary& rfDict = dict.subDict("rfProperties");
+    if (rfDict.found("c"))
+    {
+        c_ = rfDict.lookup<scalar>("c");
+    }
+    else if (rfDict.lookupOrDefault<Switch>("penelouxShift", false))
+    {
+        const scalar Zra = 0.29056 - 0.08775*omega;
+        c_ = 0.40768*(0.29441 - Zra)
+            *Foam::constant::thermodynamic::RR*Tc/Pc;
+    }
 }
 
 
