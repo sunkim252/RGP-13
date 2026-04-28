@@ -209,7 +209,16 @@ inline Foam::scalar Foam::elyHanleyTransport<Thermo>::muRef
     // exponential form of HHM diverges at rho_r > 3, so we clip and use
     // a polynomial approximation valid for 0 <= rho_r <= 3; any residual
     // dense-branch error is absorbed by the Enskog X_eta correction.
-    const scalar T_clip = max(50.0, min(TO, 3000.0));
+    //
+    // T_clip lower bound is a numerical safeguard against TO <= 0 from
+    // a transient solver state. Upper bound is set to 1e5 K so it never
+    // triggers in normal operation: with the previous cap of 3000 K and
+    // a low-Tc fluid like H2 (fx ~ 0.15) we hit TO = 3000 K already at
+    // T = 444 K, which froze mu_o*(TO) and produced a flat plateau in
+    // mu(T), kappa(T) above that temperature. The Sutherland fit
+    // extrapolates monotonically with the asymptote mu ~ T^(1/2) for
+    // T >> S, so removing the cap is safe.
+    const scalar T_clip = max(1.0, min(TO, 1.0e5));
 
     // Sutherland-form dilute-gas viscosity of methane, coefficients fitted
     // directly against CoolProp (Setzmann & Wagner 1991 EoS + Friend et al.
@@ -255,7 +264,12 @@ inline Foam::scalar Foam::elyHanleyTransport<Thermo>::lambdaRef
     // Hanley-Haynes-McCarty 1975 thermal conductivity data at T_r = 2,
     // clipped for 0 <= rho_r <= 3. Mixture-level Enskog X_lam absorbs
     // any residual dense-fluid bias.
-    const scalar T_clip = max(50.0, min(TO, 3000.0));
+    //
+    // T_clip bounds match muRef: a numerical safeguard at the low end,
+    // and 1e5 K at the high end so light fluids (H2, fx ~ 0.15) don't
+    // saturate at modest physical temperatures. Sutherland is bounded
+    // for T > 0 so the loose cap is harmless.
+    const scalar T_clip = max(1.0, min(TO, 1.0e5));
 
     // Dilute-gas lambda of methane via Sutherland form calibrated directly
     // against CoolProp (Friend, Ingham & Ely 1991 for transport, Setzmann &
