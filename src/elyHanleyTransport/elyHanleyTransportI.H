@@ -86,26 +86,36 @@ inline Foam::scalar Foam::elyHanleyTransport<Thermo>::softClamp
     const scalar w
 )
 {
-    // Piecewise quadratic Hermite blend.
-    //   x <= lo - w           : lo                          (constant)
-    //   lo - w < x <= lo + w  : lo + (x - (lo - w))^2/(4 w) (smooth ramp)
-    //   lo + w  < x <  hi - w : x                           (identity)
-    //   hi - w <= x <  hi + w : hi - (hi + w - x)^2/(4 w)   (smooth ramp)
-    //   x >= hi + w           : hi                          (constant)
-    // Continuity (C^0) and slope continuity (C^1) are exact at every
-    // junction, so derivatives propagated downstream (dfx/dT, X_eta,
-    // X_lam, mu, kappa) are smooth across the boundaries.
+    // Piecewise quintic Hermite blend (C^2 continuous everywhere).
+    //
+    //   x <= lo - w           : lo                                       (constant)
+    //   lo - w < x <= lo + w  : lo + t^3/(4 w^2) - t^4/(16 w^3)          (smooth ramp)
+    //   lo + w  < x <  hi - w : x                                        (identity)
+    //   hi - w <= x <  hi + w : (hi-w) + t - t^3/(4 w^2) + t^4/(16 w^3)  (smooth ramp)
+    //   x >= hi + w           : hi                                       (constant)
+    //
+    // Quintic chosen so that value, first derivative, AND second
+    // derivative are continuous at every junction (the previous quadratic
+    // form was C^1 only — its second-derivative jump produced visible
+    // kinks in kappa(T) for H2O after the dfx/dT FD propagated through
+    // the X_lambda Enskog factor).
     if (x <= lo - w) return lo;
     if (x >= hi + w) return hi;
     if (x < lo + w)
     {
-        const scalar t = x - (lo - w);
-        return lo + t*t/(4.0*w);
+        const scalar t  = x - (lo - w);
+        const scalar t2 = t*t;
+        const scalar t3 = t2*t;
+        const scalar t4 = t2*t2;
+        return lo + t3/(4.0*w*w) - t4/(16.0*w*w*w);
     }
     if (x > hi - w)
     {
-        const scalar t = x - (hi - w);
-        return (hi - w) + t - t*t/(4.0*w);
+        const scalar t  = x - (hi - w);
+        const scalar t2 = t*t;
+        const scalar t3 = t2*t;
+        const scalar t4 = t2*t2;
+        return (hi - w) + t - t3/(4.0*w*w) + t4/(16.0*w*w*w);
     }
     return x;
 }
@@ -122,11 +132,19 @@ inline Foam::scalar Foam::elyHanleyTransport<Thermo>::phiShape
     // Leach, Chappelear & Leland 1968 (AIChE J. 14, 568) correlation
     // for the volume shape factor phi. Bounds on V_r, T_r are taken
     // from Oefelein (AIAA 2019-0634) Eqs. (45)-(46) but applied via a
-    // C^1-continuous soft clamp so dphi/dT remains continuous when
-    // T_r leaves the [0.5, 2.0] band.
-    // Transition half-width w = 0.05 keeps the polynomial unchanged on
-    // [0.55, 1.95] and removes the kinks at T_r = 0.5 and T_r = 2.0.
-    const scalar w = 0.05;
+    // C^2-continuous quintic soft clamp so dphi/dT and d2phi/dT^2 stay
+    // continuous when T_r leaves the [0.5, 2.0] band — required to
+    // keep kappa(T) C^1 after the dfx/dT FD propagates through the
+    // Enskog X factor.
+    // Transition half-width w = 0.25 (~0.25 T_c on each boundary,
+    // ~325 K wide for H2O). The Enskog X factor drops by ~13 % across
+    // the transition because dfx/dT decays from its identity-zone
+    // value to zero outside; with w = 0.10 that drop landed inside
+    // a single dT = 50 K sample window and was visible as a kink in
+    // kappa(T) and mu(T). w = 0.25 spreads the transition over ~6
+    // sample points, making the C^2 quintic blend visually smooth.
+    // Polynomial is unchanged on [0.75, 1.75].
+    const scalar w = 0.25;
     const scalar Vp = softClamp(Vri, 0.5, 2.0, w);
     const scalar Tp = softClamp(Tri, 0.5, 2.0, w);
     // Leach-Chappelear-Leland 1968 Table 1 coefficients (methane ref).
@@ -149,9 +167,10 @@ inline Foam::scalar Foam::elyHanleyTransport<Thermo>::thetaShape
 ) const
 {
     // Leach, Chappelear & Leland 1968 correlation for theta (Oefelein
-    // Eq. 44). Soft-clamped on V_r, T_r as in phiShape so that dtheta/dT
-    // (and the downstream Enskog correction) stays C^1.
-    const scalar w = 0.05;
+    // Eq. 44). Soft-clamped on V_r, T_r as in phiShape (C^2 quintic,
+    // w = 0.10) so that dtheta/dT, d2theta/dT^2 and consequently the
+    // Enskog X factor are all continuous across the boundaries.
+    const scalar w = 0.25;
     const scalar Vp = softClamp(Vri, 0.5, 2.0, w);
     const scalar Tp = softClamp(Tri, 0.5, 2.0, w);
     const scalar b1 =  0.0892;  // c_theta1
