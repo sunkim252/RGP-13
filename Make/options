@@ -4,6 +4,7 @@ EXE_INC = \
     -Isrc/chungTransport \
     -Isrc/elyHanleyTransport \
     -Isrc/SRKchungTakaMixture \
+    -Isrc/SRKelyHanleyMixture \
     -Isrc/FGM \
     -Isrc/include \
     -I$(LIB_SRC)/physicalProperties/lnInclude \

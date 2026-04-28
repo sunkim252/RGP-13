@@ -549,42 +549,9 @@ inline void Foam::elyHanleyTransport<Thermo>::updateTRANS
 }
 
 
-template<class Thermo>
-inline void Foam::elyHanleyTransport<Thermo>::updateTRANS
-(
-    const scalar& sigmaM,
-    const scalar& epsilonkM,
-    const scalar& MM,
-    const scalar& VcM,
-    const scalar& TcM,
-    const scalar& omegaM,
-    const scalar& miuiM,
-    const scalar& kappaiM,
-    const List<scalar>& Ymd,
-    const List<scalar>& Xmd,
-    const List<List<scalar>>& Tcmd,
-    const List<List<scalar>>& Pcmd,
-    const List<List<scalar>>& Mmd,
-    const List<List<scalar>>& sigmd
-)
-{
-    // Chung-signature adapter: kept so SRKchungTakaMixture can drive
-    // either chungTransport or elyHanleyTransport without changes.
-    // sigmaM, epsilonkM, miuiM, kappaiM are unused by the Ely-Hanley
-    // branch (no Chung fallback after the standalone refactor).
-    (void)sigmaM; (void)epsilonkM; (void)miuiM; (void)kappaiM;
-    // VcM arrives from SRKchungTakaMixture in cm^3/mol (rfSpecie units);
-    // convert to m^3/kmol for internal consistency with the elyHanley
-    // class, where the reference VcO_ is stored in m^3/kmol.
-    const scalar VcM_SI = VcM*1e-3;
-    const scalar ZcPitzer = 0.291 - 0.08*omegaM;
-    updateTRANS
-    (
-        TcM, VcM_SI, MM, omegaM,
-        (ZcPitzer > 0.0 ? ZcPitzer : 0.29),
-        Ymd, Xmd, Tcmd, Pcmd, Mmd, sigmd
-    );
-}
+// Chung-style 8-arg updateTRANS adapter removed: SRKelyHanleyMixture now
+// drives the native 5-arg signature directly, supplying its own
+// mass-weighted Z_c,m instead of the previous Pitzer fallback.
 
 
 // * * * * * * * * * * * * * Member Operators * * * * * * * * * * * * * * //

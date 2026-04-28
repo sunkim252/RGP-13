@@ -280,28 +280,6 @@ public:
             const List<List<scalar>>& sigmd
         );
 
-        //- Update with Chung-style signature so that SRKchungTakaMixture
-        //  can drive either transport backend without changes.
-        //  sigmaM, epsilonkM, miuiM, kappaiM are accepted but unused.
-        //  ZcM is estimated via Pitzer correlation Zc ~ 0.291 - 0.08*omega.
-        inline void updateTRANS
-        (
-            const scalar& sigmaM,
-            const scalar& epsilonkM,
-            const scalar& MM,
-            const scalar& VcM,
-            const scalar& TcM,
-            const scalar& omegaM,
-            const scalar& miuiM,
-            const scalar& kappaiM,
-            const List<scalar>& Ymd,
-            const List<scalar>& Xmd,
-            const List<List<scalar>>& Tcmd,
-            const List<List<scalar>>& Pcmd,
-            const List<List<scalar>>& Mmd,
-            const List<List<scalar>>& sigmd
-        );
-
         //- Access functions
         inline scalar TcM()    const { return TcM_; }
         inline scalar VcM()    const { return VcM_; }

@@ -13,6 +13,7 @@ Description
 #include "psiMulticomponentThermo.H"
 #include "rhoFluidMulticomponentThermo.H"
 #include "SRKchungTakaMixture.H"
+#include "SRKelyHanleyMixture.H"
 #include "forRealFluidGases.H"
 #include "forRealFluidGasesElyHanley.H"
 #include "makeFluidMulticomponentThermo.H"
@@ -21,7 +22,7 @@ Description
 
 namespace Foam
 {
-    // ---------------- chungTransport backend ----------------
+    // ---------------- chungTransport backend (Phase 1) ----------------
     // psi-based (compressible)
     forRealFluidGases
     (
@@ -41,13 +42,16 @@ namespace Foam
     );
 
     // ---------------- elyHanleyTransport backend (Phase 2) ----------------
+    //   Drives the elyHanleyTransport native 5-arg updateTRANS signature
+    //   from SRKelyHanleyMixture (no Chung adapter, no Pitzer fallback
+    //   for Z_c,m).
     // psi-based (compressible)
     forRealFluidGasesEH
     (
         makeFluidMulticomponentThermos,
         psiThermo,
         psiMulticomponentThermo,
-        SRKchungTakaMixture
+        SRKelyHanleyMixture
     );
 
     // rho-based (density-direct)
@@ -56,7 +60,7 @@ namespace Foam
         makeFluidMulticomponentThermos,
         rhoFluidThermo,
         rhoFluidMulticomponentThermo,
-        SRKchungTakaMixture
+        SRKelyHanleyMixture
     );
 }
 
