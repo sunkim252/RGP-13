@@ -233,9 +233,16 @@ inline Foam::scalar Foam::elyHanleyTransport<Thermo>::muRef
     // Dense-gas cubic-in-reduced-density residual, coefficients obtained by
     // least-squares fit against CoolProp methane residuals on a Tr in [1, 8]
     // x rho_r in [0.1, 3] grid. Residual RMS error < 5% on the fitting grid.
-    const scalar rho_gcc = rhoO/1000.0;
+    //
+    // Upper bound rho_r = 3 is the validity edge of the cubic fit; a hard
+    // clip there left dDelta_mu/dT C^0 (slope discontinuous), which surfaced
+    // as a kink in mu(T), kappa(T) at the T where rho_o crosses 3 rho_c,o
+    // (e.g. H2O at 250 bar around T = 465 K). Applied via softClamp with
+    // a wide-open lower limit so only the upper boundary is smoothed.
+    const scalar rho_gcc   = rhoO/1000.0;
     const scalar rho_c_gcc = MO_/(VcO_*1000.0);
-    const scalar rho_r = min(max(rho_gcc/max(rho_c_gcc, 1e-20), 0.0), 3.0);
+    const scalar rho_r_raw = max(0.0, rho_gcc/max(rho_c_gcc, 1e-20));
+    const scalar rho_r     = softClamp(rho_r_raw, -10.0, 3.0, 0.30);
 
     const scalar alpha = 2.1471e-6;        // CoolProp-fitted
     const scalar beta  = 6.2768e-6;
@@ -284,9 +291,12 @@ inline Foam::scalar Foam::elyHanleyTransport<Thermo>::lambdaRef
 
     // Dense-gas cubic-in-reduced-density residual, coefficients fitted to
     // CoolProp methane over Tr in [1, 8] x rho_r in [0.1, 3].
-    const scalar rho_gcc = rhoO/1000.0;
+    // Upper bound rho_r = 3 soft-clamped (see muRef) to keep dkappa/dT
+    // continuous when rho_o crosses 3 rho_c,o.
+    const scalar rho_gcc   = rhoO/1000.0;
     const scalar rho_c_gcc = MO_/(VcO_*1000.0);
-    const scalar rho_r = min(max(rho_gcc/max(rho_c_gcc, 1e-20), 0.0), 3.0);
+    const scalar rho_r_raw = max(0.0, rho_gcc/max(rho_c_gcc, 1e-20));
+    const scalar rho_r     = softClamp(rho_r_raw, -10.0, 3.0, 0.30);
 
     const scalar aL =  7.1006e-2;
     const scalar bL = -5.9848e-2;
