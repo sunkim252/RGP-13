@@ -216,6 +216,14 @@ protected:
         //- True when at least one tabulated Lewis-number field is active.
         bool tabLewis_;
 
+        //- Set once the manifold species fields have been filled at least once.
+        //  The 106 tabulated Y_ are DERIVED (never transported) and the mixture
+        //  reads only tabulated aggregates (RG_*/Le + sumX==1), so the per-cell
+        //  Y interpolation -- the bulk of updateManifold -- only needs to run
+        //  for output. updateManifold() fills Y on the first call and on write
+        //  steps; otherwise it skips it (mu/kappa/rho/EOS stay bit-identical).
+        bool manifoldYFilled_;
+
         //- Multivariate convection field table (he, Z, C)
         multivariateSurfaceInterpolationScheme<scalar>::fieldTable fields;
 

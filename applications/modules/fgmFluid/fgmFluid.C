@@ -116,6 +116,8 @@ Foam::solvers::fgmFluid::fgmFluid(fvMesh& mesh)
 
     tabLewis_(false),
 
+    manifoldYFilled_(false),
+
     thermophysicalTransport
     (
         fluidMulticomponentThermophysicalTransportModel::New
@@ -789,6 +791,19 @@ void Foam::solvers::fgmFluid::updateManifold()
     const List<scalar>* LeZtbl = fillLeZ ? &fgmTable_.LeTable("Z") : nullptr;
     const List<scalar>* LeCtbl = fillLeC ? &fgmTable_.LeTable("C") : nullptr;
 
+    // The tabulated species Y_ are DERIVED, never transported. The mixture reads
+    // them only via compositionToX (mu/kappa use sumX==1, base thermo comes from
+    // the Opt-1 node blend), so on internal cells mu/kappa/rho/EOS are Y-value-
+    // independent and the 106-field Y interpolation -- the bulk of updateManifold
+    // -- is needed only for output. OPT-IN 'deferManifoldY' skips it except on
+    // the first call and write steps; a residual ~1e-5 (patch-face fallback /
+    // composition path) makes it non-bit-identical, negligible for LES but not
+    // enabled by default. Default (flag off) fills Y every call = bit-identical.
+    const bool deferY =
+        fgmTable_.lookupOrDefault<Switch>("deferManifoldY", false);
+    const bool fillY =
+        !deferY || !manifoldYFilled_ || mesh.time().writeTime();
+
     // Tabulated temperature: the FPV/FGM thermochemical state (T and the
     // composition) is a FUNCTION of the manifold coordinates (Z, gZ, c, chi)
     // -- it is LOOKED UP here, not advanced by a transported energy equation.
@@ -858,9 +873,12 @@ void Foam::solvers::fgmFluid::updateManifold()
         srcc[celli] =
             sourcePVscale_*rho_l*fgmTable_.interpolate(srcTbl, st);
         Tc[celli] = fgmTable_.interpolate(Ttbl, st);
-        forAll(Yref, k)
+        if (fillY)
         {
-            (*Yref[k])[celli] = fgmTable_.interpolate(*Ytbl[k], st);
+            forAll(Yref, k)
+            {
+                (*Yref[k])[celli] = fgmTable_.interpolate(*Ytbl[k], st);
+            }
         }
 
         // Tier-2: per-cell real-gas mixture coefficients.
@@ -888,9 +906,13 @@ void Foam::solvers::fgmFluid::updateManifold()
     chi_st_.correctBoundaryConditions();
     if (fillLeZ) { LeZField_->correctBoundaryConditions(); }
     if (fillLeC) { LeCField_->correctBoundaryConditions(); }
-    forAll(tabSpecieIDs_, k)
+    if (fillY)
     {
-        Y_[tabSpecieIDs_[k]].correctBoundaryConditions();
+        forAll(tabSpecieIDs_, k)
+        {
+            Y_[tabSpecieIDs_[k]].correctBoundaryConditions();
+        }
+        manifoldYFilled_ = true;
     }
 
     // Opt-2: fill the patch-face real-gas coefficients from the manifold so the
