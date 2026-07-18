@@ -195,6 +195,19 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
     (
         pimple.dict().lookupOrDefault<Switch>("pepFull", false)
     );
+    // v2 term-isolation switches for the 1-D benchmark: pepAdvect enables the
+    // pressure-advection term alone, pepRHS the diffusive-expansion RHS alone.
+    // pepFull implies both. Each read every step.
+    const Switch pepAdvect
+    (
+        pepFull
+     || pimple.dict().lookupOrDefault<Switch>("pepAdvect", false)
+    );
+    const Switch pepRHS
+    (
+        pepFull
+     || pimple.dict().lookupOrDefault<Switch>("pepRHS", false)
+    );
     volScalarField psis
     (
         "psis",
@@ -313,15 +326,30 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
     // (2) RHS (gamma-1)*psis*laplacian(Dh, h): the diffusive expansion source
     //     of the full pressure-evolution equation, discretised with the SAME
     //     Deff("h") as the h transport for consistency.
-    if (pepFull)
+    if (pepAdvect)
     {
         const surfaceScalarField phivAdv("phivAdv", phi/rhof);
+        // psis face value: HARMONIC mean (v2) -- the arithmetic interpolate
+        // over-weights the soft-gas side across the ~250x psis jump, leaving
+        // a discrete residual in the div(F p) - p div(F) identity that acts
+        // as a spurious source at the interface (v1 suspect #3).
         const surfaceScalarField Fpsis
         (
-            "Fpsis", fvc::interpolate(psis)*phivAdv
+            "Fpsis", (1.0/fvc::interpolate(1.0/psis))*phivAdv
         );
-        pDDtEqn += fvm::div(Fpsis, p) - fvm::Sp(fvc::div(Fpsis), p);
-
+        // v2.2: EXPLICIT advection source. Implicit forms (fvm::div + Sp or
+        // SuSp pairs, v1/v2.1) both blew up on the 1-D benchmark -- the
+        // CONCEPTUAL flaw is that the PIMPLE pressure equation is a
+        // CORRECTION-form solve, and advecting the FULL p implicitly inside
+        // it mixes correction and total quantities (Terashima-Koshi advance p
+        // directly, outside a correction structure). Explicit treatment keeps
+        // the matrix symmetric (PCG-compatible) and defers the advection to
+        // the outer-corrector lag, which nOuter >= 2 absorbs.
+        pDDtEqn +=
+            fvc::div(Fpsis*fvc::interpolate(p)) - p*fvc::div(Fpsis);
+    }
+    if (pepRHS)
+    {
         if (fgmTable_.useEnthalpy())
         {
             const volScalarField& h = hPtr_();
