@@ -179,10 +179,26 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
     (
         pimple.dict().lookupOrDefault<Switch>("psisIsentropic", false)
     );
+    // pepFull (2026-07-18): COMPLETE Terashima-Koshi pressure-evolution
+    // equation. The half-PEP (isentropic diagonal alone) measurably WORSENED
+    // the interface trap metrics (A/B: dome capped cells 23.6k -> 76.8k,
+    // downstream 3.9k -> 28.1k over one equal segment) because the full
+    // formulation balances the acoustically-correct diagonal with TWO terms
+    // the lite version lacks:
+    //   psis*(dp/dt + u.grad(p)) + div(u) = (gamma-1)*psis*div(Deff grad h)
+    // (Terashima & Koshi JCP 231 (2012) 6907, volumetric form; the RHS is the
+    // thermal/species-diffusion expansion source written with the SAME
+    // effective enthalpy diffusivity as the h equation for discrete
+    // consistency; reaction expansion enters through the per-corrector
+    // rho(T) refresh). pepFull implies the isentropic diagonal. Default off.
+    const Switch pepFull
+    (
+        pimple.dict().lookupOrDefault<Switch>("pepFull", false)
+    );
     volScalarField psis
     (
         "psis",
-        psisIsentropic
+        (psisIsentropic || pepFull)
       ? volScalarField(thermo.psi()/(rho*thermo.gamma()))
       : volScalarField(thermo.psi()/rho)
     );
@@ -289,6 +305,32 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
       + fvc::div(phiHbyAv)
       - fvc::laplacian(Dr, rho)/rho
     );
+
+    // --- pepFull: pressure ADVECTION + energy-diffusion RHS ----------------
+    // (1) psis*(u.grad p) in exact flux form: div(F p) - p div(F) = F.grad(p)
+    //     with F = psisf * (volumetric flux). Uses the CURRENT mass flux
+    //     phi/rhof (last corrector) as the advecting velocity.
+    // (2) RHS (gamma-1)*psis*laplacian(Dh, h): the diffusive expansion source
+    //     of the full pressure-evolution equation, discretised with the SAME
+    //     Deff("h") as the h transport for consistency.
+    if (pepFull)
+    {
+        const surfaceScalarField phivAdv("phivAdv", phi/rhof);
+        const surfaceScalarField Fpsis
+        (
+            "Fpsis", fvc::interpolate(psis)*phivAdv
+        );
+        pDDtEqn += fvm::div(Fpsis, p) - fvm::Sp(fvc::div(Fpsis), p);
+
+        if (fgmTable_.useEnthalpy())
+        {
+            const volScalarField& h = hPtr_();
+            const volScalarField DhP("DhP", Deff("h"));
+            pDDtEqn -=
+                (thermo.gamma() - scalar(1))*psis
+               *fvc::laplacian(DhP, h);
+        }
+    }
 
     while (pimple.correctNonOrthogonal())
     {
