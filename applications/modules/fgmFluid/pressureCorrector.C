@@ -341,9 +341,52 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
     (
         pimple.dict().lookupOrDefault<scalar>("pMaxPa", scalar(0))
     );
+    // pMaxXmin (2026-07-18): x-gate the upper pressure cap. The LOX dome
+    // tangential-jet impingement stagnation is PHYSICAL up to
+    // rho U^2/2 ~ 1100*(240)^2/2 ~ 3.2e7 Pa; a global pMaxPa sized for the
+    // annulus-interface trap (~1e7) CLIPS that physics (observed: 77% of the
+    // capped cells sitting in the dome at the injection radius). Applying the
+    // cap only for cells with x > pMaxXmin (default -GREAT = everywhere)
+    // leaves the dome unclipped while still guarding the downstream
+    // liquid-film/interface region. Read each step (runTimeModifiable).
+    const scalar pMaxXmin
+    (
+        pimple.dict().lookupOrDefault<scalar>("pMaxXmin", -great)
+    );
+    // pMaxPaDome (2026-07-18): two-tier cap. Releasing the dome entirely
+    // (pMaxXmin gating alone) let the SAME trapped-pressure instability
+    // re-inflate THERE (observed 54,127 bar at the LOX dome, 170x the
+    // physical jet-stagnation ~317 bar) -- the dome liquid shares the
+    // stiff-liquid pEqn trap mechanism with the annulus film. The dome
+    // therefore needs its own, LOOSER cap: high enough for physical
+    // impingement stagnation (rho U^2/2 ~ 3.2e7), low enough to break the
+    // runaway loop. Default 0 = dome uncapped. Read each step.
+    const scalar pMaxPaDome
+    (
+        pimple.dict().lookupOrDefault<scalar>("pMaxPaDome", scalar(0))
+    );
     if (pMaxPa > 0)
     {
-        p = min(p, dimensionedScalar("pMaxPa", p.dimensions(), pMaxPa));
+        if (pMaxXmin > -great/2)
+        {
+            const vectorField& cc = mesh.C().primitiveField();
+            scalarField& pf = p.primitiveFieldRef();
+            forAll(pf, celli)
+            {
+                if (cc[celli].x() > pMaxXmin)
+                {
+                    if (pf[celli] > pMaxPa) pf[celli] = pMaxPa;
+                }
+                else if (pMaxPaDome > 0 && pf[celli] > pMaxPaDome)
+                {
+                    pf[celli] = pMaxPaDome;
+                }
+            }
+        }
+        else
+        {
+            p = min(p, dimensionedScalar("pMaxPa", p.dimensions(), pMaxPa));
+        }
         p.correctBoundaryConditions();
     }
 
@@ -368,7 +411,27 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
     // its min and the surgical max) -- only the pMinPa floor was active.
     fvConstraints().constrain(p);
 
-    U = HbyA - rAAtU*fvc::grad(p);
+    // faceGradP: balanced-force face-consistent pressure gradient for the CELL
+    // velocity update. The Green-Gauss fvc::grad(p) rings cell-to-cell at the
+    // stiff liquid/gas interface (annulus rho 870<->30) while the FACE snGrad
+    // driving phi stays smooth -- the observed cell-U checkerboard with a
+    // coherent phi. Reconstructing the gradient FROM the face snGrad makes the
+    // cell velocity feel exactly the face pressure differences that drive the
+    // flux, removing the decoupling mechanism at the same operation count
+    // (Francois et al., balanced-force, JCP 213 (2006) 141; interFoam-family
+    // standard). Read each step (runTimeModifiable); default off.
+    const Switch faceGradP
+    (
+        pimple.dict().lookupOrDefault<Switch>("faceGradP", false)
+    );
+    if (faceGradP)
+    {
+        U = HbyA - rAAtU*fvc::reconstruct(fvc::snGrad(p)*mesh.magSf());
+    }
+    else
+    {
+        U = HbyA - rAAtU*fvc::grad(p);
+    }
     U.correctBoundaryConditions();
     fvConstraints().constrain(U);
     K = 0.5*magSqr(U);
