@@ -50,6 +50,9 @@ Description
 #include "fvmLaplacian.H"
 #include "fvcLaplacian.H"
 #include "fvcAverage.H"
+#include "fvmDdt.H"
+#include "fvmSup.H"
+#include "upwind.H"
 #include "zeroGradientFvPatchFields.H"
 
 // * * * * * * * * * * * * * * Member Functions  * * * * * * * * * * * * * * //
@@ -100,7 +103,37 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
     // pressure solution
     const volScalarField psip0(psi*p);
 
-    const surfaceScalarField rhof(fvc::interpolate(rho));
+    // Face density used to (a) convert the RC transient term to volumetric and
+    // (b) RECONSTRUCT the mass flux from the solved volumetric flux (below).
+    //
+    // 'rhofUpwind' (default off, read each step): use the UPWIND (donor-cell)
+    // density instead of the linear interpolate. Rationale, ported from the
+    // real-fluid literature: the spurious pressure/velocity at a transcritical
+    // contact is attributed to FLUX INCONSISTENCY at the face -- the PEP
+    // condition of the conservative schemes is precisely an algebraic
+    // consistency requirement between the numerical energy flux and the
+    // numerical MASS flux (dF_rhoe = alpha_hat*dF_rho; EPEP-RG, arXiv:2605.03617),
+    // and the double-flux family removes the oscillation by evaluating the
+    // face state TWICE from the two donor cells rather than once from an
+    // averaged state (Ma, Lv & Ihme, JCP 340 (2017) 330).
+    //
+    // The same inconsistency exists here in discrete form: the convection
+    // operators transport with the UPWIND density while phi is rebuilt with a
+    // LINEARLY interpolated rhof. Across the LOX/gas contact (rho 25-60x) the
+    // two disagree by O(rho_ratio) -- the identical defect already measured and
+    // fixed on the Courant number (see setRDeltaT.C 'densityConsistentCourant',
+    // maxCo_eff ~0.001 vs the target 0.2).
+    const Switch rhofUpwind
+    (
+        pimple.dict().lookupOrDefault<Switch>("rhofUpwind", false)
+    );
+    const surfaceScalarField rhof
+    (
+        "rhof",
+        rhofUpwind
+      ? upwind<scalar>(mesh, phi).interpolate(rho)
+      : fvc::interpolate(rho)
+    );
 
     const volScalarField rAU("rAU", 1.0/UEqn.A());
     const surfaceScalarField rhorAUf("rhorAUf", fvc::interpolate(rho*rAU));
@@ -222,6 +255,96 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
         psis.correctBoundaryConditions();
     }
 
+    // --- psisAdvect: ADVECTED acoustic coefficient (RFQC port) ---------------
+    // The quasi-conservative real-fluid family does NOT re-evaluate the
+    // thermodynamic coefficient pointwise from the cubic EOS every step at a
+    // contact: the double-flux model FREEZES gamma* = rho c^2/p and e*_0 over
+    // the step (Ma, Lv & Ihme, JCP 340 (2017) 330), and its generalisation RFQC
+    // ADVECTS the Grueneisen-related coefficient xi = h/c^2 and the remainder
+    // E0 with the material, d_t xi + u.grad(xi) = 0 (Bai et al., JCP 564 (2026)
+    // 115156), recovering p = (rho e - E0)/xi. Pointwise re-evaluation is what
+    // injects the spurious pressure, because the coefficient jumps
+    // discontinuously as the interface sweeps a cell.
+    //
+    // In a PRESSURE-BASED solver the acoustic coefficient is not an energy-flux
+    // weight but the pEqn DIAGONAL psis = kappa (d rho/dp)/rho. No published
+    // pressure-based double-flux implementation exists (all are density-based;
+    // the open question in the literature is exactly WHAT the freeze should
+    // modify in a segregated algorithm), so the port here is: transport psis as
+    // its own scalar with a slow relaxation back to the EOS value, and use the
+    // transported field as the pEqn diagonal.
+    //
+    //     d(psisStar)/dt + div(phiv, psisStar) = (psisEOS - psisStar)/tau
+    //
+    // tau is a PHYSICAL relaxation time, so the formulation is well defined
+    // under LTS (where "frozen over the time step" is ambiguous -- the local
+    // dt differs per cell). tau -> 0 recovers the present pointwise EOS value;
+    // tau -> large is a pure freeze. The relaxation is the continuous analogue
+    // of the RFQC re-projection (local O(dt^2), global O(dt) there).
+    //
+    // psisAdvect (default off) + psisTau [s] (default 1e-5), read each step.
+    const Switch psisAdvect
+    (
+        pimple.dict().lookupOrDefault<Switch>("psisAdvect", false)
+    );
+    if (psisAdvect)
+    {
+        const dimensionedScalar psisTau
+        (
+            "psisTau",
+            dimTime,
+            pimple.dict().lookupOrDefault<scalar>("psisTau", 1e-5)
+        );
+
+        if (!mesh.foundObject<volScalarField>("psisStar"))
+        {
+            // zeroGradient BCs so the implicit psisEqn can form patch
+            // coefficients (psis itself carries 'calculated' BCs, which have no
+            // matrix contribution and abort in valueInternalCoeffs).
+            mesh.objectRegistry::store
+            (
+                new volScalarField
+                (
+                    IOobject
+                    (
+                        "psisStar",
+                        runTime.name(),
+                        mesh,
+                        IOobject::READ_IF_PRESENT,
+                        IOobject::AUTO_WRITE
+                    ),
+                    psis,
+                    wordList
+                    (
+                        mesh.boundary().size(),
+                        zeroGradientFvPatchField<scalar>::typeName
+                    )
+                )
+            );
+        }
+
+        volScalarField& psisStar =
+            mesh.lookupObjectRef<volScalarField>("psisStar");
+
+        const surfaceScalarField phivPsis("phivPsis", phi/rhof);
+
+        fvScalarMatrix psisEqn
+        (
+            fvm::ddt(psisStar)
+          + fvm::div(phivPsis, psisStar)
+          + fvm::Sp(1.0/psisTau, psisStar)
+         ==
+            psis/psisTau
+        );
+        psisEqn.solve();
+
+        // Positivity guard: the pEqn diagonal must stay strictly positive.
+        psisStar.max(SMALL*dimensionedScalar(psis.dimensions(), 1));
+        psisStar.correctBoundaryConditions();
+
+        psis = psisStar;
+    }
+
     // Volumetric predicted face flux with the RHO-CONSISTENT transient
     // Rhie-Chow correction (C2 proper). The base compressible form is the MASS
     // flux  rhof*fvc::flux(HbyA) + rhorAUf*fvc::ddtCorr(rho,U,phi,rhoUf)
@@ -277,6 +400,34 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
     (
         pimple.dict().lookupOrDefault<scalar>("LADrhoCoeff", scalar(0))
     );
+    // ladOddEven: gate the AMD by a Jameson-type odd-even (checkerboard)
+    // detector on PRESSURE, so the mass diffusion fires ONLY on the spurious
+    // interface cells and not on the physical LOx/gas contact or the physical
+    // high-speed jet. The plain |grad rho| sensor cannot distinguish the two:
+    // BOTH the physical contact and the spurious spike carry a steep density
+    // gradient, so boosting LADrhoCoeff globally smears the physical jet
+    // (measured: the physical cold-flow ceiling is ~112 m/s Bernoulli, yet the
+    // spurious tail reaches the limitU clamp of 800). The distinguishing
+    // signature is PRESSURE: across a real contact the pressure is smooth
+    // (mechanical equilibrium) while the spurious velocity is driven by a
+    // cell-to-cell pressure CHECKERBOARD. The detector
+    //   theta = |lap(p)|*dx^2 / (|lap(p)|*dx^2 + |grad(p)|*dx + eps)  in [0,1)
+    // is the ratio of the undivided 2nd difference to the 1st difference: ~1 at
+    // an odd-even oscillation (2nd diff >> 1st diff), ~0 for a smooth or
+    // monotone pressure field, and ~0 in quiescent cells (eps dominates). With
+    // the gate on, LADrhoCoeff can be pushed hard (2-4) to dissipate the
+    // spurious spike WITHOUT touching the 95% physical bulk -- unlike the
+    // earlier uniform LAD boost (Seg A), which smeared everything and worsened
+    // dt. ladOddEven default off; read each step. epsPa is the quiescent-cell
+    // pressure floor (default 1e3 Pa).
+    const Switch ladOddEven
+    (
+        pimple.dict().lookupOrDefault<Switch>("ladOddEven", false)
+    );
+    const scalar ladEpsPa
+    (
+        pimple.dict().lookupOrDefault<scalar>("ladEpsPa", scalar(1e3))
+    );
     volScalarField Dr
     (
         IOobject
@@ -297,7 +448,7 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
         // Dimensionless density-gradient sensor in [0,1]: the relative rho
         // change across a cell, CAPPED at 1 so the spurious spike itself (huge
         // |grad rho|) cannot drive the coefficient past the diffusive-CFL limit.
-        const scalarField sensor
+        scalarField sensor
         (
             min
             (
@@ -305,6 +456,21 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
                 scalar(1)
             )
         );
+        if (ladOddEven)
+        {
+            const scalarField V23(V13*V13);
+            const scalarField d2p
+            (
+                mag(fvc::laplacian(p))().primitiveField()*V23     // 2nd diff [Pa]
+            );
+            const scalarField d1p
+            (
+                mag(fvc::grad(p))().primitiveField()*V13          // 1st diff [Pa]
+            );
+            const scalarField theta(d2p/(d2p + d1p + ladEpsPa));
+            sensor *= theta;
+            Info<< "LAD-rho oddEven: theta max = " << gMax(theta) << endl;
+        }
         Dr.primitiveFieldRef() =
             LADrhoCoeff*V13*mag(U)().primitiveField()*sensor;
         Dr.correctBoundaryConditions();
