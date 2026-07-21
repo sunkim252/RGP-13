@@ -78,8 +78,23 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
     // T_table exactly (no drift) while rho/psi still refresh at the new p. This
     // fixes the RANK-1 side effect where bare thermo_.correct() inverted a stale
     // he against the new p and drifted T, moving the spike into the chamber.
-    updateManifold();
-    thermo_.correct();
+    //
+    // OPT: this manifold-reseed + EOS refresh is ~93% of the pressure-corrector
+    // cost and, at nOuter x nCorr, is called 4x/step (the dominant s/step term).
+    // thermoPerCorrector=false hoists it to once-per-outer (standard PIMPLE),
+    // done in pressureCorrector() before the corrector loop -- cheaper, but the
+    // psi/rho used by the 2nd+ correctors is then the outer's start-of-step
+    // state (stale), which is exactly the ill-conditioning RANK 1 was added to
+    // cure, so it must be validated against the injector spike before use.
+    const Switch thermoPerCorrector
+    (
+        pimple.dict().lookupOrDefault<Switch>("thermoPerCorrector", true)
+    );
+    if (thermoPerCorrector)
+    {
+        updateManifold();
+        thermo_.correct();
+    }
 
     // Per-corrector transported-density re-sync (modified-PIMPLE, cf.
     // realFluidFoam/Jarczyk-Pfitzner). The transported rho_ is otherwise
@@ -696,6 +711,18 @@ void Foam::solvers::fgmFluid::pressureCorrector()
         FatalErrorInFunction
             << "fgmFluid PEP pressure corrector does not support buoyant "
             << "(p_rgh) cases." << exit(FatalError);
+    }
+
+    // OPT: when the per-corrector FGM/EOS refresh is disabled, do it once here
+    // (standard PIMPLE: thermo updated once per outer, before the correctors).
+    const Switch thermoPerCorrector
+    (
+        pimple.dict().lookupOrDefault<Switch>("thermoPerCorrector", true)
+    );
+    if (!thermoPerCorrector)
+    {
+        updateManifold();
+        thermo_.correct();
     }
 
     while (pimple.correct())
