@@ -119,6 +119,8 @@ Foam::solvers::fgmFluid::fgmFluid(fvMesh& mesh)
 
     tabLewis_(false),
 
+    tabPsis_(false),
+
     manifoldYFilled_(false),
 
     thermophysicalTransport
@@ -334,6 +336,30 @@ Foam::solvers::fgmFluid::fgmFluid(fvMesh& mesh)
             << (LeZField_.valid() ? "Le_Z " : "")
             << (LeCField_.valid() ? "Le_C" : "")
             << "] from the manifold drive Deff (rho*D = mu/Le)" << nl << endl;
+    }
+
+    // Optional pre-tabulated isentropic compressibility (2026-07-24): see
+    // fgmFluid.H psisTabField_ note and pressureCorrector.C psisTabulated.
+    if (fgmTable_.hasPsis())
+    {
+        psisTabField_.reset
+        (
+            new volScalarField
+            (
+                IOobject
+                (
+                    "FGM:psisTab", runTime.name(), mesh,
+                    IOobject::NO_READ, IOobject::NO_WRITE
+                ),
+                mesh,
+                dimensionedScalar(dimensionSet(-1, 1, 2, 0, 0, 0, 0), 0),
+                zeroGradientFvPatchScalarField::typeName
+            )
+        );
+        tabPsis_ = true;
+        Info<< "fgmFluid: tabulated psis (psisTab) ACTIVE -- per-cell "
+            << "isentropic compressibility from the manifold available for "
+            << "pressureCorrector's psisTabulated switch" << nl << endl;
     }
 
     // Tier-2: enable the tabulated real-gas coefficient lookup (allocates the
@@ -828,6 +854,13 @@ void Foam::solvers::fgmFluid::updateManifold()
     const List<scalar>* LeZtbl = fillLeZ ? &fgmTable_.LeTable("Z") : nullptr;
     const List<scalar>* LeCtbl = fillLeC ? &fgmTable_.LeTable("C") : nullptr;
 
+    // Hoist the tabulated psis field (2026-07-24) the same way as Le_Z/Le_C.
+    const bool fillPsis = psisTabField_.valid();
+    scalarField* psisTabc =
+        fillPsis ? &psisTabField_->primitiveFieldRef() : nullptr;
+    const List<scalar>* psisTbl =
+        fillPsis ? &fgmTable_.psisTable() : nullptr;
+
     // The tabulated species Y_ are DERIVED, never transported. The mixture reads
     // them only via compositionToX (mu/kappa use sumX==1, base thermo comes from
     // the Opt-1 node blend), so on internal cells mu/kappa/rho/EOS are Y-value-
@@ -937,12 +970,18 @@ void Foam::solvers::fgmFluid::updateManifold()
         {
             (*LeCc)[celli] = fgmTable_.interpolate(*LeCtbl, st);
         }
+
+        if (fillPsis)
+        {
+            (*psisTabc)[celli] = fgmTable_.interpolate(*psisTbl, st);
+        }
     }
 
     gZ_.correctBoundaryConditions();
     chi_st_.correctBoundaryConditions();
     if (fillLeZ) { LeZField_->correctBoundaryConditions(); }
     if (fillLeC) { LeCField_->correctBoundaryConditions(); }
+    if (fillPsis) { psisTabField_->correctBoundaryConditions(); }
     if (fillY)
     {
         forAll(tabSpecieIDs_, k)

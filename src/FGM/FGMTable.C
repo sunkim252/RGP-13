@@ -188,6 +188,25 @@ Foam::FGMTable::FGMTable
         Info<< "    tabulated: T" << endl;
     }
 
+    // -------- optional pre-tabulated isentropic compressibility (psis) --------
+    // Offline SRK+JANAF re-derivation of psis=psi/(rho*gamma) at the manifold's
+    // reference pressure, smoothed at build time (gamma clipped to [1.05,2.5]
+    // before the divide) as a principled alternative to the runtime
+    // psisCapRatio neighbour-average patch -- see build_psis_table_v2.py and
+    // Obsidian "PEP and LAD Spike Suppression" 2026-07-24. Default absent
+    // (psisTabulated switch in pressureCorrector.C falls back if not found).
+    if (found("psisTab"))
+    {
+        psis_table_ = List<scalar>(lookup("psisTab"));
+        if (psis_table_.size() != nTot)
+        {
+            FatalErrorInFunction
+                << "psisTab table size " << psis_table_.size() << " != " << nTot
+                << exit(FatalError);
+        }
+        Info<< "    tabulated: psisTab" << endl;
+    }
+
     // -------- optional species composition tables --------
     if (found("species"))
     {
@@ -501,6 +520,21 @@ Foam::scalar Foam::FGMTable::interpolateY
 }
 
 
+Foam::scalar Foam::FGMTable::interpolatePsis
+(
+    scalar Z, scalar gZ, scalar C, scalar chi
+) const
+{
+    if (psis_table_.empty())
+    {
+        FatalErrorInFunction
+            << "psisTab is not tabulated in fgmProperties."
+            << exit(FatalError);
+    }
+    return interpolateTable(psis_table_, Z, gZ, C, chi);
+}
+
+
 // -------- 3-D legacy entry points (evaluate at chi_axis_[0]) --------
 
 Foam::scalar Foam::FGMTable::interpolate
@@ -542,6 +576,21 @@ Foam::scalar Foam::FGMTable::interpolateY
             << exit(FatalError);
     }
     return interpolateTable(Y_tables_[specie], Z, gZ, C, chi_axis_[0]);
+}
+
+
+Foam::scalar Foam::FGMTable::interpolatePsis
+(
+    scalar Z, scalar gZ, scalar C
+) const
+{
+    if (psis_table_.empty())
+    {
+        FatalErrorInFunction
+            << "psisTab is not tabulated in fgmProperties."
+            << exit(FatalError);
+    }
+    return interpolateTable(psis_table_, Z, gZ, C, chi_axis_[0]);
 }
 
 

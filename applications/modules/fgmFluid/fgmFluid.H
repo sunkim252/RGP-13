@@ -223,6 +223,17 @@ protected:
         //- True when at least one tabulated Lewis-number field is active.
         bool tabLewis_;
 
+        //- Optional per-cell pre-tabulated isentropic compressibility field,
+        //  filled from fgmTable_ each updateManifold (2026-07-24). Null unless
+        //  the table carries "psisTab"; when present, pressureCorrector's
+        //  psisTabulated switch reads this instead of the pointwise
+        //  thermo.psi()/(rho*thermo.gamma()) EOS evaluation -- a principled,
+        //  offline-smoothed alternative to the runtime psisCapRatio patch.
+        autoPtr<volScalarField> psisTabField_;
+
+        //- True when the tabulated psis field is active.
+        bool tabPsis_;
+
         //- Set once the manifold species fields have been filled at least once.
         //  The 106 tabulated Y_ are DERIVED (never transported) and the mixture
         //  reads only tabulated aggregates (RG_*/Le + sumX==1), so the per-cell

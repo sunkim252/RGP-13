@@ -544,16 +544,89 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
         pepFull
      || pimple.dict().lookupOrDefault<Switch>("pepRHS", false)
     );
+    // psisFreezeOuter (2026-07-24): double-flux/RFQC-literal "freeze the
+    // acoustic coefficient over the step" -- psis is computed ONCE per OUTER
+    // iteration (in pressureCorrector(), before the corrector loop, stored in
+    // the registry as "psisFrozen") instead of being re-evaluated from the
+    // current (highly nonlinear near the transcritical interface) EOS state
+    // every corrector. This is a more literal implementation of the double-
+    // flux idea than psisAdvect (a separate material-transport PDE for psis,
+    // tested 2026-07-23 and found to DESTABILISE further) -- no new PDE, just
+    // hoisting psis out of the corrector loop the same way thermoPerCorrector
+    // =false already hoists the manifold/EOS refresh. Default off.
+    const Switch psisFreezeOuter
+    (
+        pimple.dict().lookupOrDefault<Switch>("psisFreezeOuter", false)
+    );
+    // psisTabulated (2026-07-24): use the per-cell FGM:psisTab field (offline
+    // SRK+JANAF re-derivation of psis, gamma-clipped/smoothed at manifold-
+    // build time -- build_psis_table_v2.py) instead of the pointwise runtime
+    // EOS evaluation. Highest priority in the chain below: the whole point is
+    // to bypass BOTH the raw pointwise nonlinearity AND the ad-hoc
+    // psisCapRatio patch that reacts to it. No-op (falls through) if the
+    // table wasn't built with a psisTab field (tabPsis_ false). Default off.
+    const Switch psisTabulated
+    (
+        pimple.dict().lookupOrDefault<Switch>("psisTabulated", false)
+    );
     volScalarField psis
     (
         "psis",
-        (psisIsentropic || pepFull)
-      ? volScalarField(thermo.psi()/(rho*thermo.gamma()))
-      : volScalarField(thermo.psi()/rho)
+        (psisTabulated && tabPsis_)
+      ? volScalarField(psisTabField_())
+      : (psisFreezeOuter && mesh.foundObject<volScalarField>("psisFrozen"))
+      ? volScalarField(mesh.lookupObject<volScalarField>("psisFrozen"))
+      : (psisIsentropic || pepFull)
+      ? volScalarField(psi/(rho*thermo.gamma()))
+      : volScalarField(psi/rho)
     );
-    if (psisCapRatio < GREAT)
+    // psisSmooth (2026-07-24): replace psisCapRatio's crude single-neighbour-
+    // average floor with the SAME established iterative Laplacian-type
+    // smoothing (fvc::smooth) this solver already uses for rDeltaT
+    // (rDeltaTSmoothingCoeff, setRDeltaT.C) -- a more principled spatial
+    // regularisation than an ad-hoc cap, reusing a well-tested OpenFOAM
+    // operator instead of inventing one. Mutually exclusive with psisCapRatio
+    // (takes precedence if on). Default off.
+    const Switch psisSmooth
+    (
+        pimple.dict().lookupOrDefault<Switch>("psisSmooth", false)
+    );
+    const scalar psisSmoothCoeff
+    (
+        pimple.dict().lookupOrDefault<scalar>("psisSmoothCoeff", 0.1)
+    );
+    // Skip both regularisers when psisTabulated is active: the tabulated
+    // field is already smoothed offline (gamma-clipped at build time), so a
+    // runtime patch on top would just re-introduce the mesh-local noise the
+    // table was built to avoid.
+    if (psisTabulated && tabPsis_)
+    {
+        // no-op
+    }
+    else if (psisSmooth)
+    {
+        fvc::smooth(psis, psisSmoothCoeff);
+    }
+    else if (psisCapRatio < GREAT)
     {
         const volScalarField psisSm(fvc::average(fvc::interpolate(psis)));
+        // Diagnostic (2026-07-23): count how many cells the neighbour-average
+        // floor actually overrides each corrector, to test whether pepFull's
+        // long-time drift correlates with a growing psisCapRatio-affected
+        // (near-interface, nonlinear-EOS) cell population.
+        const scalarField& psisIf = psis.primitiveField();
+        const scalarField psisFloor(psisSm.primitiveField()/psisCapRatio);
+        label nCapped = 0;
+        forAll(psisIf, celli)
+        {
+            if (psisIf[celli] < psisFloor[celli])
+            {
+                nCapped++;
+            }
+        }
+        Info<< "psisCapRatio: " << nCapped << " of " << psisIf.size()
+            << " cells capped (" << (100.0*nCapped/psisIf.size()) << "%)"
+            << endl;
         psis = max(psis, psisSm/psisCapRatio);
         psis.correctBoundaryConditions();
     }
@@ -1133,6 +1206,98 @@ void Foam::solvers::fgmFluid::pressureCorrector()
     {
         updateManifold();
         thermo_.correct();
+    }
+
+    // psisFreezeOuter: compute psis ONCE here (double-flux/RFQC-literal
+    // freeze, see the psis block in correctPressurePEP() for the full
+    // rationale) using the JUST-refreshed (or previous-outer-final, if
+    // thermoPerCorrector=true) rho/thermo state, store it in the registry so
+    // every corrector this outer reuses the SAME value instead of
+    // recomputing pointwise from the current (possibly still-settling)
+    // thermodynamic state.
+    const Switch psisFreezeOuter
+    (
+        pimple.dict().lookupOrDefault<Switch>("psisFreezeOuter", false)
+    );
+    if (psisFreezeOuter)
+    {
+        const Switch psisIsentropic
+        (
+            pimple.dict().lookupOrDefault<Switch>("psisIsentropic", false)
+        );
+        const Switch pepFullSw
+        (
+            pimple.dict().lookupOrDefault<Switch>("pepFull", false)
+        );
+
+        // Root-selection hysteresis: keep this frozen-psis snapshot
+        // rho/psi-consistent too (see correctRootHysteresis() at the top of
+        // this file / the identical correction in correctPressurePEP()).
+        volScalarField psiNow(thermo.psi());
+        if (pimple.dict().lookupOrDefault<Switch>("rootHysteresis", false))
+        {
+            const tabulatedRealGasMixture* hook =
+                dynamic_cast<const tabulatedRealGasMixture*>(&thermo_);
+
+            if (hook)
+            {
+                tmp<volScalarField> tW;
+                const volScalarField* Wptr = nullptr;
+                if (tabRealGasCoeffs_)
+                {
+                    tW = thermo_.W();
+                    Wptr = &tW();
+                }
+
+                const scalar rootHysteresisCapRatio
+                (
+                    pimple.dict().lookupOrDefault<scalar>
+                    (
+                        "rootHysteresisCapRatio", GREAT
+                    )
+                );
+                tmp<volScalarField> tRhoAvg;
+                const volScalarField* rhoAvgPtr = nullptr;
+                if (rootHysteresisCapRatio < GREAT)
+                {
+                    tRhoAvg = fvc::average(fvc::interpolate(rho_));
+                    rhoAvgPtr = &tRhoAvg();
+                }
+
+                correctRootHysteresis
+                (
+                    *hook, Y_, thermo_.p(), thermo_.T(),
+                    rho_.oldTime().primitiveField(), rho_, &psiNow,
+                    pimple.dict().lookupOrDefault<scalar>("rootHysteresisTMin", 140),
+                    pimple.dict().lookupOrDefault<scalar>("rootHysteresisTMax", 200),
+                    pimple.dict().lookupOrDefault<scalar>("rootHysteresisPMin", 4.0e6),
+                    pimple.dict().lookupOrDefault<scalar>("rootHysteresisPMax", 5.5e6),
+                    tabRealGasCoeffs_ ? &RGcoeffFields_ : nullptr,
+                    Wptr,
+                    nullptr,
+                    rhoAvgPtr,
+                    rootHysteresisCapRatio
+                );
+            }
+        }
+
+        const volScalarField psisNow
+        (
+            (psisIsentropic || pepFullSw)
+          ? psiNow/(rho_*thermo.gamma())
+          : psiNow/rho_
+        );
+        if (!mesh.foundObject<volScalarField>("psisFrozen"))
+        {
+            mesh.objectRegistry::store
+            (
+                new volScalarField("psisFrozen", psisNow)
+            );
+        }
+        else
+        {
+            mesh.lookupObjectRef<volScalarField>("psisFrozen") = psisNow;
+        }
     }
 
     while (pimple.correct())
