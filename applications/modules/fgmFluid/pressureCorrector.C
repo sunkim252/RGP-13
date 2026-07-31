@@ -416,10 +416,6 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
 
     fvVectorMatrix& UEqn = tUEqn.ref();
 
-    // Thermodynamic density needs to be updated by psi*d(p) after the
-    // pressure solution
-    const volScalarField psip0(psi*p);
-
     // Face density used to (a) convert the RC transient term to volumetric and
     // (b) RECONSTRUCT the mass flux from the solved volumetric flux (below).
     //
