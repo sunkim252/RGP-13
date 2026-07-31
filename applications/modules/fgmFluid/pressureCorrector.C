@@ -242,7 +242,16 @@ Foam::label correctRootHysteresis
 
             const Foam::scalar rHyst = pickMin ? rMin : rMax;
 
-            if (rHyst != rhoc[celli])
+            // Relative tolerance, not ==: rhoc comes from the BLENDED
+            // two-root EOS path (and may additionally have been relaxed), so
+            // it is never bit-equal to a pure cubic root even where
+            // hysteresis changed nothing. An exact test flagged every in-band
+            // cell and made the diagnostic useless.
+            if
+            (
+                Foam::mag(rHyst - rhoc[celli])
+              > 1e-3*Foam::mag(rhoc[celli])
+            )
             {
                 nFlipped++;
                 if (flagc)
@@ -268,6 +277,11 @@ Foam::label correctRootHysteresis
     {
         flagField->correctBoundaryConditions();
     }
+
+    // Global count: the callers report this through Info<<, which prints on
+    // the master only. Without the reduction a run whose in-band cells all
+    // live off-master reports zero and the diagnostic is blind in parallel.
+    Foam::reduce(nFlipped, Foam::sumOp<Foam::label>());
 
     return nFlipped;
 }
