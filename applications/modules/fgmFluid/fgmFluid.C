@@ -338,6 +338,44 @@ Foam::solvers::fgmFluid::fgmFluid(fvMesh& mesh)
             << "] from the manifold drive Deff (rho*D = mu/Le)" << nl << endl;
     }
 
+    // OPTIONAL UFPV chi-source table (2026-07-28): see chiSrcTable_ note in
+    // fgmFluid.H. Loaded when constant/fgmPropertiesChi exists (kill-switch:
+    // 'chiSourceTable false;' in fgmProperties). Must be a genuine chi-axis
+    // 4-D table -- an enthalpy/dilution 4th axis here would silently feed dh
+    // values into a chi lookup.
+    {
+        typeIOobject<IOdictionary> chiHeader
+        (
+            "fgmPropertiesChi",
+            mesh.time().constant(),
+            mesh,
+            IOobject::MUST_READ,
+            IOobject::NO_WRITE
+        );
+
+        if
+        (
+            fgmTable_.lookupOrDefault<Switch>("chiSourceTable", true)
+         && chiHeader.headerOk()
+        )
+        {
+            chiSrcTable_.reset(new FGMTable(mesh, "fgmPropertiesChi"));
+
+            if (!chiSrcTable_().hasChi())
+            {
+                FatalErrorInFunction
+                    << "fgmPropertiesChi must be a 4-D table whose 4th axis "
+                    << "is chi_st (found a 3-D table or an enthalpy/dilution "
+                    << "4th axis)." << exit(FatalError);
+            }
+
+            Info<< "fgmFluid: UFPV chi-source ACTIVE -- sourcePV from "
+                << "fgmPropertiesChi at the local chi_st (all thermo stays "
+                << "on the main table); cold gate 0.5(1+tanh((T-900)/150)), "
+                << "hard 0 below 600 K" << nl << endl;
+        }
+    }
+
     // Optional pre-tabulated isentropic compressibility (2026-07-24): see
     // fgmFluid.H psisTabField_ note and pressureCorrector.C psisTabulated.
     if (fgmTable_.hasPsis())
@@ -817,6 +855,12 @@ void Foam::solvers::fgmFluid::updateManifold()
     // manifold point per cell, so the 4-axis bracket is built once per cell
     // (makeStencil) and reused -- bit-identical to the per-field lookups.
     const List<scalar>& srcTbl = fgmTable_.sourcePVTable();
+
+    // UFPV chi-source hoists (see chiSrcTable_ decl): table + flat source
+    // list lifted out of the hot loop like every other table pointer here.
+    const bool chiSrc = chiSrcTable_.valid();
+    const List<scalar>* chiSrcTbl =
+        chiSrc ? &chiSrcTable_().sourcePVTable() : nullptr;
     const List<scalar>& Ttbl = fgmTable_.Ttable();
     if (Ttbl.empty())
     {
@@ -943,6 +987,30 @@ void Foam::solvers::fgmFluid::updateManifold()
         srcc[celli] =
             sourcePVscale_*rho_l*fgmTable_.interpolate(srcTbl, st);
         Tc[celli] = fgmTable_.interpolate(Ttbl, st);
+
+        // UFPV chi-source override: same (Z,gZ,c) but the TRUE local chi_st
+        // (the main stencil's 4th coordinate is dh on an enthalpy table).
+        // The chi table is adiabatic, so re-apply the identical cold-
+        // inertness gate add_enthalpy_axis.py baked into the dh table
+        // (T_IGN=900, DT_IGN=150, hard cutoff T_CUT=600), driven by the
+        // dh-consistent temperature just looked up -- cryogenic/heat-loss
+        // zones stay inert exactly as before.
+        if (chiSrc)
+        {
+            FGMTable::FGMStencil stChi;
+            chiSrcTable_().makeStencil(Zcl, gz, Ccl, chi_st, stChi);
+
+            scalar gate = 0.5*(scalar(1)
+                + tanh((Tc[celli] - scalar(900))/scalar(150)));
+            if (Tc[celli] < scalar(600))
+            {
+                gate = 0;
+            }
+
+            srcc[celli] =
+                sourcePVscale_*rho_l*gate
+               *chiSrcTable_().interpolate(*chiSrcTbl, stChi);
+        }
         if (fillY)
         {
             forAll(Yref, k)

@@ -94,6 +94,19 @@ protected:
         //- FGM (FPV) lookup table: (Z~, gZ, C~) -> omega_C, T, Y_k
         FGMTable fgmTable_;
 
+        //- OPTIONAL second manifold: (Z~, gZ, C~, chi_st) UFPV SOURCE table
+        //  (constant/fgmPropertiesChi). When present, sourcePV is looked up
+        //  here at the LOCAL chi_st instead of the main table -- giving the
+        //  source genuine strain response (weaker at high chi) where the
+        //  steady-family table applies its burning-branch value regardless
+        //  of strain. All THERMO (T, Y, RG_*, Le_*, psis) stays on the main
+        //  (Z,gZ,C,dh) table so the non-adiabatic transcritical path is
+        //  untouched; the chi table is adiabatic (800 K flamelet boundary)
+        //  and the solver re-applies the SAME cold-inertness gate the dh
+        //  table bakes in (add_enthalpy_axis.py: 0.5(1+tanh((T-900)/150)),
+        //  hard 0 below 600 K) using the dh-table temperature (2026-07-28).
+        autoPtr<FGMTable> chiSrcTable_;
+
         //- Mixture fraction Z~ (transported, no source)
         volScalarField Z_;
 

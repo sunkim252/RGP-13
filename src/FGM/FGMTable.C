@@ -33,11 +33,21 @@ Foam::FGMTable::FGMTable
     const fvMesh& mesh
 )
 :
+    FGMTable(mesh, "fgmProperties")
+{}
+
+
+Foam::FGMTable::FGMTable
+(
+    const fvMesh& mesh,
+    const word& dictName
+)
+:
     IOdictionary
     (
         IOobject
         (
-            "fgmProperties",
+            dictName,
             mesh.time().constant(),
             mesh,
             IOobject::MUST_READ_IF_MODIFIED,
@@ -59,7 +69,8 @@ Foam::FGMTable::FGMTable
     C_axis_(lookup("C")),
     chi_axis_(1, scalar(0))
 {
-    Info<< "\nFGM (FPV + beta-PDF) table initialisation" << endl;
+    Info<< "\nFGM (FPV + beta-PDF) table initialisation [" << dictName
+        << "]" << endl;
 
     // -------- optional chi (scalar-dissipation) axis --------
     if (found("nChi"))

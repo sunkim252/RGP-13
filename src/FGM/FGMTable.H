@@ -205,8 +205,16 @@ public:
 
     // Constructors
 
-        //- Construct from mesh
+        //- Construct from mesh (reads constant/fgmProperties)
         FGMTable(const fvMesh& mesh);
+
+        //- Construct from mesh, reading a NAMED dictionary. Lets the solver
+        //  load a SECOND manifold alongside the main one -- e.g. a
+        //  (Z,gZ,C,chi_st) source-only UFPV table (constant/fgmPropertiesChi)
+        //  next to the (Z,gZ,C,dh) non-adiabatic thermo table (2026-07-28).
+        //  Same reader/validation path as the main constructor; only the
+        //  dictionary name differs.
+        FGMTable(const fvMesh& mesh, const word& dictName);
 
 
     //- Destructor
