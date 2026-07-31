@@ -30,6 +30,7 @@ License
 #include "fvcDiv.H"
 #include "fvcSnGrad.H"
 #include "fvcReconstruct.H"
+#include "safeReconstruct.H"
 #include "zeroGradientFvPatchFields.H"
 
 // * * * * * * * * * * * * * * Member Functions  * * * * * * * * * * * * * * //
@@ -157,11 +158,14 @@ void Foam::solvers::fgmFluid::momentumPredictor()
             );
             if (faceGradP)
             {
+                // safeReconstruct: see safeReconstruct.H (AMR hanging-node
+                // singular-tensor SIGFPE guard, 2026-07-23). Falls back to
+                // the same fvc::grad(p) the non-faceGradP branch below uses.
                 solve
                 (
                     UEqn
                  ==
-                   -fvc::reconstruct(fvc::snGrad(p)*mesh.magSf())
+                   -safeReconstruct(fvc::snGrad(p)*mesh.magSf(), fvc::grad(p))
                 );
             }
             else

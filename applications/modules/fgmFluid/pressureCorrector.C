@@ -45,6 +45,8 @@ Description
 #include "fvcGrad.H"
 #include "fvcSnGrad.H"
 #include "fvcReconstruct.H"
+#include "safeReconstruct.H"
+#include "fvcSmooth.H"
 #include "fvcVolumeIntegrate.H"
 #include "fvmDiv.H"
 #include "fvmLaplacian.H"
@@ -677,7 +679,10 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
     );
     if (faceGradP)
     {
-        U = HbyA - rAAtU*fvc::reconstruct(fvc::snGrad(p)*mesh.magSf());
+        // safeReconstruct: see safeReconstruct.H (AMR hanging-node
+        // singular-tensor SIGFPE guard, 2026-07-23). Falls back to the same
+        // fvc::grad(p) the non-faceGradP branch below uses.
+        U = HbyA - rAAtU*safeReconstruct(fvc::snGrad(p)*mesh.magSf(), fvc::grad(p));
     }
     else
     {
