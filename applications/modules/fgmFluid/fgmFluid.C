@@ -28,6 +28,7 @@ License
 #include "fvcGrad.H"
 #include "DynamicList.H"
 #include "addToRunTimeSelectionTable.H"
+#include "zeroGradientFvPatchFields.H"
 #include "tabulatedRealGasMixture.H"
 #include "Switch.H"
 
@@ -278,6 +279,19 @@ Foam::solvers::fgmFluid::fgmFluid(fvMesh& mesh)
     // each field carries the previous manifold update's Le (a one-iteration lag
     // that is immaterial: Le enters only the weak Deff->chi->source coupling and
     // converges over the outer correctors).
+    //
+    // The zeroGradient patch type is REQUIRED, not cosmetic (2026-07-26). The
+    // manifold fill loop writes primitiveFieldRef() (internal cells only) and
+    // relies on correctBoundaryConditions() for the patches -- but that is a
+    // no-op on the default "calculated" type, so with calculated patches the
+    // boundary values would stay frozen at the constructor value 1 forever.
+    // Deff() = mu/Le + turb is a volScalarField whose BOUNDARY field feeds
+    // fvm::laplacian(DZ,...) through the patch face values, so every wall and
+    // inlet face would silently diffuse at unity Lewis while the interior used
+    // the tabulated Le -- defeating Tier-4 differential diffusion exactly at
+    // the cryogenic wall where Le departs from 1 the most. The bug went
+    // unnoticed because 1 is a plausible-looking value; the same defect on
+    // psisTabField_ (initialised to 0) surfaced immediately as a 1/0 SIGFPE.
     if (fgmTable_.hasLeField("Z"))
     {
         LeZField_.reset
@@ -290,7 +304,8 @@ Foam::solvers::fgmFluid::fgmFluid(fvMesh& mesh)
                     IOobject::NO_READ, IOobject::NO_WRITE
                 ),
                 mesh,
-                dimensionedScalar(dimless, 1)
+                dimensionedScalar(dimless, 1),
+                zeroGradientFvPatchScalarField::typeName
             )
         );
     }
@@ -306,7 +321,8 @@ Foam::solvers::fgmFluid::fgmFluid(fvMesh& mesh)
                     IOobject::NO_READ, IOobject::NO_WRITE
                 ),
                 mesh,
-                dimensionedScalar(dimless, 1)
+                dimensionedScalar(dimless, 1),
+                zeroGradientFvPatchScalarField::typeName
             )
         );
     }
