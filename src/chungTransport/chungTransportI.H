@@ -65,7 +65,11 @@ inline Foam::chungTransport<Thermo>::chungTransport
     sigmd_(sigmd),
     cacheP_(0), cacheT_(-1), cacheTstar_(0), cacheMur_(0),
     cacheEta0_(0), cacheY_(0), cacheG1_(0), sumXmd_(0)
-{}
+{
+    // Maintain the invariant sumXmd_ == Sum(Xmd_) at construction so mu()/kappa()
+    // are correct even if called before updateTRANS (they read the cached sum).
+    forAll(Xmd_, i) { sumXmd_ += Xmd_[i]; }
+}
 
 
 template<class Thermo>
@@ -92,7 +96,10 @@ inline Foam::chungTransport<Thermo>::chungTransport
     sigmd_(ch.sigmd_),
     cacheP_(0), cacheT_(-1), cacheTstar_(0), cacheMur_(0),
     cacheEta0_(0), cacheY_(0), cacheG1_(0), sumXmd_(0)
-{}
+{
+    // Maintain sumXmd_ == Sum(Xmd_) (see the component constructor).
+    forAll(Xmd_, i) { sumXmd_ += Xmd_[i]; }
+}
 
 
 template<class Thermo>
@@ -158,6 +165,15 @@ inline void Foam::chungTransport<Thermo>::calculate
 
     // Calculate Y term in eq (10)
     Y =  rho*VcM_/6.0;
+
+    // Y-CAP (root guard, 2026-07-18): the dense correction G1=(1-0.5Y)/(1-Y)^3
+    // has a hard SIGN-FLIP singularity at Y=1 (packing limit) and the Chung
+    // correlation is only calibrated to Y ~< 0.5. Liquid kerosene sits at
+    // Y ~ 0.53 in NORMAL operation, so off-manifold excursions of rho or VcM
+    // (Tier-2 extrapolation, broken he->T inversion) readily push Y past 1 and
+    // produce mu ~ -1e6 (numerically demonstrated). Freeze the correlation at
+    // Y=0.9: continuous, sign-preserving, and only engaged on broken states.
+    Y = min(Y, scalar(0.9));
 
     // Calculate G1 term in eq (10)
     const scalar oneMinusY = 1.0 - Y;
@@ -228,7 +244,19 @@ inline Foam::scalar Foam::chungTransport<Thermo>::mu
         finalMu = 0.1*(etak+etap);
     }
 
-    return finalMu;
+    // POSITIVITY FLOOR (root fix, 2026-07-18): off-manifold states (e.g. the
+    // ignition-kick cells where the Tier-2 coefficients are extrapolated
+    // outside the (Z,gZ,C,dh) hull) can drive G2/exp pathological and return a
+    // NEGATIVE viscosity, which propagates to nuEff and crashes any sqrt
+    // consumer (yPlus FO SIGFPE at every ignition kick). Transport
+    // coefficients are positive by physics; floor at 1e-7 kg/(m s) -- two
+    // decades below the smallest physical mu here (~1e-5) so the floor only
+    // engages on broken states.
+    // ...and a CEILING: pathological-but-POSITIVE values also occur (exp
+    // blow-up at Tstar << 1 gave mu = 8.4e3 in the standalone scan) and would
+    // pass a floor untouched, injecting enormous viscous stiffness. Physical
+    // maximum here is liquid kerosene ~1.5e-3; cap at 0.05 (~30x margin).
+    return min(max(finalMu, scalar(1e-7)), scalar(0.05));
 }
 
 
@@ -334,7 +362,12 @@ inline Foam::scalar Foam::chungTransport<Thermo>::kappa
         kappa = 418.6798*(lamdak+lamdap);
     }
 
-    return kappa;
+    // POSITIVITY FLOOR: same off-manifold pathology as mu() above -- a
+    // negative conductivity corrupts alphaEff/energy diffusion. Floor at
+    // 1e-4 W/(m K), two decades below the smallest physical kappa here.
+    // Floor AND ceiling (see mu() above): physical max ~0.15 W/(m K)
+    // (liquid O2); cap at 1.0.
+    return min(max(kappa, scalar(1e-4)), scalar(1.0));
 }
 
 
