@@ -890,7 +890,11 @@ bool eosCubicBranchRhoPsi
 
     auto rhoFromZv = [&](scalar pp, scalar Zv) -> scalar
     {
-        const scalar rhoSRK = pp/(Zv*RR*T);
+        // kg/m^3: RR is the UNIVERSAL constant, so p/(Z RR T) is kmol/m^3.
+        // Wm converts to mass basis -- matches SRKGasI.H::rhoFromZ, which
+        // divides by this->R() = RR/W. The Peneloux denominator below and
+        // the hMin/hMax departures further down both assume kg/m^3.
+        const scalar rhoSRK = pp*Wm/(Zv*RR*T);
         if (cM != 0)
         {
             const scalar denom = 1.0 - cM*rhoSRK/Wm;
