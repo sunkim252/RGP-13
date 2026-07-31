@@ -107,10 +107,15 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
     // the EOS density stayed positive. Snapping rho_ to the just-corrected
     // thermo state each corrector removes the drift (rho.oldTime() is
     // untouched, so the ddt history stays consistent).
-    rho_ = thermo.rho();
-    rho_.correctBoundaryConditions();
-
-    const volScalarField& psi = thermo.psi();
+    //
+    // (2026-07-26) This used to be done twice: an `rho_ = thermo.rho();
+    // rho_.correctBoundaryConditions();` pair here, immediately followed by
+    // the `rho = thermo.rho()` below -- and `rho` is a reference to `rho_`
+    // (see the alias at the top of this function), so the first assignment
+    // was unconditionally overwritten by the second and had no effect. The
+    // dead pair is removed; the re-sync itself is unchanged and now happens
+    // exactly once, at the assignment below.
+    volScalarField psi(thermo.psi());
     rho = thermo.rho();
     rho.relax();
 
