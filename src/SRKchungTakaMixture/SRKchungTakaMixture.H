@@ -387,6 +387,34 @@ public:
             scalar& LeC
         ) const;
 
+        //- Root-selection hysteresis: cubic-EOS branch rho/psi/Cp/h at
+        //  (p,T) for a mass-fraction composition Y. See
+        //  tabulatedRealGasMixture.H.
+        virtual bool eosRootBranchProperties
+        (
+            const List<scalar>& Y,
+            const scalar p,
+            const scalar T,
+            scalar& rhoMin, scalar& rhoMax,
+            scalar& psiMin, scalar& psiMax,
+            scalar& CpMin,  scalar& CpMax,
+            scalar& hMin,   scalar& hMax,
+            const bool needPsi = true,
+            const bool needCpH = true
+        ) const;
+
+        //- Root-selection hysteresis from already-known EOS coefficients
+        //  (skips the O(n^2) mixing loop). See tabulatedRealGasMixture.H.
+        virtual bool eosRootBranchPropertiesFromCoeffs
+        (
+            const scalar bM, const scalar coef1, const scalar coef2,
+            const scalar coef3, const scalar cM, const scalar Wm,
+            const scalar p, const scalar T,
+            scalar& rhoMin, scalar& rhoMax,
+            scalar& psiMin, scalar& psiMax,
+            const bool needPsi = true
+        ) const;
+
         //- Disable the tabulated lookup (revert to live mixing).
         virtual void disableCoeffTabulation() const;
 };
