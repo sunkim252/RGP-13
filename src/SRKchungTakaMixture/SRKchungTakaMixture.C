@@ -76,7 +76,8 @@ void Foam::SRKchungTakaMixture<ThermoType>::calculateRealGas
     scalar& TcM,
     scalar& omegaM,
     scalar& miuiM,
-    scalar& kappaiM
+    scalar& kappaiM,
+    const bool needTransportMix
 ) const
 {
     // Linear mixing for SRK co-volume
@@ -100,36 +101,72 @@ void Foam::SRKchungTakaMixture<ThermoType>::calculateRealGas
     scalar sigma3M = 0, epsilonkM0 = 0, omegaM0 = 0, MM0 = 0, miuiM0 = 0;
 
     // Diagonal terms (i == j)
-    forAll(COEF1_, i)
+    if (needTransportMix)
     {
-        const scalar Xi2 = X[i]*X[i];
-        coef1      += Xi2*COEF1_[i][i];
-        coef2      += Xi2*COEF2_[i][i];
-        coef3      += Xi2*COEF3_[i][i];
-        sigma3M    += Xi2*SIGMA3M_[i][i];
-        epsilonkM0 += Xi2*EPSILONKM0_[i][i];
-        omegaM0    += Xi2*OMEGAM0_[i][i];
-        MM0        += Xi2*MM0_[i][i];
-        miuiM0     += Xi2*MIUIM0_[i][i];
-        kappaiM    += Xi2*KAPPAIM_[i][i];
+        forAll(COEF1_, i)
+        {
+            const scalar Xi2 = X[i]*X[i];
+            coef1      += Xi2*COEF1_[i][i];
+            coef2      += Xi2*COEF2_[i][i];
+            coef3      += Xi2*COEF3_[i][i];
+            sigma3M    += Xi2*SIGMA3M_[i][i];
+            epsilonkM0 += Xi2*EPSILONKM0_[i][i];
+            omegaM0    += Xi2*OMEGAM0_[i][i];
+            MM0        += Xi2*MM0_[i][i];
+            miuiM0     += Xi2*MIUIM0_[i][i];
+            kappaiM    += Xi2*KAPPAIM_[i][i];
+        }
+    }
+    else
+    {
+        // EOS-coefficient-only path (e.g. root-selection hysteresis):
+        // skip the 6 Chung transport-mixing accumulators entirely -- with
+        // ~100 species this is the dominant cost, see the .H comment.
+        forAll(COEF1_, i)
+        {
+            const scalar Xi2 = X[i]*X[i];
+            coef1 += Xi2*COEF1_[i][i];
+            coef2 += Xi2*COEF2_[i][i];
+            coef3 += Xi2*COEF3_[i][i];
+        }
     }
 
     // Off-diagonal terms (i < j), doubled by symmetry
-    for (label i = 0; i < COEF1_.size(); i++)
+    if (needTransportMix)
     {
-        for (label j = i + 1; j < COEF1_.size(); j++)
+        for (label i = 0; i < COEF1_.size(); i++)
         {
-            const scalar twoXiXj = 2.0*X[i]*X[j];
-            coef1      += twoXiXj*COEF1_[i][j];
-            coef2      += twoXiXj*COEF2_[i][j];
-            coef3      += twoXiXj*COEF3_[i][j];
-            sigma3M    += twoXiXj*SIGMA3M_[i][j];
-            epsilonkM0 += twoXiXj*EPSILONKM0_[i][j];
-            omegaM0    += twoXiXj*OMEGAM0_[i][j];
-            MM0        += twoXiXj*MM0_[i][j];
-            miuiM0     += twoXiXj*MIUIM0_[i][j];
-            kappaiM    += twoXiXj*KAPPAIM_[i][j];
+            for (label j = i + 1; j < COEF1_.size(); j++)
+            {
+                const scalar twoXiXj = 2.0*X[i]*X[j];
+                coef1      += twoXiXj*COEF1_[i][j];
+                coef2      += twoXiXj*COEF2_[i][j];
+                coef3      += twoXiXj*COEF3_[i][j];
+                sigma3M    += twoXiXj*SIGMA3M_[i][j];
+                epsilonkM0 += twoXiXj*EPSILONKM0_[i][j];
+                omegaM0    += twoXiXj*OMEGAM0_[i][j];
+                MM0        += twoXiXj*MM0_[i][j];
+                miuiM0     += twoXiXj*MIUIM0_[i][j];
+                kappaiM    += twoXiXj*KAPPAIM_[i][j];
+            }
         }
+    }
+    else
+    {
+        for (label i = 0; i < COEF1_.size(); i++)
+        {
+            for (label j = i + 1; j < COEF1_.size(); j++)
+            {
+                const scalar twoXiXj = 2.0*X[i]*X[j];
+                coef1 += twoXiXj*COEF1_[i][j];
+                coef2 += twoXiXj*COEF2_[i][j];
+                coef3 += twoXiXj*COEF3_[i][j];
+            }
+        }
+
+        sigmaM = 0; epsilonkM = 0; MM = 0; VcM = 0;
+        TcM = 0; omegaM = 0; miuiM = 0; kappaiM = 0;
+        return;
     }
 
     //- For visc. and cond. in Chung's model
