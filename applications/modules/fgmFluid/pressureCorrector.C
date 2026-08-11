@@ -52,6 +52,7 @@ Description
 #include "fvmDiv.H"
 #include "fvmLaplacian.H"
 #include "fvcLaplacian.H"
+#include "localEulerDdtScheme.H"
 #include "fvcAverage.H"
 #include "fvmDdt.H"
 #include "fvmSup.H"
@@ -1479,14 +1480,31 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
     // whether that map contracts is the experiment.
     if (rhoTransport)
     {
-        const scalar dt = mesh.time().deltaTValue();
+        // LTS-aware. Under localEuler every cell marches with its OWN
+        // pseudo-time step 1/rDeltaT, and the global Time::deltaTValue() is
+        // just the dummy controlDict deltaT (1 in our LTS cases). Using it
+        // here would multiply div(phi) by a meaningless number -- silently
+        // wrong, and every rd0110 production case is localEuler. Take the
+        // per-cell dt from the scheme when LTS is active.
         tmp<volScalarField> tdiv(fvc::div(phi));
         if (LADrhoCoeff > 0)
         {
             tdiv.ref() -= fvc::laplacian(Dr, rho);
         }
-        rho.primitiveFieldRef() =
-            rho.oldTime().primitiveField() - dt*tdiv().primitiveField();
+        if (fv::localEulerDdt::enabled(mesh))
+        {
+            const volScalarField& rDeltaT =
+                fv::localEulerDdt::localRDeltaT(mesh);
+            rho.primitiveFieldRef() =
+                rho.oldTime().primitiveField()
+              - tdiv().primitiveField()/rDeltaT.primitiveField();
+        }
+        else
+        {
+            const scalar dt = mesh.time().deltaTValue();
+            rho.primitiveFieldRef() =
+                rho.oldTime().primitiveField() - dt*tdiv().primitiveField();
+        }
         rho.boundaryFieldRef() == thermo.rho()().boundaryField();
         // Diagnostic field: the transported-vs-EOS density discrepancy, i.e.
         // the quasi-conservative inconsistency this formulation relocates from
@@ -1523,31 +1541,8 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
         // landing step biases; (ii) the thermophysicalPredictor print pairs
         // ddt(rho) with a phi that has since been re-solved. Here
         // dM = sum((rho - rho.old)*V)/dt and F = boundary sum of phi are the
-        // exact pair the update telescoped, so their mismatch is the TRUE
-        // per-step conservation error of this formulation.
-        {
-            scalar dM =
-                gSum
-                (
-                    (rho.primitiveField() - rho.oldTime().primitiveField())
-                   *mesh.V()
-                )/mesh.time().deltaTValue();
-            // Physical patches only -- processor patches differ in number
-            // per rank, and a collective (gSum) inside this loop deadlocks.
-            // Local sums, then ONE reduce.
-            scalar F = 0;
-            forAll(phi.boundaryField(), patchi)
-            {
-                if (!mesh.boundary()[patchi].coupled())
-                {
-                    F += sum(phi.boundaryField()[patchi]);
-                }
-            }
-            reduce(F, sumOp<scalar>());
-            Info<< "rhoTransport mass: dM/dt = " << dM
-                << "  bFlux = " << F
-                << "  err = " << dM + F << " kg/s" << endl;
-        }
+        // pair whose mismatch is the per-step conservation error actually
+        // carried into the next step.
         // rhoAnchorCoeff (2026-08-08): WEAK EOS anchor after the transport
         // update,  rho <- (1-a)*rho + a*thermo.rho(),  a << 1.
         //
@@ -1571,6 +1566,50 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
         {
             rho =
                 (1 - rhoAnchorCoeff)*rho + rhoAnchorCoeff*thermo.rho();
+        }
+
+        // Measured AFTER the anchor, i.e. on the density this step actually
+        // leaves behind. It used to sit BEFORE the anchor, where
+        // rho = rho.old - dt*div(phi) holds by construction and the printed
+        // error was therefore close to a tautology rather than a measurement
+        // of the end-of-step state (2026-08-11 correction). With
+        // rhoAnchorCoeff > 0 the anchor pulls rho toward the EOS after the
+        // conservative update, so any conservation loss shows up only here.
+        {
+            scalar dM = 0;
+            if (fv::localEulerDdt::enabled(mesh))
+            {
+                const volScalarField& rDeltaT =
+                    fv::localEulerDdt::localRDeltaT(mesh);
+                dM = gSum
+                (
+                    (rho.primitiveField() - rho.oldTime().primitiveField())
+                   *rDeltaT.primitiveField()*mesh.V()
+                );
+            }
+            else
+            {
+                dM = gSum
+                (
+                    (rho.primitiveField() - rho.oldTime().primitiveField())
+                   *mesh.V()
+                )/mesh.time().deltaTValue();
+            }
+            // Physical patches only -- processor patches differ in number
+            // per rank, and a collective (gSum) inside this loop deadlocks.
+            // Local sums, then ONE reduce.
+            scalar F = 0;
+            forAll(phi.boundaryField(), patchi)
+            {
+                if (!mesh.boundary()[patchi].coupled())
+                {
+                    F += sum(phi.boundaryField()[patchi]);
+                }
+            }
+            reduce(F, sumOp<scalar>());
+            Info<< "rhoTransport mass(post-anchor): dM/dt = " << dM
+                << "  bFlux = " << F
+                << "  err = " << dM + F << " kg/s" << endl;
         }
         Info<< "rhoTransport: rho min/max = "
             << gMin(rho.primitiveField()) << " / "
