@@ -17,7 +17,9 @@ Description
 
         Le_Z = Pr = mu*Cp/kappa      (Z is a conserved scalar diffusing like
                                       heat: rho*D_Z = mu/Le_Z = kappa/Cp)
-        Le_C = nu/D_C,  D_C = PV-mass-weighted mixture-averaged Dimix
+        Le_C = nu/D_C,  D_C = PV-weighted mixture-averaged Dimix
+                        (weight = w_k*Y_k, w_k = the same weights
+                         that define the tabulated C)
 
     Evaluating with the solver's own chungTransport (not an external Cantera
     build) makes the tabulated Le consistent by construction: the solver forms
@@ -33,7 +35,9 @@ Description
 Usage
     Run in a case whose constant/fgmProperties carries the T and Y_* tables and
     whose physicalProperties selects an SRKchungTakaMixture:
-        fgmTabulateLewis -pressure 5.25e6 [-pvSpecies '(CO2 CO H2O H2)']
+        fgmTabulateLewis -pressure 5.25e6 [-pvSpecies '(CO2 CO H2O H2)'] \
+                         [-pvWeights '(1 1 1 1 5 5 5)']
+    A weighted table MUST be given the same -pvWeights used to build it.
     constant/fgmProperties is rewritten in place with Le_Z/Le_C appended
     (original backed up once to fgmProperties.preLe).
 
@@ -82,8 +86,27 @@ int main(int argc, char *argv[])
     );
     argList::addOption
     (
+        "pvWeights", "(1 1 1 1 5 5 5)",
+        "weights defining the tabulated progress variable, in pvSpecies order "
+        "(default: all unity). MUST match the --pv-weights used to build the "
+        "table: D_C averages the species diffusivities with w_k*Y_k, so a "
+        "weighted table tabulated with unit weights here would diffuse a "
+        "different scalar than the one it transports."
+    );
+    argList::addOption
+    (
         "Tfloor", "K",
         "median-fill nodes below this tabulated T (default 60)"
+    );
+    argList::addOption
+    (
+        "LeMax", "value",
+        "upper guard on the tabulated Le (default 1000)"
+    );
+    argList::addOption
+    (
+        "LeMin", "value",
+        "lower guard on the tabulated Le (default 0.05)"
     );
 
     #include "setRootCase.H"
@@ -99,10 +122,33 @@ int main(int argc, char *argv[])
     const scalar pRef = args.optionRead<scalar>("pressure");
     const scalar Tfloor = args.optionLookupOrDefault<scalar>("Tfloor", 60.0);
 
+    // Guard band, NOT a model. The dense cryogenic core of a transcritical
+    // flame has a genuinely large Schmidt number -- SRK+Chung gives Le_C up to
+    // ~4e2 at T ~ 100 K, 52.5 bar, where the LOx is liquid-like and species
+    // diffusion is orders of magnitude slower than heat diffusion. The old
+    // [0.1, 10] band cut that by ~40x and, because ~12% of the manifold sat on
+    // the ceiling, wrote a hard step into the table exactly across the
+    // transcritical interface. Keep the guard far outside the physical range
+    // so it only catches degenerate evaluations.
+    const scalar LeMax = args.optionLookupOrDefault<scalar>("LeMax", 1000.0);
+    const scalar LeMin = args.optionLookupOrDefault<scalar>("LeMin", 0.05);
+
     wordList pvNames({"CO2", "CO", "H2O", "H2"});
     if (args.optionFound("pvSpecies"))
     {
         pvNames = args.optionRead<wordList>("pvSpecies");
+    }
+
+    List<scalar> pvW;
+    if (args.optionFound("pvWeights"))
+    {
+        pvW = args.optionRead<List<scalar>>("pvWeights");
+        if (pvW.size() != pvNames.size())
+        {
+            FatalErrorInFunction
+                << "pvWeights has " << pvW.size() << " entries but pvSpecies "
+                << "has " << pvNames.size() << exit(FatalError);
+        }
     }
 
     // Build the real-fluid multicomponent thermo exactly as the solver does.
@@ -127,7 +173,11 @@ int main(int argc, char *argv[])
     const label nSp = thermoSpecies.size();
 
     // PV species -> thermo indices
+    // The weights must be filtered alongside the ids: a PV species absent from
+    // the thermo drops out of pvIds, and an unfiltered weight list would then
+    // pair every later weight with the wrong species.
     labelList pvIds;
+    List<scalar> pvWeights;
     forAll(pvNames, k)
     {
         forAll(thermoSpecies, j)
@@ -135,12 +185,20 @@ int main(int argc, char *argv[])
             if (thermoSpecies[j] == pvNames[k])
             {
                 pvIds.append(j);
+                if (pvW.size())
+                {
+                    pvWeights.append(pvW[k]);
+                }
                 break;
             }
         }
     }
     Info<< "PV species for D_C: " << pvNames << " -> " << pvIds.size()
         << " resolved in thermo" << endl;
+    if (pvWeights.size())
+    {
+        Info<< "PV weights for D_C: " << pvWeights << endl;
+    }
     if (pvIds.empty())
     {
         FatalErrorInFunction
@@ -227,7 +285,7 @@ int main(int argc, char *argv[])
     List<scalar> LeC(nTot, scalar(-1));
     List<scalar> Yc(nSp);
     DynamicList<scalar> goodZ(nTot), goodC(nTot);
-    label nCold = 0, nFail = 0;
+    label nCold = 0, nFail = 0, nGuard = 0;
 
     Info<< "Evaluating Le_Z/Le_C over " << nTot << " nodes with the live "
         << "SRK+Chung+Takahashi transport ..." << endl;
@@ -247,10 +305,14 @@ int main(int argc, char *argv[])
         }
 
         scalar lz, lc;
-        if (hook->lewisNumbers(Yc, pRef, Tn, pvIds, lz, lc))
+        if (hook->lewisNumbers(Yc, pRef, Tn, pvIds, pvWeights, lz, lc))
         {
-            lz = max(scalar(0.1), min(scalar(10), lz));
-            lc = max(scalar(0.1), min(scalar(10), lc));
+            if (lz >= LeMax || lc >= LeMax || lz <= LeMin || lc <= LeMin)
+            {
+                nGuard++;
+            }
+            lz = max(LeMin, min(LeMax, lz));
+            lc = max(LeMin, min(LeMax, lc));
             LeZ[idx] = lz;
             LeC[idx] = lc;
             goodZ.append(lz);
@@ -287,7 +349,9 @@ int main(int argc, char *argv[])
         << "Le_C: median " << medC << "  range [" << loC << ", " << hiC << "]"
         << nl << "median-filled " << nFillZ << " nodes ("
         << nCold << " below Tfloor=" << Tfloor << " K, "
-        << nFail << " degenerate)" << endl;
+        << nFail << " degenerate)" << nl
+        << "guard [" << LeMin << ", " << LeMax << "] hit at " << nGuard
+        << " nodes (" << 100.0*nGuard/max(nTot, 1) << " %)" << endl;
 
     // ---- back up once, append, rewrite ----
     const fileName bak(fgm.objectPath() + ".preLe");

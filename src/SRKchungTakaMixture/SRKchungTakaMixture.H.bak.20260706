@@ -213,21 +213,7 @@ private:
             List<scalar>& Yl
         ) const;
 
-        //- Calculate real-gas mixture parameters from mole fractions.
-        //  needTransportMix (default true): the O(n^2) pair-interaction
-        //  loop below accumulates 9 quantities per species pair, but only
-        //  3 (coef1-3, the SRK attraction-parameter mixing) plus the O(n)
-        //  bM/cM are needed for the EOS coefficients alone -- the other 6
-        //  (sigma3M, epsilonkM0, omegaM0, MM0, miuiM0, kappaiM) are Chung
-        //  transport-mixing terms, unused by an EOS-only caller. With
-        //  ~100 species (e.g. thermo.wang2011) the O(n^2) loop dominates
-        //  total cost by orders of magnitude over any O(1) per-cell work,
-        //  so skipping 6 of 9 accumulators there is the real lever -- see
-        //  eosRootBranchProperties(), which only needs bM/coef1-3/cM per
-        //  cell and was found to gain nothing from trimming O(1) log()
-        //  calls alone (PEP and LAD Spike Suppression wiki sec 18d).
-        //  sigmaM/epsilonkM/MM/VcM/TcM/omegaM/miuiM/kappaiM are left
-        //  unset (0) when false -- callers must not read them.
+        //- Calculate real-gas mixture parameters from mole fractions
         void calculateRealGas
         (
             const List<scalar>& X,
@@ -243,8 +229,7 @@ private:
             scalar& TcM,
             scalar& omegaM,
             scalar& miuiM,
-            scalar& kappaiM,
-            const bool needTransportMix = true
+            scalar& kappaiM
         ) const;
 
         //- Compute mixture from a composition slice (shared logic)
@@ -343,94 +328,19 @@ public:
             const scalarField& chiField
         ) const;
 
-        //- Silent re-arm of the internal-cell coefficient pointers after a mesh
-        //  change (redistribution / refinement). Rebinds refInternalField_ and
-        //  coeffFields_ without the diagnostic reset or Info print.
-        virtual void refreshCoeffFields
-        (
-            const scalarField& refInternal,
-            const List<const scalarField*>& coeffFields
-        ) const;
-
-        //- Silent re-arm of the Opt-1 base-blend stencil field pointers after a
-        //  mesh change. Re-binds fgmTablePtr_/ZfieldPtr_/gZfieldPtr_/CfieldPtr_/
-        //  chiFieldPtr_ only; the mesh-independent node mixtures are NOT rebuilt.
-        virtual void refreshBaseBlendFields
-        (
-            const FGMTable& table,
-            const scalarField& Zfield,
-            const scalarField& gZfield,
-            const scalarField& Cfield,
-            const scalarField& chiField
-        ) const;
-
-        //- Silent re-arm of the Opt-2 patch-face coefficient pointers after a
-        //  mesh change. Rebinds patchRefFields_/patchCoeffFields_ without print.
-        virtual void refreshPatchCoeffFields
-        (
-            const List<const scalarField*>& patchRefs,
-            const List<List<const scalarField*>>& patchCoeffFields
-        ) const;
-
         //- Tier-4: differential-diffusion Lewis numbers from a composition at
         //  (p, T) with the exact live transport (Chung mu/kappa/Cp + Takahashi
-        //  Dimix). LeZ = Pr; LeC = nu/D_C (PV-weighted Dimix, weights w_k*Y_k
-        //  with the same w_k that define the tabulated C; empty = unity).
-        //  Builds the full Takahashi matrices regardless of the
-        //  speciesDiffusion switch (utility-only path). Returns false on a
-        //  degenerate state.
+        //  Dimix). LeZ = Pr; LeC = nu/D_C (PV-mass-weighted Dimix). Builds the
+        //  full Takahashi matrices regardless of the speciesDiffusion switch
+        //  (utility-only path). Returns false on a degenerate state.
         virtual bool lewisNumbers
         (
             const List<scalar>& Y,
             const scalar p,
             const scalar T,
             const labelList& pvIds,
-            const List<scalar>& pvWeights,
             scalar& LeZ,
             scalar& LeC
-        ) const;
-
-        //- Same live evaluation as lewisNumbers, but returns the raw transport
-        //  the NN surrogate has to reproduce: mu, kappa, Cp, rho and the FULL
-        //  per-species Dimix vector (Dmix is resized to nSpecies).
-        virtual bool transportProps
-        (
-            const List<scalar>& Y,
-            const scalar p,
-            const scalar T,
-            scalar& mu,
-            scalar& kappa,
-            scalar& Cp,
-            scalar& rho,
-            List<scalar>& Dmix
-        ) const;
-
-        //- Root-selection hysteresis: cubic-EOS branch rho/psi/Cp/h at
-        //  (p,T) for a mass-fraction composition Y. See
-        //  tabulatedRealGasMixture.H.
-        virtual bool eosRootBranchProperties
-        (
-            const List<scalar>& Y,
-            const scalar p,
-            const scalar T,
-            scalar& rhoMin, scalar& rhoMax,
-            scalar& psiMin, scalar& psiMax,
-            scalar& CpMin,  scalar& CpMax,
-            scalar& hMin,   scalar& hMax,
-            const bool needPsi = true,
-            const bool needCpH = true
-        ) const;
-
-        //- Root-selection hysteresis from already-known EOS coefficients
-        //  (skips the O(n^2) mixing loop). See tabulatedRealGasMixture.H.
-        virtual bool eosRootBranchPropertiesFromCoeffs
-        (
-            const scalar bM, const scalar coef1, const scalar coef2,
-            const scalar coef3, const scalar cM, const scalar Wm,
-            const scalar p, const scalar T,
-            scalar& rhoMin, scalar& rhoMax,
-            scalar& psiMin, scalar& psiMax,
-            const bool needPsi = true
         ) const;
 
         //- Disable the tabulated lookup (revert to live mixing).

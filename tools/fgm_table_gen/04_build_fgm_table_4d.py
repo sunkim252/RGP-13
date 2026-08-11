@@ -68,6 +68,11 @@ EPS = 1.0e-6
 # the exact normalized-c transport equation are neglected (standard
 # practice). Where Yc_eq < CEQ_MIN (pure streams Z->0,1) omega_c := 0.
 PV_SPECIES = ("CO2", "CO", "H2O", "H2")   # must match 05_* flamelet C
+# 진행변수 가중치 (2026-08-08). 생성물만으로 정의하면 소화 직전 상태도
+# c~0.64 로 읽혀 상부 가지가 c in [0.64,1] 로 압축되고, strain 증가에 대한
+# c 단조성이 55%까지 떨어진다(다가함수). 라디칼을 w 배로 섞으면 같은 정상해가
+# c 를 훨씬 넓게 덮고 단조성도 회복된다(w=5 실측: c_min 0.432, 단조성 97%).
+PV_WEIGHTS = None   # None = 전부 1.0
 X_FUEL_SURROGATE = "NC10H22:0.74, PHC3H7:0.15, CYC9H18:0.11"
 X_OX = "O2:1.0"
 CEQ_MIN = 1.0e-4
@@ -92,6 +97,8 @@ def equilibrium_closure(yaml_file, Zq, P, T_fuel, T_ox, species):
     Yo, ho = g.Y.copy(), g.enthalpy_mass
     pv_idx = [g.species_index(s) for s in PV_SPECIES
               if s in g.species_names]
+    pv_w = ([PV_WEIGHTS[k] for k, s in enumerate(PV_SPECIES)
+             if s in g.species_names] if PV_WEIGHTS else [1.0]*len(pv_idx))
     sp_idx = {sp: g.species_index(sp) for sp in species}
     n = len(Zq)
     C_eq = np.zeros(n); T_eq = np.zeros(n); T_u = np.zeros(n)
@@ -106,7 +113,7 @@ def equilibrium_closure(yaml_file, Zq, P, T_fuel, T_ox, species):
             Y_u[sp][i] = Ymix[sp_idx[sp]]
         g.equilibrate("HP")                    # adiabatic equilibrium
         T_eq[i] = g.T
-        C_eq[i] = float(sum(g.Y[k] for k in pv_idx))
+        C_eq[i] = float(sum(w*g.Y[k] for w, k in zip(pv_w, pv_idx)))
         for sp in species:
             Y_eq[sp][i] = g.Y[sp_idx[sp]]
     print(f"[eq] equilibrium closure on {n} Z points: "
@@ -158,16 +165,87 @@ def load_flamelet_dir(dir_path):
         fls.append({
             "path":   p,
             "Z":      np.asarray(d["Z"], float)[keep],
-            "C":      np.asarray(d["C"], float)[keep] / s,
+            "C":      (np.asarray(d["C"], float)[keep] / s if not PV_WEIGHTS else
+                       sum(w*np.asarray(d[f"Y_{sp}"], float)[keep]
+                           for w, sp in zip(PV_WEIGHTS, PV_SPECIES)
+                           if f"Y_{sp}" in d.files) / s),
             "T":      np.asarray(d["T"], float)[keep],
             "omega_C": np.asarray(d["omega_C"], float)[keep],
             "chi_st": float(d["chi_st"]),
             "mdot":   float(d["mdot"]),
             "P":      float(d["P"]),
             "Tmax":   float(np.asarray(d["T"], float)[keep].max()),
+            "rho":    np.asarray(d["rho"], float)[keep],
             "Y":      {sp: Y[sp][keep] / s for sp in species},
         })
     return fls, species
+
+
+def recompute_omega_weighted(fls, yaml_file, species, P):
+    """Re-evaluate omega_C with the SAME weights that define C.
+
+    The flamelet sweep stores omega_C = sum_k wdot_k*W_k/rho over the sweep's
+    OWN PV_SPECIES with unit weights (05_flamelet_sweep_fast._source_pv). When
+    the table redefines the progress variable with weights and/or extra species
+    (e.g. products + 5*(OH+H+O)), that stored source no longer is the material
+    derivative of the transported C -- the scalar and its source describe
+    different quantities. Rebuild it here from the saved (T, Y, rho) structure
+    so C and omega_C are consistent by construction, with no second data file
+    to keep in sync.
+
+    Kinetics are evaluated with the SAME mechanism the sweep solved with (pass
+    the SRK yaml), so concentrations come from the real-fluid EOS, not ideal gas.
+
+    Self-check: with unit weights the rebuilt source must reproduce the stored
+    one; the agreement is printed and a gross mismatch aborts the build."""
+    if not PV_WEIGHTS:
+        return
+    import cantera as ct
+    g = ct.Solution(str(yaml_file))
+    names = g.species_names
+    Mw = g.molecular_weights
+    idx = {sp: names.index(sp) for sp in species if sp in names}
+    pv = [(w, names.index(sp)) for w, sp in zip(PV_WEIGHTS, PV_SPECIES)
+          if sp in names]
+    missing = [sp for sp in PV_SPECIES if sp not in names]
+    if missing:
+        raise SystemExit(f"[omega] PV species absent from {yaml_file}: {missing}")
+
+    num = den = 0.0          # unit-weight cross-check accumulators
+    unit_idx = [(1.0, names.index(sp)) for sp in PV_SPECIES[:4]
+                if sp in names]      # the sweep's own 4 products
+    for fl in fls:
+        T = fl["T"]; rho = fl["rho"]; n = len(T)
+        Ymat = np.zeros((n, g.n_species))
+        for sp, j in idx.items():
+            Ymat[:, j] = fl["Y"][sp]
+        new = np.zeros(n); chk = np.zeros(n)
+        for i in range(n):
+            s = Ymat[i].sum()
+            if s <= 0:
+                continue
+            g.TPY = max(float(T[i]), 250.0), P, Ymat[i] / s
+            wdot = g.net_production_rates
+            r = max(float(rho[i]), 1e-30)
+            new[i] = sum(w*wdot[k]*Mw[k] for w, k in pv) / r
+            chk[i] = sum(w*wdot[k]*Mw[k] for w, k in unit_idx) / r
+        old = fl["omega_C"]
+        m = np.abs(old) > 1e-6*max(np.abs(old).max(), 1e-30)
+        if m.any():
+            num += float(np.abs(chk[m] - old[m]).sum())
+            den += float(np.abs(old[m]).sum())
+        fl["omega_C"] = new
+
+    rel = num/den if den > 0 else 0.0
+    print(f"[omega] rebuilt omega_C for {len(fls)} flamelets with weights "
+          + " + ".join(f"{w:g}*{s}" for w, s in zip(PV_WEIGHTS, PV_SPECIES))
+          + f"\n[omega] unit-weight cross-check vs stored source: "
+            f"rel.dev = {100*rel:.3f} %")
+    if rel > 0.05:
+        raise SystemExit(
+            f"[omega] rebuilt source disagrees with the stored one by "
+            f"{100*rel:.1f} % at unit weights -- the mechanism or the state "
+            f"reconstruction does not match the sweep. Refusing to build.")
 
 
 def compute_hrr(fls, yaml_file, species, P):
@@ -623,6 +701,14 @@ def build_tables(fls, species, n_chi=N_CHI, eq=None, chi_mode=False,
         tables[f] = out[..., 0] if chi_axis is None else out
     if smooth_c and smooth_c > 0:
         _smooth_manifold(tables, smooth_c, C_axis)
+
+    # c=1 은 화학평형(net production = 0)이므로 소스는 정확히 0이어야 한다.
+    # 경계행(omega=0)을 클라우드에 넣어두어도 _laminar_branch 의 셀별 MAX 가
+    # 근처 연소 상태를 골라 c=1 행에 남긴다(실측 2026-08-07: iso-c 0.98 까지
+    # 채운 뒤 c=1 소스 6.9e5). 위 주석의 의도대로 마지막 c 행을 강제한다.
+    for f in ("omega_C", "hrr"):
+        if f in tables:
+            tables[f][..., -1] = 0.0 if chi_axis is None else 0.0
     return Z_axis, g_axis, C_axis, chi_axis, tables
 
 
@@ -1053,6 +1139,8 @@ def main():
                    help="oxidizer-stream mole-fraction string (default "
                         "'O2:1.0'). E.g. 'O2:0.7, H2O:0.3' for steam-diluted "
                         "oxy-hydrogen tables.")
+    p.add_argument("--pv-weights", default=None,
+                   help="PV 종별 가중치 (쉼표구분, --pv-species 와 같은 순서)")
     p.add_argument("--pv-species", default=None,
                    help="space/comma-separated progress-variable species, "
                         "overriding the kerosene default CO2 CO H2O H2. Must "
@@ -1075,13 +1163,19 @@ def main():
 
     # stream/PV overrides (H2/O2 campaign etc.) -- module globals feed
     # equilibrium_closure() and the Tier-4 lewis block.
-    global X_FUEL_SURROGATE, X_OX, PV_SPECIES
+    global X_FUEL_SURROGATE, X_OX, PV_SPECIES, PV_WEIGHTS
     if args.x_fuel:
         X_FUEL_SURROGATE = args.x_fuel
     if args.x_ox:
         X_OX = args.x_ox
     if args.pv_species:
         PV_SPECIES = tuple(args.pv_species.replace(",", " ").split())
+    if args.pv_weights:
+        PV_WEIGHTS = [float(x) for x in args.pv_weights.replace(",", " ").split()]
+        if len(PV_WEIGHTS) != len(PV_SPECIES):
+            raise SystemExit(f"--pv-weights {len(PV_WEIGHTS)}개 != PV 종 {len(PV_SPECIES)}개")
+        print(f"[build] 가중 진행변수: " + " + ".join(
+            f"{w:g}*{s}" for w, s in zip(PV_WEIGHTS, PV_SPECIES)))
     if args.x_fuel or args.x_ox or args.pv_species:
         print(f"[cfg] streams override: fuel=[{X_FUEL_SURROGATE}] "
               f"ox=[{X_OX}] PV={PV_SPECIES}")
@@ -1118,6 +1212,10 @@ def main():
 
     # Volumetric heat-release rate per flamelet point (Wang-2015 Fig.19c).
     compute_hrr(fls, args.yaml_file, species, P_ref)
+
+    # Weighted progress variable: rebuild omega_C so it is the source of the C
+    # this table actually defines (no-op when the weights are unity).
+    recompute_omega_weighted(fls, args.yaml_file, species, P_ref)
 
     # Equilibrium burnt-end closure on the internal Zq grid (same grid the
     # beta-PDF convolution integrates over).

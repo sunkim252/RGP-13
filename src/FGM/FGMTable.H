@@ -132,6 +132,18 @@ class FGMTable
         //  (empty if not present, 2026-07-24).
         List<scalar> psis_table_;
 
+        //- Optional adiabatic-enthalpy offset of the manifold from the
+        //  conserved-scalar mixing line (empty if not present, 2026-08-06):
+        //      dhRef(Z,gZ,c) = h(T_ad, Y)|manifold - ((1-Z) hOx + Z hFuel)
+        //  With differential diffusion the adiabatic flamelet does NOT lie on
+        //  the mixing line (measured: -0.67 MJ/kg at Z_st for SRK+HP-Chung,
+        //  +1.40 MJ/kg for mixture-averaged -- 43-91% of the whole dh axis),
+        //  while the table's dh=0 slice IS that adiabatic state. Without this
+        //  offset the solver's dh = h - h_mix reads a non-zero defect for a
+        //  perfectly adiabatic cell and slides down the axis. Replicated along
+        //  the 4th axis so the standard quadrilinear machinery applies.
+        List<scalar> dhRef_table_;
+
         //- Tabulated species mass fractions, keyed by species name.
         //  Each entry is a flat list of length nZ*nGz*nC*nChi.
         HashTable<List<scalar>> Y_tables_;
@@ -400,6 +412,17 @@ public:
 
             //- Fuel-stream total enthalpy at the flamelet boundary [J/kg].
             inline scalar hFuel() const { return hFuel_; }
+
+            //- True if the table ships the adiabatic-enthalpy offset dhRef.
+            inline bool hasDhRef() const { return dhRef_table_.size() > 0; }
+
+            //- dhRef(Z,gZ,c) [J/kg]: add to the mixing line to obtain the
+            //  manifold's own adiabatic enthalpy, so that
+            //      dh = h - ((1-Z) hOx + Z hFuel) - dhRef
+            //  is zero exactly on the adiabatic manifold. Caller must check
+            //  hasDhRef(). The stored field is 4th-axis-replicated, so any
+            //  4th coordinate returns the same value; chi_axis_[0] is used.
+            scalar interpolateDhRef(scalar Z, scalar gZ, scalar C) const;
 
         // Access
 

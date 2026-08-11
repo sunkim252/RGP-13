@@ -87,6 +87,11 @@ NT = 32                 # h(T) grid points per composition
 T_CUT = 600.0           # hard reaction cutoff: omega = 0 below this T
 T4  = np.zeros((nZ, nGz, nC, N_H))
 om4 = np.zeros((nZ, nGz, nC, N_H))
+# h(T_ad, Y) per node: the manifold's OWN adiabatic enthalpy. With differential
+# diffusion this is NOT the mixing line (measured -0.67 MJ/kg at Z_st for
+# SRK+HP-Chung, +1.40 for mixture-averaged), yet the solver forms its defect as
+# h - mixing line. Ship the difference as dhRef so dh=0 <=> adiabatic there too.
+hAd3 = np.zeros((nZ, nGz, nC))
 hrr4 = np.zeros((nZ, nGz, nC, N_H)) if has_hrr else None
 t0 = time.time(); npt = 0
 for iZ in range(nZ):
@@ -96,6 +101,7 @@ for iZ in range(nZ):
             s = Yvec.sum()
             Tad = T3[iZ, iG, iC]
             if s <= 1e-6:                      # empty/edge -> replicate adiabatic
+                hAd3[iZ, iG, iC] = np.nan          # -> dhRef 0 (mixing line)
                 T4[iZ, iG, iC, :] = Tad
                 om4[iZ, iG, iC, :] = om3[iZ, iG, iC]
                 if has_hrr: hrr4[iZ, iG, iC, :] = hrr3[iZ, iG, iC]
@@ -122,6 +128,7 @@ for iZ in range(nZ):
             # cools T by the right sensible amount regardless of that offset. (An
             # absolute h_ad=(1-Z)hOx+ZhFuel reference fails because h(Tad,Y) != h_ad
             # for real-fluid flamelets.) Matches the solver's dh = h - h_mix(Z).
+            hAd3[iZ, iG, iC] = hgrid[-1]
             targets = hgrid[-1] + h_axis
             Tloc = np.interp(targets, hgrid, Tgrid)  # clamps to [T_FLOOR, Tad]
             Tloc[np.abs(h_axis) < 1e-9] = Tad        # dh=0 slice exact
@@ -143,7 +150,15 @@ log(f"dh=0 slice vs original 3-D Tmax-diff = {err:.3e} K (should be ~0)")
 # ---- write npz + OpenFOAM dict (enthalpy-axis 4-D format) ----
 def fmt(a): return "\n".join(f"    {v:.8e}" for v in np.asarray(a).reshape(-1))
 
-np.savez_compressed(OUT + '.npz',
+# dhRef(Z,gZ,c) = h(T_ad,Y) - ((1-Z) hOx + Z hFuel), 4th축으로 복제해 저장
+h_mix = (1.0 - Z_axis)[:, None, None]*h_ox + Z_axis[:, None, None]*h_fuel
+dhRef3 = hAd3 - h_mix
+dhRef3[~np.isfinite(dhRef3)] = 0.0
+dhRef4 = np.repeat(dhRef3[..., None], N_H, axis=3)
+log(f"dhRef: [{dhRef3.min()/1e6:.3f}, {dhRef3.max()/1e6:.3f}] MJ/kg "
+    f"(|dhRef| > 0.05 MJ/kg at {100*np.mean(np.abs(dhRef3) > 5e4):.1f}% of nodes)")
+
+np.savez_compressed(OUT + '.npz', dhRef=dhRef4,
     Z_axis=Z_axis, gZ_axis=g_axis, C_axis=C_axis, h_axis=h_axis,
     species=np.array(species, dtype=object), P=P, h_ox=h_ox, h_fuel=h_fuel,
     fourthAxis='enthalpy', T=T4, omega_C=om4,
@@ -152,7 +167,8 @@ np.savez_compressed(OUT + '.npz',
 log(f"[write] {OUT}.npz")
 
 nH = N_H
-blocks = [f"sourcePV\n(\n{fmt(om4)}\n);", f"T\n(\n{fmt(T4)}\n);"]
+blocks = [f"sourcePV\n(\n{fmt(om4)}\n);", f"T\n(\n{fmt(T4)}\n);",
+          f"dhRef\n(\n{fmt(dhRef4)}\n);"]
 blocks.append("species ( " + " ".join(species) + " );")
 for sp in species:
     blocks.append(f"Y_{sp}\n(\n{fmt(Y4[sp])}\n);")
@@ -160,7 +176,8 @@ body = "\n\n".join(blocks)
 header = f"""/*--------------------------------*- C++ -*----------------------------------*\\
 | FGM 4-D NON-ADIABATIC (Z~, gZ, c, dh=enthalpy-defect) -- add_enthalpy_axis.py
 | P_ref = {P:.6g} Pa | h_ox(800K)={h_ox:.6g} h_fuel(800K)={h_fuel:.6g} J/kg
-| dh = h_total - ((1-Z) hOx + Z hFuel);  dh=0 -> adiabatic 800K manifold
+| dh = h_total - ((1-Z) hOx + Z hFuel) - dhRef(Z,gZ,c);  dh=0 -> adiabatic
+| dhRef = h(T_ad,Y)|manifold - mixing line (0 for a unity-Lewis manifold)
 | flat C-order: idx = ((iZ*nGz + iGz)*nC + iC)*nH + iH
 \\*---------------------------------------------------------------------------*/
 FoamFile

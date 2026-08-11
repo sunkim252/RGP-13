@@ -135,42 +135,6 @@ public:
         ) const
         {}
 
-        //- Silent re-arm of the internal-cell coefficient lookup after a mesh-
-        //  cell-count change (AMR refinement / runtime redistribution reallocate
-        //  the fields). Same rebinding as enableCoeffTabulation but WITHOUT the
-        //  diagnostic-count reset or the Info print, so it can run on every mesh
-        //  change without log spam. Default no-op.
-        virtual void refreshCoeffFields
-        (
-            const scalarField& refInternal,
-            const List<const scalarField*>& coeffFields
-        ) const
-        {}
-
-        //- Silent re-arm of the Opt-1 base-blend stencil field pointers after a
-        //  mesh change. Re-binds only the table and the Z/gZ/C/chi manifold-
-        //  coordinate field pointers; the (mesh-independent) pre-blended node
-        //  mixtures are left intact and are NOT rebuilt. Default no-op.
-        virtual void refreshBaseBlendFields
-        (
-            const FGMTable& table,
-            const scalarField& Zfield,
-            const scalarField& gZfield,
-            const scalarField& Cfield,
-            const scalarField& chiField
-        ) const
-        {}
-
-        //- Silent re-arm of the Opt-2 patch-face coefficient pointers after a
-        //  mesh change. Same rebinding as enablePatchCoeffTabulation but without
-        //  the Info print. Default no-op.
-        virtual void refreshPatchCoeffFields
-        (
-            const List<const scalarField*>& patchRefs,
-            const List<List<const scalarField*>>& patchCoeffFields
-        ) const
-        {}
-
         //- Tier-4: evaluate the differential-diffusion Lewis numbers of the
         //  control variables from a mass-fraction composition Y at (p, T),
         //  using the EXACT live mixture transport (Chung/Takahashi) so the
@@ -178,18 +142,9 @@ public:
         //  own diffusivities (bit-consistent, unlike an external Cantera
         //  evaluation whose dense-liquid Chung deviates):
         //      LeZ = Pr = mu*Cp/kappa        (Z diffuses like heat: D_Z=alpha)
-        //      LeC = nu/D_C,  D_C = PV-weighted mixture-avg Dimix
+        //      LeC = nu/D_C,  D_C = PV-mass-weighted mixture-avg Dimix
         //  pvIds lists the progress-variable species (mixture order); if their
         //  local mass sums to ~0, D_C falls back to alpha (LeC = LeZ).
-        //  pvWeights are the SAME weights that define the tabulated progress
-        //  variable C = sum_k w_k Y_k / C_norm. D_C must average the species
-        //  diffusivities with w_k*Y_k, not Y_k alone: a table that weights the
-        //  radicals (e.g. products + 5*(OH+H+O)) but diffuses only the products
-        //  transports a scalar whose diffusivity is not its own -- and the
-        //  radicals are exactly the fast-diffusing species (D_H is several
-        //  times D_H2O), so ignoring the weights biases D_C low and Le_C high.
-        //  An empty pvWeights means unit weights (legacy behaviour); otherwise
-        //  it must have the same length as pvIds.
         //  Returns false when the backend does not implement the evaluation
         //  (default), or when the state evaluation is degenerate.
         virtual bool lewisNumbers
@@ -198,98 +153,8 @@ public:
             const scalar p,
             const scalar T,
             const labelList& pvIds,
-            const List<scalar>& pvWeights,
             scalar& LeZ,
             scalar& LeC
-        ) const
-        {
-            return false;
-        }
-
-        //- Raw live transport at (p,T) for a composition: mu, kappa, Cp, rho
-        //  and the full per-species Dimix. Same evaluation path as
-        //  lewisNumbers; used to generate NN-surrogate training data against
-        //  the SOLVER's own (NIST-validated, dense-limit guarded) Chung
-        //  implementation rather than an external one.
-        virtual bool transportProps
-        (
-            const List<scalar>& Y,
-            const scalar p,
-            const scalar T,
-            scalar& mu,
-            scalar& kappa,
-            scalar& Cp,
-            scalar& rho,
-            List<scalar>& Dmix
-        ) const
-        {
-            return false;
-        }
-
-        //- Root-selection hysteresis support: evaluate BOTH cubic-EOS
-        //  branches (liquid Zmin, vapour Zmax) of the mixture at (p,T) for
-        //  a mass-fraction composition Y, and return rho, psi=(drho/dp)_T,
-        //  Cp and h for EACH branch. Returns false when the state has only
-        //  one real root (no branch ambiguity -- nothing to hysteresis
-        //  over) or the backend doesn't implement real-fluid EOS branching.
-        //  Lets a caller (fgmFluid) pick whichever branch is closer to the
-        //  cell's PREVIOUS-timestep density -- a "sticky" root selection
-        //  using an actual cubic root at all times (never an interpolated
-        //  non-root value, unlike the rootBlendTol logistic blend in
-        //  SRKGasI.H, which was found to corrupt the cold-start pressure
-        //  field; see PEP and LAD Spike Suppression wiki secs 14-16) --
-        //  and then re-derive EVERY property the caller consumes (rho,
-        //  psi, Cp, h) from that SAME chosen branch. A partial correction
-        //  (rho alone) leaves psi/Cp/h thermodynamically inconsistent with
-        //  the swapped rho, which was found to blow up the globally-
-        //  coupled PEP pressure equation (wiki sec 18b). needPsi/needCpH
-        //  (both default true) let a caller that only needs a subset skip
-        //  the rest -- psi requires a 2nd cubic solve (forward FD), Cp/h
-        //  require 4 additional log()-based departure evaluations; over
-        //  the full (unmasked) domain every corrector, computing all of
-        //  them unconditionally was measured to cost ~6x more wall-clock
-        //  per iteration than the original rho-only correction (wiki sec
-        //  18c). Skipped outputs are left at a safe (never-uninitialised)
-        //  floor/ideal-gas value, not garbage.
-        virtual bool eosRootBranchProperties
-        (
-            const List<scalar>& Y,
-            const scalar p,
-            const scalar T,
-            scalar& rhoMin, scalar& rhoMax,
-            scalar& psiMin, scalar& psiMax,
-            scalar& CpMin,  scalar& CpMax,
-            scalar& hMin,   scalar& hMax,
-            const bool needPsi = true,
-            const bool needCpH = true
-        ) const
-        {
-            return false;
-        }
-
-        //- Root-selection hysteresis from ALREADY-KNOWN mixture EOS
-        //  coefficients (bM/coef1-3/cM, Peneloux/SRK) and mixture molar
-        //  mass Wm -- e.g. read directly from a per-cell coefficient
-        //  TABLE (fgmFluid::RGcoeffFields_, populated by
-        //  enableCoeffTabulation()) that the rest of the solver's
-        //  thermo_.correct() already uses for O(1) lookups. Skips
-        //  compositionToX()+calculateRealGas() entirely -- with ~100
-        //  species that O(n^2) mixing loop dominates
-        //  eosRootBranchProperties()'s cost by orders of magnitude, and
-        //  re-deriving coefficients the table has ALREADY computed this
-        //  same timestep was found to be the actual bottleneck (not the
-        //  O(1) psi/Cp/h work trimmed by eosRootBranchProperties()'s
-        //  needPsi/needCpH -- see PEP and LAD Spike Suppression wiki sec
-        //  18f). Prefer this over eosRootBranchProperties() whenever the
-        //  caller's coefficients are already tabulated.
-        virtual bool eosRootBranchPropertiesFromCoeffs
-        (
-            const scalar bM, const scalar coef1, const scalar coef2,
-            const scalar coef3, const scalar cM, const scalar Wm,
-            const scalar p, const scalar T,
-            scalar& rhoMin, scalar& rhoMax,
-            scalar& psiMin, scalar& psiMax,
-            const bool needPsi = true
         ) const
         {
             return false;

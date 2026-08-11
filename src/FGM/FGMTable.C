@@ -118,6 +118,34 @@ Foam::FGMTable::FGMTable
         Info<< "    NON-ADIABATIC FPV: 4th axis = enthalpy defect, nH=" << nChi_
             << "  dh=[" << chi_axis_[0] << "," << chi_axis_[nChi_-1] << "] J/kg"
             << nl << "    hOx=" << hOx_ << " hFuel=" << hFuel_ << " J/kg" << endl;
+
+        // Adiabatic-enthalpy offset (optional; see FGMTable.H). Without it the
+        // solver keeps the legacy mixing-line reference, which is exact only
+        // for a unity-Lewis manifold.
+        if (found("dhRef"))
+        {
+            dhRef_table_ = List<scalar>(lookup("dhRef"));
+            const label nTot = nZ_*nGz_*nC_*nChi_;
+            if (dhRef_table_.size() != nTot)
+            {
+                FatalErrorInFunction
+                    << "dhRef size " << dhRef_table_.size() << " != "
+                    << nTot << exit(FatalError);
+            }
+            scalar lo = GREAT, hi = -GREAT;
+            forAll(dhRef_table_, i)
+            {
+                lo = min(lo, dhRef_table_[i]); hi = max(hi, dhRef_table_[i]);
+            }
+            Info<< "    dhRef (adiabatic offset from the mixing line): ["
+                << lo/1e6 << ", " << hi/1e6 << "] MJ/kg -- dh measured from"
+                << " the manifold's own adiabatic state" << endl;
+        }
+        else
+        {
+            Info<< "    dhRef absent: dh referenced to the mixing line"
+                << " (exact only for unity-Lewis manifolds)" << endl;
+        }
     }
 
     // -------- optional steam-dilution axis (H2/O2/H2O power-generation FPV) --
@@ -688,6 +716,21 @@ Foam::scalar Foam::FGMTable::interpolateLe
             << exit(FatalError);
     }
     return interpolateTable(Le_tables_[var], Z, gZ, C, chi);
+}
+
+
+Foam::scalar Foam::FGMTable::interpolateDhRef
+(
+    scalar Z, scalar gZ, scalar C
+) const
+{
+    if (dhRef_table_.empty())
+    {
+        FatalErrorInFunction
+            << "dhRef is not tabulated in fgmProperties." << exit(FatalError);
+    }
+    // 4th-axis-replicated: any coordinate gives the same value.
+    return interpolateTable(dhRef_table_, Z, gZ, C, chi_axis_[0]);
 }
 
 

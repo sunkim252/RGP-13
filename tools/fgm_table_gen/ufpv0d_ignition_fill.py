@@ -34,7 +34,7 @@ T_IN = 800.0
 ZST = 0.2255
 PV = ("CO2", "CO", "H2O", "H2")
 NZ = 41                    # Z bins (matches flamelet N; builder regrids anyway)
-NSNAP = 30                 # snapshot times (log-spaced over ignition window)
+NSNAP = int(_os.environ.get("FGM_IGN_NSNAP", "30"))   # iso-c 스냅샷 수 (환경변수)
 
 
 def log(m):
@@ -64,7 +64,13 @@ def main():
     # (same (Z,c), up to ~900 K apart at rich Z) made griddata blend two
     # physical branches -> non-monotone T(c) (-368 K dips) and jagged
     # contours at Z~0.4-0.5, c>0.85.
-    clevels = np.linspace(0.05, 0.75, NSNAP)
+    # iso-c 상한 (2026-08-07): 0.75 로 끊으면 c 0.85~1.0 에 데이터가 없어
+    # 빌더의 이웃-최대 보간이 마지막 값을 붙들고 평평한 꼬리를 만들고, 평형
+    # 경계에서 omega 가 0 으로 떨어지지 않는다(실측: c=0.95 와 1.00 이 동일값
+    # 1.2e5, 구 테이블은 0). 점화 궤적은 평형까지 타므로 데이터는 있다 -- 끝까지
+    # 샘플링한다. 환경변수 FGM_IGN_CMAX 로 조절.
+    CMAX = float(_os.environ.get("FGM_IGN_CMAX", "0.98"))
+    clevels = np.linspace(0.05, CMAX, NSNAP)
 
     t0w = time.time()
     # ---- per-bin trajectory, sampled in ITS OWN progress space ----
@@ -78,7 +84,12 @@ def main():
         g = ct.Solution(str(YAML))
         g.TPY = T_IN, P, Z*Yf + (1 - Z)*Yo
         Y0 = g.Y.copy()
-        r = ct.IdealGasConstPressureReactor(g)
+        # 실유체(RK/SRK) 상에서는 IdealGasConstPressureReactor 가 못 쓰인다
+        # (구성 시 예외 -> 전 bin 이 동결 상태로 저장되어 om=0, T=800K 인 채로
+        # 통과한다. 2026-08-07 실측). 상 종류로 분기한다.
+        r = (ct.IdealGasConstPressureReactor(g)
+             if g.thermo_model.startswith("ideal-gas")
+             else ct.ConstPressureReactor(g))
         net = ct.ReactorNet([r])
         net.rtol, net.atol = 1e-9, 1e-15
         Cs=[]; Ts=[]; Ys=[]; oms=[]
