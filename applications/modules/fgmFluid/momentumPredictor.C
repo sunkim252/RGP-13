@@ -27,6 +27,7 @@ License
 #include "fvmDiv.H"
 #include "fvmLaplacian.H"
 #include "fvcGrad.H"
+#include "fvcCurl.H"
 #include "fvcDiv.H"
 #include "fvcLaplacian.H"
 #include "fvcSnGrad.H"
@@ -78,6 +79,65 @@ void Foam::solvers::fgmFluid::momentumPredictor()
             LADUCoeff*V23
            *mag(U)().primitiveField()
            *mag(fvc::grad(rho))().primitiveField();
+
+        // ladDucrosU (2026-08-11): gate the artificial SHEAR viscosity with the
+        // contact-discontinuity sensor of Jain, Agrawal & Moin, Phys. Rev.
+        // Fluids 9 (2024) 024609 (arXiv:2307.03257), Eq. (17):
+        //
+        //     f_D = |grad rho|^2 / ( |grad rho|^2
+        //                          + a (theta^2 + omega_i omega_i)(rho/|u|)^2 )
+        //
+        // implemented multiplied through by |u|^2 so nothing divides by a
+        // velocity that vanishes at a no-slip wall.
+        //
+        // WHY HERE. muArt's own indicator is |U|*|grad rho|, which is MAXIMAL
+        // on the physical shear layer -- exactly what that paper warns about:
+        // a density indicator "will not only detect contact discontinuities,
+        // but will also detect shocks and vortical motions ... hence
+        // unnecessarily dissipative". This is the load-bearing term here
+        // (LADUCoeff 4; setting it to 0 costs ~3.2x in dt), so its lack of
+        // selectivity is a live problem, whereas the artificial MASS
+        // diffusivity it was first written for is off (LADrhoCoeff 0) and
+        // measured harmful at every coefficient. f_D turns off where enstrophy
+        // or dilatation dominates, i.e. on the shear layer, and stays on at a
+        // genuine density jump.
+        //
+        // NOT VALIDATED. The quantity that would show whether this reduces
+        // shear-layer distortion (probe RMS / spectrum) was found not to
+        // converge in dt or grid on the 2-D testbed (2026-08-09/10), so this
+        // testbed cannot judge it. Default off; decide it on the 3-D injector.
+        const Switch ladDucrosU
+        (
+            pimple.dict().lookupOrDefault<Switch>("ladDucrosU", false)
+        );
+        if (ladDucrosU)
+        {
+            const scalar a
+            (
+                pimple.dict().lookupOrDefault<scalar>("ladDucrosA", scalar(2))
+            );
+            const scalarField gr2(magSqr(fvc::grad(rho))().primitiveField());
+            const scalarField dw2
+            (
+                (sqr(fvc::div(U)) + magSqr(fvc::curl(U)))().primitiveField()
+            );
+            const scalarField U2(magSqr(U)().primitiveField());
+            const scalarField r2(sqr(rho.primitiveField()));
+            const scalarField fD
+            (
+                (gr2*U2)/(gr2*U2 + a*dw2*r2 + SMALL)
+            );
+            muArt.primitiveFieldRef() *= fD;
+            label nAct = 0;
+            forAll(fD, celli)
+            {
+                if (fD[celli] > 0.1) nAct++;
+            }
+            reduce(nAct, sumOp<label>());
+            Info<< "LAD-U ducrosGate: fD max = " << gMax(fD)
+                << ", cells active(>0.1) = " << nAct << endl;
+        }
+
         muArt.correctBoundaryConditions();
         Info<< "LAD-U: muArt max = " << gMax(muArt.primitiveField())
             << " kg/(m s)" << endl;
