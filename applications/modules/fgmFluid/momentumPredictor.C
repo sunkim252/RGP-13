@@ -205,6 +205,34 @@ void Foam::solvers::fgmFluid::momentumPredictor()
     );
     fvVectorMatrix& UEqn = tUEqn.ref();
 
+    // --- ladRhoMomentum: Kawai Eq. (32) right-hand side ----------------------
+    // The artificial mass diffusion A_rho = Dr*grad(rho) that pressureCorrector
+    // adds to the (volumetric) continuity must also carry momentum:
+    //     d(rho u)/dt + div(rho u (x) u + p d - tau) = div(A_rho (x) u)
+    // With a uniform u both div(rho u (x) u) and div(A_rho (x) u) collapse to
+    // u times the corresponding continuity terms, so the momentum equation
+    // reduces to u*[continuity] and the uniform field is EXACTLY preserved
+    // (Kawai, Terashima & Negishi, JCP 300 (2015) 116, Sec. 2.2). Omitting it
+    // -- as this solver did -- means the mass smoothing injects momentum at
+    // every density gradient. phiA_amd = Sf & A_rho is published by
+    // pressureCorrector and is identically zero when LADrhoCoeff = 0.
+    // NOTE the caveat: this solver solves no discrete continuity equation at
+    // all (the pressure equation is the volumetric PEP form), so the
+    // constant-velocity property is recovered only to the extent that the
+    // pressure equation's -div(Dr grad rho)/rho mirrors continuity's +div(A_rho).
+    const Switch ladRhoMomentum
+    (
+        pimple.dict().lookupOrDefault<Switch>("ladRhoMomentum", false)
+    );
+    if (ladRhoMomentum && mesh.foundObject<surfaceScalarField>("phiA_amd"))
+    {
+        const surfaceScalarField& phiA =
+            mesh.lookupObject<surfaceScalarField>("phiA_amd");
+        UEqn -= fvm::div(phiA, U, "div(phiA,U)");
+        Info<< "LAD-rho momentum: |phiA| max = "
+            << gMax(mag(phiA.primitiveField())) << " kg/s" << endl;
+    }
+
     UEqn.relax();
 
     fvConstraints().constrain(UEqn);

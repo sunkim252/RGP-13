@@ -29,6 +29,7 @@ License
 #include "fvmSup.H"
 #include "fvmLaplacian.H"
 #include "fvcGrad.H"
+#include "fvcVolumeIntegrate.H"
 #include "zeroGradientFvPatchFields.H"
 
 // * * * * * * * * * * * * * * Member Functions  * * * * * * * * * * * * * * //
@@ -127,6 +128,17 @@ void Foam::solvers::fgmFluid::thermophysicalPredictor()
         )()
     );
 
+    // Global mass-conservation diagnostic. contErr is already the LOCAL
+    // continuity residual ddt(rho) + div(phi); its volume integral is the
+    // net rate at which the domain gains/loses mass that the fluxes do not
+    // account for [kg/s]. Confirms at run time what the offline budget
+    // (tools/budget_conservation.py) measured as ~9% of throughput.
+    if (contErrComp)
+    {
+        Info<< "mass balance: int(contErr) dV = "
+            << fvc::domainIntegrate(contErr).value() << " kg/s" << endl;
+    }
+
     // --- Mixture-fraction transport (conserved scalar, no source) ---
     {
         const volScalarField DZ("DZ", Deff("Z"));
@@ -222,10 +234,25 @@ void Foam::solvers::fgmFluid::thermophysicalPredictor()
 
             scalarField& hc = h.primitiveFieldRef();
             const scalarField& Zbnd = Z_.primitiveField();
+            // Same reference the lookup uses: with dhRef present the axis is
+            // measured from the manifold's own adiabatic enthalpy, so bounding
+            // against the bare mixing line would clip physical states.
+            const bool useDhRef = fgmTable_.hasDhRef();
+            const scalarField& gZbnd = gZ_.primitiveField();
+            const scalarField& Cbnd = C_.primitiveField();
             forAll(hc, celli)
             {
                 const scalar Zi = max(min(Zbnd[celli], scalar(1)), scalar(0));
-                const scalar hAd = (scalar(1) - Zi)*hOxb + Zi*hFuelb;
+                scalar hAd = (scalar(1) - Zi)*hOxb + Zi*hFuelb;
+                if (useDhRef)
+                {
+                    hAd += fgmTable_.interpolateDhRef
+                    (
+                        Zi,
+                        min(max(gZbnd[celli], scalar(0)), scalar(1)),
+                        max(Cbnd[celli], scalar(0))
+                    );
+                }
                 hc[celli] = max(min(hc[celli], hAd + dhMax), hAd + dhMin);
             }
             h.correctBoundaryConditions();

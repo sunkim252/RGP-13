@@ -832,6 +832,9 @@ void Foam::solvers::fgmFluid::updateManifold()
     // passed directly (clamped to the tabulated W range), no defect.
     const bool useW = fgmTable_.useDilution();
     const bool use4D = useChi || useH || useW;
+    // With differential diffusion the adiabatic manifold does not sit on the
+    // mixing line; dhRef restores "dh = 0 <=> adiabatic" (see FGMTable.H).
+    const bool useDhRef = useH && fgmTable_.hasDhRef();
     const scalar hOxb   = useH ? fgmTable_.hOx()   : 0;
     const scalar hFuelb = useH ? fgmTable_.hFuel() : 0;
     const scalarField* hcl = useH ? &hPtr_->primitiveField() : nullptr;
@@ -963,7 +966,11 @@ void Foam::solvers::fgmFluid::updateManifold()
         scalar coord4 = chi_st;
         if (useH)
         {
-            const scalar hAd = (scalar(1) - Zcl)*hOxb + Zcl*hFuelb;
+            scalar hAd = (scalar(1) - Zcl)*hOxb + Zcl*hFuelb;
+            if (useDhRef)
+            {
+                hAd += fgmTable_.interpolateDhRef(Zcl, gz, Ccl);
+            }
             coord4 = (*hcl)[celli] - hAd;
         }
         else if (useW)
@@ -1089,7 +1096,11 @@ void Foam::solvers::fgmFluid::updateManifold()
                 scalar coord4 = chip[fi];
                 if (useH)
                 {
-                    const scalar hAd = (scalar(1) - Zcl)*hOxb + Zcl*hFuelb;
+                    scalar hAd = (scalar(1) - Zcl)*hOxb + Zcl*hFuelb;
+                    if (useDhRef)
+                    {
+                        hAd += fgmTable_.interpolateDhRef(Zcl, gz, Ccl);
+                    }
                     coord4 = (*hp)[fi] - hAd;
                 }
                 else if (useW)

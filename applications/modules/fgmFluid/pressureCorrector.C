@@ -43,6 +43,7 @@ Description
 #include "fvcFlux.H"
 #include "fvcDdt.H"
 #include "fvcGrad.H"
+#include "fvcCurl.H"
 #include "fvcSnGrad.H"
 #include "fvcReconstruct.H"
 #include "safeReconstruct.H"
@@ -348,8 +349,62 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
     // dead pair is removed; the re-sync itself is unchanged and now happens
     // exactly once, at the assignment below.
     volScalarField psi(thermo.psi());
-    rho = thermo.rho();
-    rho.relax();
+
+    // rhoResyncCoeff (2026-08-07): how much of the CONTINUITY density is
+    // discarded in favour of the EOS density each corrector.
+    //
+    //     rho <- (1 - a)*rho_continuity + a*thermo.rho()
+    //
+    // a = 1 is the historical behaviour: the pressure equation's own density
+    // (the one it just solved the continuity equation FOR, incremented by
+    // psi*dp) is overwritten outright. That is why `mcpCorrectRho` measured
+    // EXACTLY zero effect -- the increment is wiped on the next corrector's
+    // first line. It is also why the base solver framework passes BOTH
+    // densities to fluidSolver::continuityErrors(rho, thermo.rho(), phi):
+    // they are meant to be allowed to differ, and the gap is the diagnostic.
+    //
+    // Measured 2026-08-07, and the reason this knob exists: the mass error
+    // tracks the RE-SYNC FREQUENCY, not the pressure equation form.
+    //   massConservativeP, thermoPerCorrector false (1 re-sync/outer): 0.91%
+    //   massConservativeP, thermoPerCorrector true  (every corrector):  4.78%
+    // Re-syncing more often throws the continuity density away more often.
+    //
+    // a < 1 lets the continuity density survive. The classic risk is unbounded
+    // drift between the two densities, which is exactly what a = 1 was
+    // suppressing -- so this is a trade, not a free win, and the sweep is the
+    // experiment. Default 1 = unchanged behaviour.
+    const scalar rhoResyncCoeff
+    (
+        pimple.dict().lookupOrDefault<scalar>("rhoResyncCoeff", scalar(1))
+    );
+    // rhoTransport (2026-08-07): Kawai Eq. (31) as a SEPARATE transported
+    // continuity equation, so rho is no longer an EOS lookup at all. When it
+    // is on, the EOS re-sync below must not run -- the transported density IS
+    // the density. See the update block after the pressure correctors.
+    const Switch rhoTransport
+    (
+        pimple.dict().lookupOrDefault<Switch>("rhoTransport", false)
+    );
+    if (rhoTransport)
+    {
+        // rho carries over from the previous corrector's Eq. (31) update.
+    }
+    else if (rhoResyncCoeff >= 1)
+    {
+        rho = thermo.rho();
+    }
+    else
+    {
+        rho = (1 - rhoResyncCoeff)*rho + rhoResyncCoeff*thermo.rho();
+        Info<< "rhoResyncCoeff " << rhoResyncCoeff
+            << ": |rho - rhoEOS| max = "
+            << gMax(mag(rho - thermo.rho())().primitiveField())
+            << " kg/m^3" << endl;
+    }
+    if (!rhoTransport)
+    {
+        rho.relax();
+    }
 
     // Root-selection hysteresis: correct rho AND psi together, from the
     // SAME chosen branch, before psis (below) is built from them. See
@@ -440,13 +495,49 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
     (
         pimple.dict().lookupOrDefault<Switch>("rhofUpwind", false)
     );
-    const surfaceScalarField rhof
+    // rhofScheme (2026-08-07): make the FACE DENSITY consistent with the face
+    // reconstruction that actually produced rho.
+    //
+    // At a passive contact (uniform p, uniform u) the exact answer is that rho
+    // advects while p and u are untouched. The mass-conserving pressure
+    // equation radiates nothing only if its two sources cancel discretely:
+    //     fvc::ddt(rho)  +  fvc::div(phiHbyAm)  ==  0
+    // But rho is NOT transported here -- it is slaved to (p, h, Z, C) through
+    // the FGM manifold, and h/Z/C are convected with limitedLinear/
+    // limitedLinear01, whereas rhof below defaults to PLAIN LINEAR. The same
+    // density field therefore gets two different face reconstructions, the
+    // cancellation fails by O(limiter difference x rho jump), and the residual
+    // is a pressure source sitting exactly on the contact. That is the spike.
+    //
+    // The PEP form dodges this by deleting fvc::ddt(rho) altogether -- at the
+    // cost of not conserving mass (measured: ~9% of throughput, 2026-08-06).
+    // This switch attacks the cancellation instead, so mass conservation and
+    // spike suppression stop being mutually exclusive.
+    //
+    // Set to the name of an entry in fvSchemes/interpolationSchemes, e.g.
+    //     interpolationSchemes { rhoc  limitedLinear01 1; }
+    //     PIMPLE            { rhofScheme rhoc; }
+    // Empty (default) keeps the historical plain linear interpolate.
+    // Supersedes rhofUpwind (which is the crude 1st-order member of this same
+    // family, and which Stage-1 screening showed behaves as a smearer).
+    const word rhofScheme
     (
-        "rhof",
-        rhofUpwind
-      ? upwind<scalar>(mesh, phi).interpolate(rho)
-      : fvc::interpolate(rho)
+        pimple.dict().lookupOrDefault<word>("rhofScheme", word::null)
     );
+    tmp<surfaceScalarField> trhof;
+    if (rhofUpwind)
+    {
+        trhof = upwind<scalar>(mesh, phi).interpolate(rho);
+    }
+    else if (rhofScheme != word::null)
+    {
+        trhof = fvc::interpolate(rho, phi, rhofScheme);
+    }
+    else
+    {
+        trhof = fvc::interpolate(rho);
+    }
+    const surfaceScalarField rhof("rhof", trhof);
 
     const volScalarField rAU("rAU", 1.0/UEqn.A());
     const surfaceScalarField rhorAUf("rhorAUf", fvc::interpolate(rho*rAU));
@@ -498,7 +589,34 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
     // harmonic (series-resistance-correct) mean is the density-jump-robust
     // choice for a face mobility (Ferziger & Peric; Rhie & Chow, AIAA J. 21
     // (1983) 1525). 1/rAU = A() > 0 (momentum diagonal) so no floor needed.
-    const surfaceScalarField rAUf("rAUf", 1.0/fvc::interpolate(1.0/rAU));
+    // rAUfDensityWeighted (2026-08-07): the momentum-weighted-interpolation
+    // (MWI) recipe from the pressure-based LARGE-DENSITY-RATIO multiphase
+    // literature, which routinely runs rho ratios of 1e6 -- three decades past
+    // our 85x -- with the interfacial imbalance driven down to solver
+    // tolerance (Bartholomew, Denner et al., JCP 375 (2018) 177; Denner & van
+    // Wachem, Numer. Heat Transfer B 65 (2014) 218).
+    //
+    // The point: rAU = 1/A() ~ dt/rho JUMPS with the density, so ANY direct
+    // face average of it (arithmetic or harmonic) is a choice between two bad
+    // options at the contact. But the PRODUCT rho*rAU ~ dt is SMOOTH across
+    // the same face. So interpolate the smooth product and divide by a
+    // consistent face density:
+    //     rAUf = interp(rho*rAU)/rhof = rhorAUf/rhof
+    // which is dimensionally the same velocity-level mobility the pEqn
+    // laplacian wants, but built from a quantity that has no jump to smear.
+    // rhorAUf is already assembled above for the mass-level flux, so this
+    // costs one division. Default off (the harmonic mean stays the baseline).
+    const Switch rAUfDensityWeighted
+    (
+        pimple.dict().lookupOrDefault<Switch>("rAUfDensityWeighted", false)
+    );
+    const surfaceScalarField rAUf
+    (
+        "rAUf",
+        rAUfDensityWeighted
+      ? (rhorAUf/rhof)()
+      : (1.0/fvc::interpolate(1.0/rAU))()
+    );
     // ATTEMPT 2: real SRK isothermal compressibility psis = (drho/dp)_T/rho =
     // kappa_T (thermo.psi() now returns the real (drho/dp)_T -- see SRKGasI.H).
     // This supplies the true dense-fluid stiffness that the ideal-gas 1/(gamma
@@ -553,6 +671,15 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
     (
         pepFull
      || pimple.dict().lookupOrDefault<Switch>("pepRHS", false)
+    );
+    // pepTauS (2026-08-06): add the VISCOUS DISSIPATION tau:S that the
+    // Terashima-Koshi pressure-evolution equation omits but Kawai Eq. (19)
+    // carries (see the term itself below). NOT implied by pepFull -- kept an
+    // independent switch so the A/B against the current production stack is
+    // clean. Read every step (runTimeModifiable).
+    const Switch pepTauS
+    (
+        pimple.dict().lookupOrDefault<Switch>("pepTauS", false)
     );
     // psisFreezeOuter (2026-07-24): double-flux/RFQC-literal "freeze the
     // acoustic coefficient over the step" -- psis is computed ONCE per OUTER
@@ -756,6 +883,25 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
     );
     MRF.makeRelative(phiHbyAv);
 
+    // --- massConservativeP: restore the STOCK mass-conserving pressure eqn ---
+    // This module always replaces isothermalFluid's continuity-based pressure
+    // equation with the volumetric pressure-evolution (PEP) form -- there was
+    // no way back, and `pepFull` only ADDS terms on top of the replacement.
+    // Measured consequence (2026-08-06): the domain leaks ~9% of its mass
+    // throughput, systematically and without grid convergence, because no
+    // discrete continuity equation is solved anywhere. Setting this switch
+    // rebuilds the original
+    //     fvc::ddt(rho) + psi*correction(fvm::ddt(p)) + fvc::div(phiHbyAm) = 0
+    // with the MASS flux phiHbyAm = rhof*phiHbyAv and the mass-level face
+    // mobility rhorAUf, giving a discretely mass-conserving solve. Expect the
+    // transcritical contact to radiate its spurious pressure again -- that
+    // trade is exactly what this switch is for measuring. Default off.
+    const Switch massConservativeP
+    (
+        pimple.dict().lookupOrDefault<Switch>("massConservativeP", false)
+    );
+    const surfaceScalarField phiHbyAm("phiHbyAm", rhof*phiHbyAv);
+
     // Update the pressure BCs for flux consistency (3D: waveTransmissive
     // outlet, fixedFluxPressure walls). Volumetric-flux form: pass the
     // volumetric predicted flux and the rAUf (velocity-level) coefficient,
@@ -763,7 +909,14 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
     // flux; on a flow-carrying fixedFluxPressure patch it would subtract
     // rho_b*(Sf&U_b) from the volumetric phiHbyAv and skew snGrad(p) by
     // ~rho_b (LOX ~1000x). (backport RGP-13-GPU 2005bc9)
-    constrainPressure(p, U, phiHbyAv, rAUf, MRF);
+    if (massConservativeP)
+    {
+        constrainPressure(p, U, phiHbyAm, rhorAUf, MRF);
+    }
+    else
+    {
+        constrainPressure(p, U, phiHbyAv, rAUf, MRF);
+    }
 
     // --- RANK 4: Artificial Mass Diffusivity (AMD) on DENSITY -----------------
     // Kawai, Terashima & Negishi, J. Comput. Phys. 300 (2015) 116: at a large
@@ -842,6 +995,112 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
                 scalar(1)
             )
         );
+        // ladDriftSensor (2026-08-08): gate the artificial mass diffusion on
+        // the TRANSPORTED-vs-EOS density discrepancy instead of on |grad rho|.
+        //
+        // Every LAD sensor tried so far fails for the same reason: it cannot
+        // tell the PHYSICAL density jump from the SPURIOUS one. |grad rho| is
+        // maximal at both. The `ladOddEven` pressure detector measured theta
+        // max = 0.998 on this testbed -- it passes essentially every cell, so
+        // LADrhoCoeff acted as global mass diffusion and blew up above ~0.05.
+        //
+        // The drift does not have that problem. Where the solution is right,
+        // the transported and EOS densities AGREE, so the drift is zero -- at
+        // the physical contact included. Measured 2026-08-07 on this testbed:
+        // median |drift| = 0.002 kg/m^3 over 3744 cells, with 5 cells (0.1%)
+        // reaching ~137 in an odd-even (+,-,+ on adjacent cells) pattern at
+        // y ~ 0.47 mm, which is NOT on the contact (y ~ 0.60). A 5e4 contrast
+        // between physical and spurious, versus none for |grad rho|.
+        //
+        // This is what Kawai's Eq. (31) diffusion is FOR; his sensor is a 4th
+        // derivative with a Gaussian filter, unavailable on an unstructured
+        // mesh. The drift is a better sensor anyway: it measures the very
+        // inconsistency the diffusion exists to remove, so the loop is
+        // self-extinguishing -- smoothing the drift turns the sensor off.
+        // Requires rhoTransport (without it rho IS thermo.rho() and the drift
+        // is identically zero). ladDriftEps = drift fraction of rho at which
+        // the sensor saturates.
+        const Switch ladDriftSensor
+        (
+            pimple.dict().lookupOrDefault<Switch>("ladDriftSensor", false)
+        );
+        const scalar ladDriftEps
+        (
+            pimple.dict().lookupOrDefault<scalar>("ladDriftEps", scalar(0.01))
+        );
+        // ladDucros (2026-08-08): the CONTACT-discontinuity sensor of
+        // Jain, Agrawal & Moin, Phys. Rev. Fluids 9 (2024) 024609
+        // (arXiv:2307.03257), Eq. (17):
+        //
+        //     f_D = |grad rho|^2 / ( |grad rho|^2
+        //                          + a (theta^2 + omega_i omega_i)(rho/|u|)^2
+        //                          + eps )
+        //
+        // theta = div(u) is the dilatation and omega = curl(u). It fires on a
+        // density jump and switches OFF where dilatation (shocks) or enstrophy
+        // (vortical motion) is large -- which is exactly the discrimination
+        // every sensor in this solver has lacked. That paper states the problem
+        // in our own words: a plain density/internal-energy indicator "will not
+        // only detect contact discontinuities, but will also detect shocks and
+        // vortical motions ... hence unnecessarily dissipative".
+        //
+        // Two properties make it usable here where Kawai's is not: it needs NO
+        // Gaussian filtering of the artificial properties (the step that blocks
+        // unstructured meshes), and it is validated with a SECOND-ORDER central
+        // scheme at C_D = 0.5, not only with high-order compact differencing.
+        //
+        // Implemented multiplied through by |u|^2 so nothing divides by a
+        // velocity that vanishes at a no-slip wall:
+        //     f_D = A|u|^2 / ( A|u|^2 + a B rho^2 + eps ),  A=|grad rho|^2,
+        //                                                   B=theta^2+|omega|^2
+        // NOTE this swaps ONLY the sensor; the Dr envelope
+        // (LADrhoCoeff*V^(1/3)*|U|) is left as-is so the drift-vs-fD comparison
+        // varies one thing. Jain's own envelope uses (|u|+c_s) and an r-th
+        // derivative of rho instead.
+        const Switch ladDucros
+        (
+            pimple.dict().lookupOrDefault<Switch>("ladDucros", false)
+        );
+        const scalar ladDucrosA
+        (
+            pimple.dict().lookupOrDefault<scalar>("ladDucrosA", scalar(2))
+        );
+        if (ladDucros)
+        {
+            const scalarField A(magSqr(fvc::grad(rho))().primitiveField());
+            const scalarField B
+            (
+                (sqr(fvc::div(U)) + magSqr(fvc::curl(U)))().primitiveField()
+            );
+            const scalarField U2(magSqr(U)().primitiveField());
+            const scalarField R2(sqr(rho.primitiveField()));
+            sensor = (A*U2)/(A*U2 + ladDucrosA*B*R2 + SMALL);
+            label nAct = 0;
+            forAll(sensor, celli)
+            {
+                if (sensor[celli] > 0.1) nAct++;
+            }
+            reduce(nAct, sumOp<label>());
+            Info<< "LAD-rho ducrosContact: max = " << gMax(sensor)
+                << ", cells active(>0.1) = " << nAct << endl;
+        }
+        if (ladDriftSensor && rhoTransport)
+        {
+            const scalarField drift
+            (
+                mag(rho.primitiveField() - thermo.rho()().primitiveField())
+            );
+            sensor =
+                min(drift/(ladDriftEps*rho.primitiveField()), scalar(1));
+            label nAct = 0;
+            forAll(sensor, celli)
+            {
+                if (sensor[celli] > 0.1) nAct++;
+            }
+            reduce(nAct, sumOp<label>());
+            Info<< "LAD-rho driftSensor: max = " << gMax(sensor)
+                << ", cells active(>0.1) = " << nAct << endl;
+        }
         if (ladOddEven)
         {
             const scalarField V23(V13*V13);
@@ -864,12 +1123,107 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
             << " m^2/s" << endl;
     }
 
+    // Kawai Eq. (31)-(32) pair: the artificial mass flux A_rho = Dr*grad(rho)
+    // enters continuity as +div(A_rho) AND momentum as +div(A_rho (x) u). The
+    // second half is what makes a uniform velocity field EXACTLY invariant
+    // under the smoothing (constant-velocity condition) -- without it the
+    // artificial mass diffusion generates spurious momentum at a contact.
+    // Publish the face flux Sf & A_rho here so momentumPredictor (which runs
+    // BEFORE this function in the PIMPLE loop) can pick it up; the one-
+    // corrector lag is the same convention the manifold/EOS refresh already
+    // uses. Zero whenever LADrhoCoeff = 0, so the term vanishes by itself.
+    if (!mesh.foundObject<surfaceScalarField>("phiA_amd"))
+    {
+        mesh.objectRegistry::store
+        (
+            new surfaceScalarField
+            (
+                IOobject
+                (
+                    "phiA_amd",
+                    mesh.time().name(),
+                    mesh,
+                    IOobject::NO_READ,
+                    IOobject::NO_WRITE
+                ),
+                mesh,
+                dimensionedScalar(dimMass/dimTime, 0)
+            )
+        );
+    }
+    mesh.lookupObjectRef<surfaceScalarField>("phiA_amd") =
+        fvc::interpolate(Dr)*fvc::snGrad(rho)*mesh.magSf();
+
     fvScalarMatrix pDDtEqn
     (
-        psis*fvm::ddt(p)
-      + fvc::div(phiHbyAv)
-      - fvc::laplacian(Dr, rho)/rho
+        massConservativeP
+      ? fvScalarMatrix
+        (
+            fvc::ddt(rho)
+          + psi*correction(fvm::ddt(p))
+          + fvc::div(phiHbyAm)
+        )
+      : rhoTransport
+        // Kawai-faithful split: Eq. (33) carries NO A_rho term -- the
+        // artificial mass diffusion lives in Eqs. (31)-(32) only. With
+        // rhoTransport on, continuity (31) already applies div(Dr grad rho);
+        // keeping the same term here DOUBLE-COUNTS it: rho smooths while the
+        // pressure equation receives the diffusion again as a separate
+        // volumetric source. Measured 2026-08-08: with the term in both
+        // places, ANY Dr > 0 (C = 0.5, either sensor) pinned |U| at the 400
+        // clamp from t = 1.8e-7 onward, monotonically worse with C.
+      ? fvScalarMatrix
+        (
+            psis*fvm::ddt(p)
+          + fvc::div(phiHbyAv)
+        )
+      : fvScalarMatrix
+        (
+            psis*fvm::ddt(p)
+          + fvc::div(phiHbyAv)
+          - fvc::laplacian(Dr, rho)/rho
+        )
     );
+
+    // --- pepRealCoeff: REAL-FLUID internal-energy source coefficient --------
+    // Kawai Eq. (33) carries the (tau:S - div q) source with the coefficient
+    // (1/rho)*alpha_p/(c_v*beta_t), where alpha_p = -(1/rho)(d rho/dT)_p is the
+    // thermal expansivity and beta_t = (1/rho)(d rho/dp)_T = psi/rho the
+    // isothermal compressibility. Our pepRHS/pepTauS used (gamma - 1), which is
+    // exactly that group's IDEAL-GAS limit and is wrong by orders of magnitude
+    // in dense cold LOx. alpha_p is not exposed by the thermo interface, but
+    // the standard relation  c_p - c_v = T*alpha_p^2/(rho*beta_t)  inverts it
+    // with only Cp, Cv, T and psi (note rho*beta_t = psi):
+    //     alpha_p = sqrt(psi*(Cp - Cv)/T)
+    //     X = alpha_p/(rho*c_v*beta_t) = sqrt((Cp - Cv)/(T*psi))/Cv
+    // Ideal-gas check: Cp - Cv = R, T*psi = 1/R  ->  X = R/Cv = gamma - 1.
+    // Default off so the A/B against the ideal-gas coefficient stays clean.
+    const Switch pepRealCoeff
+    (
+        pimple.dict().lookupOrDefault<Switch>("pepRealCoeff", false)
+    );
+    tmp<volScalarField> tExpCoeff;
+    if (pepRealCoeff)
+    {
+        const volScalarField& Cp = thermo.Cp();
+        const volScalarField& Cv = thermo.Cv();
+        // Cp - Cv >= 0 thermodynamically; a table-interpolated pair can dip
+        // marginally negative, which would make the sqrt NaN. Floor at zero.
+        tExpCoeff =
+            sqrt(max(Cp - Cv, dimensionedScalar(Cp.dimensions(), 0))
+                /(thermo.T()*thermo.psi()))/Cv;
+        Info<< "pepRealCoeff: X min/max = "
+            << gMin(tExpCoeff().primitiveField()) << " / "
+            << gMax(tExpCoeff().primitiveField())
+            << "  (ideal-gas (gamma-1) min/max = "
+            << gMin(thermo.gamma()().primitiveField()) - 1 << " / "
+            << gMax(thermo.gamma()().primitiveField()) - 1 << ")" << endl;
+    }
+    else
+    {
+        tExpCoeff = thermo.gamma() - dimensionedScalar(dimless, 1);
+    }
+    const volScalarField& expCoeff = tExpCoeff();
 
     // --- pepFull: pressure ADVECTION + energy-diffusion RHS ----------------
     // (1) psis*(u.grad p) in exact flux form: div(F p) - p div(F) = F.grad(p)
@@ -878,7 +1232,7 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
     // (2) RHS (gamma-1)*psis*laplacian(Dh, h): the diffusive expansion source
     //     of the full pressure-evolution equation, discretised with the SAME
     //     Deff("h") as the h transport for consistency.
-    if (pepAdvect)
+    if (!massConservativeP && pepAdvect)
     {
         const surfaceScalarField phivAdv("phivAdv", phi/rhof);
         // psis face value: HARMONIC mean (v2) -- the arithmetic interpolate
@@ -900,21 +1254,60 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
         pDDtEqn +=
             fvc::div(Fpsis*fvc::interpolate(p)) - p*fvc::div(Fpsis);
     }
-    if (pepRHS)
+    if (!massConservativeP && pepRHS)
     {
         if (fgmTable_.useEnthalpy())
         {
             const volScalarField& h = hPtr_();
             const volScalarField DhP("DhP", Deff("h"));
-            pDDtEqn -=
-                (thermo.gamma() - scalar(1))*psis
-               *fvc::laplacian(DhP, h);
+            pDDtEqn -= expCoeff*psis*fvc::laplacian(DhP, h);
         }
+    }
+    // --- pepTauS: VISCOUS DISSIPATION tau:S in the pressure-evolution RHS ---
+    // Kawai, Terashima & Negishi JCP 300 (2015) Eq. (19) carries the internal-
+    // energy source as (tau:S - div q); our pepFull (Terashima-Koshi JCP 231
+    // (2012)) supplied only the -div q half (the Deff-grad-h laplacian above).
+    // Kawai Sec. 2.3/6.3 identify exactly this tau:S inconsistency in Refs
+    // [16,17] -- "non-negligible spurious impact on the thermodynamic
+    // properties" -- and the original authors issued a corrigendum (JCP 283
+    // (2015) 609). tau:S is the double inner product of the viscous stress and
+    // the strain rate = viscous heating [W/m^3], >= 0, and scales as mu*S^2:
+    // negligible in the bulk but 3-4 decades larger inside wall prism layers
+    // (du/dy over a 3 um first cell) -- i.e. exactly where the injector's dt
+    // bottleneck sits. Default off so the A/B is clean.
+    if (!massConservativeP && pepTauS)
+    {
+        const volScalarField muEff
+        (
+            "muEff", thermo.mu() + rho*momentumTransport().nut()
+        );
+        const volSymmTensorField Sr(symm(fvc::grad(U)));
+        const volScalarField tauS
+        (
+            "tauS",
+            2.0*muEff*(Sr && Sr)
+          - (2.0/3.0)*muEff*sqr(fvc::div(U))
+        );
+        pDDtEqn -= expCoeff*psis*tauS;
+        Info<< "pepTauS: tau:S max = " << gMax(tauS.primitiveField())
+            << " W/m^3" << endl;
+    }
+
+    // Snapshot p before the solve so massConservativeP can apply the stock
+    // SIMPLErho density increment below (see the block after the clamp).
+    autoPtr<volScalarField> pPre;
+    if (massConservativeP)
+    {
+        pPre.set(new volScalarField("pPre", p));
     }
 
     while (pimple.correctNonOrthogonal())
     {
-        fvScalarMatrix pEqn(pDDtEqn - fvm::laplacian(rAUf, p));
+        fvScalarMatrix pEqn
+        (
+            pDDtEqn
+          - fvm::laplacian(massConservativeP ? rhorAUf : rAUf, p)
+        );
 
         pEqn.setReference
         (
@@ -929,7 +1322,11 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
         if (pimple.finalNonOrthogonalIter())
         {
             // Reconstruct the mass flux from the corrected volumetric flux
-            phi = rhof*(phiHbyAv + pEqn.flux());
+            // (mass-conservative branch already solves in mass units).
+            phi =
+                massConservativeP
+              ? (phiHbyAm + pEqn.flux())
+              : rhof*(phiHbyAv + pEqn.flux());
         }
     }
 
@@ -1012,6 +1409,36 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
         p.correctBoundaryConditions();
     }
 
+    // massConservativeP: the stock pressure equation carries fvc::ddt(rho),
+    // so its algorithm REQUIRES the matching rho += psi*dp increment after the
+    // solve -- otherwise the density the next ddt(rho) differences is not the
+    // density the pressure equation just solved for, and the mismatch is a
+    // spurious source sitting on the contact. Running the stock pDDtEqn with
+    // the PEP path's disabled increment is an inconsistent hybrid; this closes
+    // it. Guarded by mcpCorrectRho (default true when massConservativeP is on)
+    // because the increment is exactly what blew rho negative in the flame-zone
+    // spike that got it disabled for PEP: psi_gas ~1e-5 x dp ~ -4e8 -> drho
+    // ~ -4000. Floored at a small positive density for that reason.
+    if (massConservativeP && pPre.valid())
+    {
+        const Switch mcpCorrectRho
+        (
+            pimple.dict().lookupOrDefault<Switch>("mcpCorrectRho", true)
+        );
+        if (mcpCorrectRho)
+        {
+            rho = max
+            (
+                rho + psi*(p - pPre()),
+                dimensionedScalar(dimDensity, 1e-3)
+            );
+            rho.correctBoundaryConditions();
+            Info<< "mcpCorrectRho: rho min/max = "
+                << gMin(rho.primitiveField()) << " / "
+                << gMax(rho.primitiveField()) << " kg/m^3" << endl;
+        }
+    }
+
     // Thermodynamic density update: the stock SIMPLErho increment
     // correctRho(psi*dp) is DISABLED in the PEP path. At a flame-zone
     // pressure spike the increment is huge (psi_gas ~1e-5 x dp ~ -4e8 ->
@@ -1019,6 +1446,139 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
     // states -- and the per-corrector updateManifold()+thermo_.correct()+
     // rho_ re-sync at the top of this function already provides the full
     // EOS-consistent density update (one-corrector lag, nOuter >= 3).
+
+    // --- rhoTransport: Kawai Eq. (31) --------------------------------------
+    //     d(rho)/dt + div(rho u) = div(A_rho),     A_rho = Dr grad(rho)
+    // solved with the mass flux phi the pressure correctors just produced.
+    //
+    // Why this is the piece that was missing. The two routes tried before were
+    // treated as an either/or:
+    //   - PEP pressure equation (33): well conditioned, but NO continuity
+    //     equation is solved anywhere -> ~9% of throughput leaks (2026-08-06).
+    //   - stock mass-conserving pressure equation: conserves mass, but its
+    //     fvc::ddt(rho) source is O(8e9) and must cancel div(rho u) to 2e-5
+    //     relative or the residual is amplified by 1/psi ~ 2.5e5 into bar-level
+    //     pressure. Four attempts to tame it (face-scheme matching, the
+    //     psi*dp increment, per-corrector thermo, resync blending) all failed.
+    // Kawai has BOTH because his continuity equation is NOT his pressure
+    // equation. A segregated solver only needs its pressure equation to
+    // constrain div(u) -- (33) does that -- leaving (31) free to stand alone.
+    //
+    // The update is diagonal-in-time and explicit in the flux, i.e.
+    //     rho^{n+1} = rho^n - dt*div(phi) + dt*div(Dr grad rho)
+    // so summing over cells telescopes div(phi) to the boundary fluxes: total
+    // mass conservation is an IDENTITY here, not an approximation. Written
+    // directly rather than via solve() because rho's boundary condition is
+    // `calculated` and would not evaluate in a matrix solve; boundary values
+    // are taken from the EOS, where the BCs fix the state anyway.
+    //
+    // rho now differs from thermo.rho(). That drift is the quasi-conservative
+    // inconsistency, relocated from mass (where it was 9%) to the
+    // thermodynamic state (where it is measured below). No relaxation term is
+    // applied: the PIMPLE outer loop is itself the fixed-point iteration, and
+    // whether that map contracts is the experiment.
+    if (rhoTransport)
+    {
+        const scalar dt = mesh.time().deltaTValue();
+        tmp<volScalarField> tdiv(fvc::div(phi));
+        if (LADrhoCoeff > 0)
+        {
+            tdiv.ref() -= fvc::laplacian(Dr, rho);
+        }
+        rho.primitiveFieldRef() =
+            rho.oldTime().primitiveField() - dt*tdiv().primitiveField();
+        rho.boundaryFieldRef() == thermo.rho()().boundaryField();
+        // Diagnostic field: the transported-vs-EOS density discrepancy, i.e.
+        // the quasi-conservative inconsistency this formulation relocates from
+        // mass into the thermodynamic state. Registered AUTO_WRITE so the
+        // SPATIAL distribution can be inspected -- a max value alone cannot
+        // tell an interface-local artefact from a domain-wide bias.
+        if (!mesh.foundObject<volScalarField>("rhoDrift"))
+        {
+            mesh.objectRegistry::store
+            (
+                new volScalarField
+                (
+                    IOobject
+                    (
+                        "rhoDrift",
+                        mesh.time().name(),
+                        mesh,
+                        IOobject::NO_READ,
+                        IOobject::AUTO_WRITE
+                    ),
+                    rho - thermo.rho()
+                )
+            );
+        }
+        else
+        {
+            mesh.lookupObjectRef<volScalarField>("rhoDrift") =
+                rho - thermo.rho();
+        }
+        // Interval-consistent mass diagnostic, measured AT THE UPDATE POINT
+        // with the SAME phi the update used -- immune to the two artifacts
+        // found 2026-08-08: (i) the offline budget compares interval-averaged
+        // dM/dt against WRITE-INSTANT fluxes, which the adjustableRunTime
+        // landing step biases; (ii) the thermophysicalPredictor print pairs
+        // ddt(rho) with a phi that has since been re-solved. Here
+        // dM = sum((rho - rho.old)*V)/dt and F = boundary sum of phi are the
+        // exact pair the update telescoped, so their mismatch is the TRUE
+        // per-step conservation error of this formulation.
+        {
+            scalar dM =
+                gSum
+                (
+                    (rho.primitiveField() - rho.oldTime().primitiveField())
+                   *mesh.V()
+                )/mesh.time().deltaTValue();
+            // Physical patches only -- processor patches differ in number
+            // per rank, and a collective (gSum) inside this loop deadlocks.
+            // Local sums, then ONE reduce.
+            scalar F = 0;
+            forAll(phi.boundaryField(), patchi)
+            {
+                if (!mesh.boundary()[patchi].coupled())
+                {
+                    F += sum(phi.boundaryField()[patchi]);
+                }
+            }
+            reduce(F, sumOp<scalar>());
+            Info<< "rhoTransport mass: dM/dt = " << dM
+                << "  bFlux = " << F
+                << "  err = " << dM + F << " kg/s" << endl;
+        }
+        // rhoAnchorCoeff (2026-08-08): WEAK EOS anchor after the transport
+        // update,  rho <- (1-a)*rho + a*thermo.rho(),  a << 1.
+        //
+        // Motivation: full transport (rhoTransportFull) closes the mass budget
+        // (0.3% of throughput) but kills the physical 10 kHz vortex-shedding
+        // tone at probe P1 (RMSu1 0.63 -> 0.107; the mode and its 20 kHz
+        // harmonic vanish from the spectrum), while the accidental hybrid
+        // (per-corrector full wipe) preserves the shedding but muddles the
+        // budget. A weak anchor interpolates between them: the anchoring
+        // timescale is dt/a, so with a ~ 0.05 the density is pulled to the
+        // EOS over ~20 steps -- far shorter than the ~3000-step shedding
+        // period (so the instability dynamics keep their EOS-consistent
+        // density) yet far longer than one step (so the within-step continuity
+        // increment survives and the budget stays closed to O(a)).
+        // a = 0 keeps pure transport; a = 1 reproduces the full wipe.
+        const scalar rhoAnchorCoeff
+        (
+            pimple.dict().lookupOrDefault<scalar>("rhoAnchorCoeff", scalar(0))
+        );
+        if (rhoAnchorCoeff > 0)
+        {
+            rho =
+                (1 - rhoAnchorCoeff)*rho + rhoAnchorCoeff*thermo.rho();
+        }
+        Info<< "rhoTransport: rho min/max = "
+            << gMin(rho.primitiveField()) << " / "
+            << gMax(rho.primitiveField())
+            << "  |rho - rhoEOS| max = "
+            << gMax(mag(rho - thermo.rho())().primitiveField())
+            << " kg/m^3" << endl;
+    }
 
     // Continuity diagnostics (base isothermalFluid::continuityErrors wraps
     // this grandparent call)
@@ -1062,7 +1622,25 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
     K = 0.5*magSqr(U);
 
     // SIMPLErho: density from the equation of state
-    if (pimple.simpleRho())
+    //
+    // rhoTransportFull (2026-08-08): this is the SECOND EOS re-sync in this
+    // function (the comment above the first one even warns it used to run
+    // twice). The rhoTransport update happens BEFORE this point, so with
+    // SIMPLErho yes this line wiped the transported density at the end of
+    // every corrector -- measured: with the AMD double-count fixed, runs with
+    // Dr = 0 and Dr > 0 were BIT-IDENTICAL in p, U and written rho; only the
+    // pre-wipe diagnostics differed. What survived (via rho.relax() 0.7 on
+    // non-final correctors) was a within-step 30% blend -- an accidental
+    // HYBRID: EOS-anchored each step, continuity-corrected within correctors.
+    // That hybrid is what produced the s6/s9 improvements (mass 5x, pHi -31%).
+    // rhoTransportFull skips the wipe entirely, making the transport genuine
+    // and letting drift accumulate across steps -- the A/B against the hybrid
+    // decides whether the EOS anchor was load-bearing.
+    const Switch rhoTransportFull
+    (
+        pimple.dict().lookupOrDefault<Switch>("rhoTransportFull", false)
+    );
+    if (pimple.simpleRho() && !(rhoTransport && rhoTransportFull))
     {
         rho = thermo.rho();
         rho.relax();
