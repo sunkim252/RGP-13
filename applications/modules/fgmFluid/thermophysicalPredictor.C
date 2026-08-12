@@ -327,7 +327,7 @@ void Foam::solvers::fgmFluid::thermophysicalPredictor()
             // table the pressure-work term is computed and then thrown away
             // by the bound below, which is worse than not adding it: the
             // clipping is a silent, spatially selective enthalpy sink.
-            if (pressureWork && dhMax <= 0)
+            if (pressureWork && dhMax <= 0 && !saghafianTcorr_)
             {
                 static bool warnedDhCeiling = false;
                 if (!warnedDhCeiling)
@@ -337,7 +337,8 @@ void Foam::solvers::fgmFluid::thermophysicalPredictor()
                         << "pressureWork is on but the manifold dh axis ends "
                         << "at " << dhMax << " J/kg, so no enthalpy gain is "
                         << "representable. Rebuild the table with a positive "
-                        << "dh range, or set pressureWork false." << endl;
+                        << "dh range, enable saghafianTcorr, or set "
+                        << "pressureWork false." << endl;
                 }
             }
             const scalar hOxb = fgmTable_.hOx();
@@ -374,7 +375,16 @@ void Foam::solvers::fgmFluid::thermophysicalPredictor()
                     );
                 }
                 if (hc[celli] > hAd + dhMax) nCeil++;
-                hc[celli] = max(min(hc[celli], hAd + dhMax), hAd + dhMin);
+                // saghafianTcorr: keep the enthalpy gain in the transported
+                // field -- updateManifold feeds the above-ceiling residual
+                // back as dT = (dh - dhMax)/cp. The FLOOR clip stays in both
+                // modes (T below the coldest slice would leave the EOS's
+                // validated range; documented h-drift/density-pocket guard).
+                if (!saghafianTcorr_)
+                {
+                    hc[celli] = min(hc[celli], hAd + dhMax);
+                }
+                hc[celli] = max(hc[celli], hAd + dhMin);
             }
             h.correctBoundaryConditions();
 

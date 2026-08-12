@@ -117,6 +117,11 @@ Foam::solvers::fgmFluid::fgmFluid(fvMesh& mesh)
 
     transportYc_(fgmTable_.lookupOrDefault<Switch>("transportYc", false)),
 
+    saghafianTcorr_
+    (
+        fgmTable_.lookupOrDefault<Switch>("saghafianTcorr", false)
+    ),
+
     chiClampMin_(fgmTable_.lookupOrDefault<scalar>("chiClampMin", 0.0)),
     chiClampMax_(fgmTable_.lookupOrDefault<scalar>("chiClampMax", GREAT)),
 
@@ -364,6 +369,23 @@ Foam::solvers::fgmFluid::fgmFluid(fvMesh& mesh)
             << "formed only for the lookup and the tabulated source is scaled "
             << "by Yc_eq(Z). The normalised-c cross-terms (T1, T2) are absent "
             << "by construction." << nl << endl;
+    }
+
+    // Saghafian compressible-FPV T correction: only meaningful on an
+    // enthalpy-defect table (the residual is measured against the dh axis).
+    if (saghafianTcorr_)
+    {
+        if (!fgmTable_.useEnthalpy())
+        {
+            FatalErrorInFunction
+                << "saghafianTcorr requires an enthalpy-defect (fourthAxis "
+                << "enthalpy) table -- the correction is the residual above "
+                << "the dh axis ceiling." << exit(FatalError);
+        }
+        Info<< "fgmFluid: Saghafian T correction ON -- transported h above "
+            << "the dh ceiling is fed back as dT = (dh - dhMax)/cp at frozen "
+            << "tabulated composition (ceiling clip skipped, floor clip "
+            << "kept)." << nl << endl;
     }
 
     // OPTIONAL UFPV chi-source table (2026-07-28): see chiSrcTable_ note in
@@ -885,6 +907,24 @@ void Foam::solvers::fgmFluid::updateManifold()
     const scalar hOxb   = useH ? fgmTable_.hOx()   : 0;
     const scalar hFuelb = useH ? fgmTable_.hFuel() : 0;
     const scalarField* hcl = useH ? &hPtr_->primitiveField() : nullptr;
+
+    // Saghafian T correction: residual above the dh-axis ceiling, divided by
+    // the (lagged) cell cp. The Cp field is evaluated once per manifold
+    // update at the previous property state -- the correction is O(10 K), so
+    // the lag error is second order.
+    const bool tcorr = saghafianTcorr_ && useH;
+    scalar dhCeil = 0;
+    tmp<volScalarField> tCpCorr;
+    const scalarField* cpCorr = nullptr;
+    if (tcorr)
+    {
+        const List<scalar>& dhAxis = fgmTable_.chiAxis();
+        dhCeil = max(dhAxis.first(), dhAxis.last());
+        tCpCorr = thermo_.Cp();
+        cpCorr = &tCpCorr().primitiveField();
+    }
+    label nTcorr = 0;
+    scalar maxTcorr = 0;
     const scalarField* Wcl = useW ? &WPtr_->primitiveField() : nullptr;
     const scalar Wlo = useW ? fgmTable_.chiAxis().first() : 0;
     const scalar Whi = useW ? fgmTable_.chiAxis().last()  : 0;
@@ -1048,6 +1088,21 @@ void Foam::solvers::fgmFluid::updateManifold()
             sourcePVscale_*rho_l*Yeq*fgmTable_.interpolate(srcTbl, st);
         Tc[celli] = fgmTable_.interpolate(Ttbl, st);
 
+        // Saghafian correction: enthalpy above the table ceiling has no dh
+        // slice (the stencil clamped to dhCeil); feed the residual back as a
+        // frozen-composition temperature rise instead of discarding it.
+        if (tcorr)
+        {
+            const scalar resid = coord4 - dhCeil;
+            if (resid > 0)
+            {
+                const scalar dT = resid/max((*cpCorr)[celli], SMALL);
+                Tc[celli] += dT;
+                nTcorr++;
+                maxTcorr = max(maxTcorr, dT);
+            }
+        }
+
         // UFPV chi-source override: same (Z,gZ,c) but the TRUE local chi_st
         // (the main stencil's 4th coordinate is dh on an enthalpy table).
         // The chi table is adiabatic, so re-apply the identical cold-
@@ -1102,6 +1157,20 @@ void Foam::solvers::fgmFluid::updateManifold()
         if (fillPsis)
         {
             (*psisTabc)[celli] = fgmTable_.interpolate(*psisTbl, st);
+        }
+    }
+
+    // Collective reduction must run on every rank whenever tcorr is on
+    // (gating it on nTcorr > 0 would deadlock ranks with zero hits).
+    if (tcorr)
+    {
+        reduce(nTcorr, sumOp<label>());
+        reduce(maxTcorr, maxOp<scalar>());
+        if (nTcorr > 0)
+        {
+            Info<< "saghafianTcorr: " << nTcorr
+                << " cells above the dh ceiling, max dT = "
+                << maxTcorr << " K" << endl;
         }
     }
 

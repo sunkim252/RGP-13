@@ -196,6 +196,24 @@ protected:
         //  up by Yc_eq(Z). Requires the table to ship Cnorm.
         bool transportYc_;
 
+        //- Saghafian-style compressible-FPV temperature correction (Saghafian
+        //  et al., Combust. Flame 162 (2015) 652, first-order form; the
+        //  pressure-based real-fluid precedent is Thakur et al., ICCFD12-2024
+        //  / Loci-STREAM). With an enthalpy-defect table whose dh axis ends
+        //  at 0 (adiabatic), transported enthalpy ABOVE the ceiling --
+        //  exactly what compression work produces -- has no table state; the
+        //  h-bounding then clips it, a spatially selective enthalpy sink.
+        //  With this switch the ceiling clip is skipped and the residual is
+        //  fed back algebraically at frozen tabulated composition:
+        //      T = T_tab(Z,gZ,c,dh_clamped) + (dh - dh_max)/cp
+        //  (applied only ABOVE the ceiling; the dh floor keeps the hard clip
+        //  -- extrapolating T below the coldest table slice would leave the
+        //  EOS's validated range, and the floor clip is the documented guard
+        //  against the 2026-07 h-drift/density-pocket feedback.) cp is the
+        //  cell value from the previous property update (lagged one
+        //  corrector; the correction is O(10 K), the lag error second order).
+        bool saghafianTcorr_;
+
         //- RUFPV-style limiting of the scalar-dissipation table coordinate
         //  (Gierth et al. 2022; Ihme & Pitsch). For a chi-axis (UFPV) table the
         //  per-cell chi_st = 2 D |grad Z|^2 f(Z_st)/f(Z~) is clamped to
