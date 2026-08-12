@@ -482,6 +482,12 @@ inline Foam::scalar Foam::SRKGas<Specie>::spFromZ
         return 0;
     }
 
+    // s_dep = R ln(Z - B) + (d(a*alpha)/dT)/b * ln((Z + B)/Z): the ln term
+    // enters with a PLUS sign on the signed derivative daAlpha (which is
+    // itself negative). Cross-check: Gibbs consistency h_dep - T*s_dep
+    // = R T lnPhi holds with hFromZ()/lnPhi() only for this sign.
+    // (2026-08-12 fix: was minus -- double-negated daAlpha, s off by
+    // 2|d(a*alpha)/dT|/b ln(1+B/Z)/W, ~1e3 J/kg/K for compressed LOX.)
     return
     (
         Foam::constant::thermodynamic::RR
@@ -489,7 +495,7 @@ inline Foam::scalar Foam::SRKGas<Specie>::spFromZ
             -log(p/Pstd)
           + log(Zv - B)
         )
-      - daAlpha/b_*log((Zv + B)/Zv)
+      + daAlpha/b_*log((Zv + B)/Zv)
     )/this->W();
 }
 
