@@ -398,6 +398,17 @@ public:
         //- Correct the thermophysical transport
         virtual void thermophysicalTransportCorrector();
 
+        //- End-of-step hook. Overridden because the base
+        //  isothermalFluid::postSolve() unconditionally resyncs
+        //  rho_ = thermo.rho() on transient runs, which would re-anchor the
+        //  rhoTransport continuity density to the EOS at the end of EVERY
+        //  step -- silently reducing rhoTransportFull to a per-step EOS
+        //  anchor (cross-step drift accumulation and the conservative
+        //  telescoping could never engage). With rhoTransport active the
+        //  transported rho is kept; otherwise the base behaviour runs
+        //  unchanged.
+        virtual void postSolve();
+
 
     // Member Operators
 

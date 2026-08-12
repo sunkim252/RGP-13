@@ -26,6 +26,7 @@ License
 #include "fgmFluid.H"
 #include "localEulerDdtScheme.H"
 #include "fvcGrad.H"
+#include "fvcMeshPhi.H"
 #include "DynamicList.H"
 #include "addToRunTimeSelectionTable.H"
 #include "zeroGradientFvPatchFields.H"
@@ -1231,6 +1232,29 @@ void Foam::solvers::fgmFluid::thermophysicalTransportPredictor()
 void Foam::solvers::fgmFluid::thermophysicalTransportCorrector()
 {
     thermophysicalTransport->correct();
+}
+
+
+void Foam::solvers::fgmFluid::postSolve()
+{
+    // See the header note: with rhoTransport the transported continuity
+    // density must survive to the next step's rho.oldTime(), so the base
+    // class's unconditional rho_ = thermo.rho() resync is skipped and the
+    // rest of the base hook is reproduced verbatim (divrhoU release, moving
+    // -mesh rhoUf correction against the density actually carried forward).
+    if (pimple.dict().lookupOrDefault<Switch>("rhoTransport", false))
+    {
+        divrhoU.clear();
+
+        if (!mesh.schemes().steady())
+        {
+            fvc::correctRhoUf(rhoUf, rho, U, phi, MRF);
+        }
+    }
+    else
+    {
+        isothermalFluid::postSolve();
+    }
 }
 
 
