@@ -47,6 +47,7 @@ Description
 #include "fvcSnGrad.H"
 #include "fvcReconstruct.H"
 #include "safeReconstruct.H"
+#include "upwind.H"
 #include "fvcSmooth.H"
 #include "fvcVolumeIntegrate.H"
 #include "fvmDiv.H"
@@ -707,12 +708,22 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
     (
         pimple.dict().lookupOrDefault<Switch>("psisTabulated", false)
     );
+    // psisFreezeStep: Ma-Ihme double-flux discipline -- freeze the effective
+    // compressibility over the WHOLE time step (all outers/correctors),
+    // re-evaluate from the EOS once per step. Shares the psisFrozen registry
+    // field with psisFreezeOuter; the refresh cadence is set where the field
+    // is computed (pressureCorrector()).
+    const Switch psisFreezeStep
+    (
+        pimple.dict().lookupOrDefault<Switch>("psisFreezeStep", false)
+    );
     volScalarField psis
     (
         "psis",
         (psisTabulated && tabPsis_)
       ? volScalarField(psisTabField_())
-      : (psisFreezeOuter && mesh.foundObject<volScalarField>("psisFrozen"))
+      : ((psisFreezeOuter || psisFreezeStep)
+         && mesh.foundObject<volScalarField>("psisFrozen"))
       ? volScalarField(mesh.lookupObject<volScalarField>("psisFrozen"))
       : (psisIsentropic || pepFull)
       ? volScalarField(psi/(rho*thermo.gamma()))
@@ -1254,6 +1265,68 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
         // the outer-corrector lag, which nOuter >= 2 absorbs.
         pDDtEqn +=
             fvc::div(Fpsis*fvc::interpolate(p)) - p*fvc::div(Fpsis);
+    }
+    // --- pepAdvectUpwind: literature-aligned retry of the pressure-advection
+    // term (coefficient-free). The two prior failures (pepAdvect above and
+    // the implicit matrix insertion) deviated from every published stable
+    // treatment in three ways this variant removes:
+    //   (a) UPWIND face p -- the conservative flux and the non-conservative
+    //       remainder are built from the SAME upwinded face data so the pair
+    //       telescopes at pressure equilibrium (Ching-Johnson-Kercher,
+    //       arXiv:2501.12532 path-consistency; pepAdvect's central
+    //       interpolate(p) leaves an O(dp_face) residual at the contact);
+    //   (b) computed ONCE PER TIME STEP from the previous step's converged
+    //       (p, phi) and FROZEN across outers/correctors -- the
+    //       characteristic-splitting pattern (Wada-Kai-Kurose JCP 501 (2024);
+    //       Fiolitakis-Pries JCP 513 (2024) prove stability only for the
+    //       clean advect-then-acoustic split, never for advection iterated
+    //       against the Helmholtz solve, which is what fed the p->u->phi
+    //       divergence loop in both prior attempts);
+    //   (c) runs under the end-of-step EOS re-projection, so the transported-
+    //       rho drift feedback channel of the earlier failures is bounded.
+    const Switch pepAdvectUpwind
+    (
+        pimple.dict().lookupOrDefault<Switch>("pepAdvectUpwind", false)
+    );
+    if (!massConservativeP && pepAdvectUpwind && !pepAdvect)
+    {
+        if
+        (
+            pepAdvSrcTimeIndex_ != mesh.time().timeIndex()
+         || !mesh.foundObject<volScalarField>("pepAdvSrcFrozen")
+        )
+        {
+            const surfaceScalarField phivAdv("phivAdvUp", phi/rhof);
+            const surfaceScalarField Fpsis
+            (
+                "FpsisUp", (1.0/fvc::interpolate(1.0/psis))*phivAdv
+            );
+            const surfaceScalarField pUp
+            (
+                upwind<scalar>(mesh, phivAdv).interpolate(p)
+            );
+            // tmp (auto-named) to avoid a registry name collision: a local
+            // volScalarField named "pepAdvSrcFrozen" self-registers and the
+            // update assignment becomes assignment-to-self (FATAL).
+            tmp<volScalarField> tsrc
+            (
+                fvc::div(Fpsis*pUp) - p*fvc::div(Fpsis)
+            );
+            if (!mesh.foundObject<volScalarField>("pepAdvSrcFrozen"))
+            {
+                mesh.objectRegistry::store
+                (
+                    new volScalarField("pepAdvSrcFrozen", tsrc())
+                );
+            }
+            else
+            {
+                mesh.lookupObjectRef<volScalarField>("pepAdvSrcFrozen") =
+                    tsrc();
+            }
+            pepAdvSrcTimeIndex_ = mesh.time().timeIndex();
+        }
+        pDDtEqn += mesh.lookupObject<volScalarField>("pepAdvSrcFrozen");
     }
     if (!massConservativeP && pepRHS)
     {
@@ -1846,7 +1919,25 @@ void Foam::solvers::fgmFluid::pressureCorrector()
     (
         pimple.dict().lookupOrDefault<Switch>("psisFreezeOuter", false)
     );
-    if (psisFreezeOuter)
+    // psisFreezeStep: same freeze machinery, but the frozen field is only
+    // recomputed when the TIME INDEX advances -- one EOS evaluation per step
+    // held through every outer/corrector (Ma-Ihme freeze-in-step; the outer
+    // correctors play the role of the RK substeps the double-flux papers
+    // freeze across). Coefficient-free.
+    const Switch psisFreezeStep
+    (
+        pimple.dict().lookupOrDefault<Switch>("psisFreezeStep", false)
+    );
+    if
+    (
+        psisFreezeStep
+     && psisFrozenTimeIndex_ == mesh.time().timeIndex()
+     && mesh.foundObject<volScalarField>("psisFrozen")
+    )
+    {
+        // already frozen for this step -- keep it
+    }
+    else if (psisFreezeOuter || psisFreezeStep)
     {
         const Switch psisIsentropic
         (
@@ -1925,6 +2016,7 @@ void Foam::solvers::fgmFluid::pressureCorrector()
         {
             mesh.lookupObjectRef<volScalarField>("psisFrozen") = psisNow;
         }
+        psisFrozenTimeIndex_ = mesh.time().timeIndex();
     }
 
     while (pimple.correct())

@@ -169,6 +169,17 @@ protected:
         //  'sourcePVscale' in fgmProperties.
         scalar sourcePVscale_;
 
+        //- psisFreezeStep bookkeeping: time index the registry "psisFrozen"
+        //  field was last computed for (-1 = never). The Ma-Ihme double-flux
+        //  discipline freezes the effective compressibility over the WHOLE
+        //  time step and re-evaluates it from the EOS once per step; the
+        //  psisFreezeOuter variant re-evaluates every outer iteration.
+        label psisFrozenTimeIndex_ = -1;
+
+        //- pepAdvectUpwind bookkeeping: time index the frozen pressure-
+        //  advection source was last computed for (-1 = never).
+        label pepAdvSrcTimeIndex_ = -1;
+
         //- Transport the UNNORMALISED progress variable Yc instead of the
         //  normalised c = Yc/Yc_eq(Z).
         //
