@@ -279,15 +279,28 @@ inline Foam::scalar Foam::chungTransport<Thermo>::kappa
         scalar Tstar=0, mur=0, eta0=0, Y=0, G1=0;
         calculate(p, T, Tstar, mur, eta0, Y, G1);
 
-        // Specify the coefficients in table IV, b0(i) -> b3(i), i=1,7
+        // Specify the coefficients in table IV, b0(i) -> b3(i), i=1,7.
+        //
+        // The B7 row (index 6) is stored divided by sqrt(1.2593) = 1.12219
+        // because the lamdap prefactor below uses 3.039e-4 = 2.7082e-4
+        // * 1.12219 (the paper's q-constant absorbed a sqrt(T*) factor); the
+        // product prefactor*row is exactly Chung (1988). Every B7 element must
+        // therefore be paper-value/1.12219: 91.089 -> 81.171,
+        // 128.11 -> 114.158, -54.217 -> -48.3138, 523.81 -> 466.775.
+        // (2026-08-12 fix: b2[6] was -60.841 = -54.217*1.12219, i.e.
+        // MULTIPLIED instead of divided -- the polar mur^4 term of lambda_p
+        // was 1.2593x too large in magnitude, ~45% kappa underprediction for
+        // dense steam. b3[5] had a flipped sign vs the paper's +65.529 --
+        // the associating (kappa) term of B6, again dense-steam kappa low.
+        // Both inert for nonpolar, non-associating species: O2/N2/H2/RP-1.)
         const scalar b0[7] = {2.41657, -0.50924, 6.61069, 14.54250, 0.79274,
                               -5.8634, 81.171};
         const scalar b1[7] = {0.74824, -1.50936, 5.62073, -8.91387, 0.82019,
                               12.8005, 114.1580};
         const scalar b2[7] = {-0.91858, -49.99120, 64.7599, -5.63794, -0.69369,
-                               9.58926, -60.841};
+                               9.58926, -48.3138};
         const scalar b3[7] = {121.721, 69.9834, 27.0389, 74.3435, 6.31734,
-                              -65.5292, 466.7750};
+                              65.5292, 466.7750};
 
         // Calculate the coefficients Bi in eq (13)
         scalar MB[7] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
