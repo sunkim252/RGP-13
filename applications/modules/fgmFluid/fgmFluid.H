@@ -416,15 +416,15 @@ public:
         //- Correct the thermophysical transport
         virtual void thermophysicalTransportCorrector();
 
-        //- End-of-step hook. Overridden because the base
-        //  isothermalFluid::postSolve() unconditionally resyncs
-        //  rho_ = thermo.rho() on transient runs, which would re-anchor the
-        //  rhoTransport continuity density to the EOS at the end of EVERY
-        //  step -- silently reducing rhoTransportFull to a per-step EOS
-        //  anchor (cross-step drift accumulation and the conservative
-        //  telescoping could never engage). With rhoTransport active the
-        //  transported rho is kept; otherwise the base behaviour runs
-        //  unchanged.
+        //- End-of-step hook. Default = base behaviour (rho_ = thermo.rho(),
+        //  the stock OpenFOAM end-of-step EOS re-projection): the
+        //  transported rho is the mass-consistent p-coupling WITHIN the
+        //  step, and the re-projection bounds the transported-vs-EOS drift
+        //  by one step's dynamics (RFQC-style, arXiv:2602.00658). The
+        //  research switch rhoTransportKeep (PIMPLE dict) instead preserves
+        //  the transported rho into the next step's oldTime to study
+        //  cross-step drift accumulation -- measured to collapse a draining
+        //  interface cell in ~50 steps on the 3-D injector; not production.
         virtual void postSolve();
 
 

@@ -1306,12 +1306,28 @@ void Foam::solvers::fgmFluid::thermophysicalTransportCorrector()
 
 void Foam::solvers::fgmFluid::postSolve()
 {
-    // See the header note: with rhoTransport the transported continuity
-    // density must survive to the next step's rho.oldTime(), so the base
-    // class's unconditional rho_ = thermo.rho() resync is skipped and the
-    // rest of the base hook is reproduced verbatim (divrhoU release, moving
-    // -mesh rhoUf correction against the density actually carried forward).
-    if (pimple.dict().lookupOrDefault<Switch>("rhoTransport", false))
+    // Default: stock OpenFOAM end-of-step behaviour -- rho_ = thermo.rho()
+    // (the base hook). This is the established pressure-based practice
+    // (rhoPimpleFoam, realFluidFoam, Traxinger et al.) and the regime every
+    // production rd0110 run was validated in: the transported rho serves as
+    // the mass-consistent p-coupling WITHIN the step, and the end-of-step
+    // EOS re-projection bounds the transported-vs-EOS drift by a single
+    // step's dynamics (cf. the RFQC end-of-step thermodynamic re-projection,
+    // arXiv:2602.00658, with an O(dt) global error bound). Without it, pure
+    // cross-step transport collapses: measured 2026-08-12 on the 3-D
+    // injector, a draining interface cell loses ~20%/step compounding to
+    // rho ~1e-13 in ~50 steps (rhoAnchorCoeff 0.02 merely relocates the
+    // equilibrium to rho ~1.7 with drift bursts to ~270 kg/m^3).
+    //
+    // rhoTransportKeep (PIMPLE dict, default off): RESEARCH switch that
+    // keeps the transported rho across steps (skips the resync, preserving
+    // it into the next step's rho.oldTime()) to study cross-step drift
+    // accumulation. Not for production.
+    if
+    (
+        pimple.dict().lookupOrDefault<Switch>("rhoTransport", false)
+     && pimple.dict().lookupOrDefault<Switch>("rhoTransportKeep", false)
+    )
     {
         divrhoU.clear();
 
