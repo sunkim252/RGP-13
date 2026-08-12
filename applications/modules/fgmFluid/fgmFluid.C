@@ -74,12 +74,19 @@ Foam::solvers::fgmFluid::fgmFluid(fvMesh& mesh)
         mesh
     ),
 
+    // zeroGradient patches are REQUIRED, not cosmetic (same trap as the
+    // Le/psisTab fields below): updateManifold() writes primitiveFieldRef()
+    // and relies on correctBoundaryConditions() for the patches, which is a
+    // no-op on the default calculated type -- the boundary values would stay
+    // frozen at the constructor 0 forever, and the Opt-2 patch RG-coefficient
+    // fill would look up every wall/outflow face at gZ = 0, chi_st = 0.
     gZ_
     (
         IOobject("gZ", runTime.name(), mesh, IOobject::NO_READ,
                  IOobject::AUTO_WRITE),
         mesh,
-        dimensionedScalar(dimless, 0)
+        dimensionedScalar(dimless, 0),
+        zeroGradientFvPatchScalarField::typeName
     ),
 
     chi_st_
@@ -87,7 +94,8 @@ Foam::solvers::fgmFluid::fgmFluid(fvMesh& mesh)
         IOobject("chi_st", runTime.name(), mesh, IOobject::NO_READ,
                  IOobject::AUTO_WRITE),
         mesh,
-        dimensionedScalar(dimless/dimTime, 0)
+        dimensionedScalar(dimless/dimTime, 0),
+        zeroGradientFvPatchScalarField::typeName
     ),
 
     sourcePV_
@@ -105,6 +113,8 @@ Foam::solvers::fgmFluid::fgmFluid(fvMesh& mesh)
     Sct_(fgmTable_.lookupOrDefault<scalar>("Sct", 0.7)),
 
     sourcePVscale_(fgmTable_.lookupOrDefault<scalar>("sourcePVscale", 1.0)),
+
+    transportYc_(fgmTable_.lookupOrDefault<Switch>("transportYc", false)),
 
     chiClampMin_(fgmTable_.lookupOrDefault<scalar>("chiClampMin", 0.0)),
     chiClampMax_(fgmTable_.lookupOrDefault<scalar>("chiClampMax", GREAT)),
@@ -336,6 +346,23 @@ Foam::solvers::fgmFluid::fgmFluid(fvMesh& mesh)
             << (LeZField_.valid() ? "Le_Z " : "")
             << (LeCField_.valid() ? "Le_C" : "")
             << "] from the manifold drive Deff (rho*D = mu/Le)" << nl << endl;
+    }
+
+    // Unnormalised-Yc transport (2026-08-11): removes the normalisation
+    // cross-terms the c equation drops. Needs Yc_eq(Z) from the table.
+    if (transportYc_)
+    {
+        if (!fgmTable_.hasCnorm())
+        {
+            FatalErrorInFunction
+                << "transportYc requires the table to ship Cnorm (Yc_eq(Z), "
+                << "one value per Z node). Rebuild the table with a builder "
+                << "that writes it." << exit(FatalError);
+        }
+        Info<< "fgmFluid: transporting UNNORMALISED Yc -- c = Yc/Yc_eq(Z) is "
+            << "formed only for the lookup and the tabulated source is scaled "
+            << "by Yc_eq(Z). The normalised-c cross-terms (T1, T2) are absent "
+            << "by construction." << nl << endl;
     }
 
     // OPTIONAL UFPV chi-source table (2026-07-28): see chiSrcTable_ note in
@@ -571,9 +598,14 @@ void Foam::solvers::fgmFluid::setupRealGasCoeffTabulation()
     // composition Y(Z,gZ,c,dh) is FROZEN across the dh axis (add_enthalpy_axis.py
     // replicates Y along dh), so the per-node base thermo is identical along dh
     // and the corner blend is exact regardless of the 4th-coord field passed to
-    // the stencil (chi_st_ here just selects an arbitrary dh slice). Skipped only
-    // when the table does not tabulate every mixture species (then the per-node
-    // blend would be incomplete).
+    // the stencil (chi_st_ there just selects an arbitrary dh slice). A DILUTION
+    // table is different: Y genuinely varies along W (that is the axis's
+    // purpose) and W is O(1) while chi_st is O(1e3), so the stencil must be
+    // located at the transported W, not chi_st (chi_st would clamp every cell
+    // to the max-steam slice). Skipped when the table does not tabulate every
+    // mixture species (then the per-node blend would be incomplete), and under
+    // transportYc (the transported C is raw Yc, not the table's c axis, and
+    // the stencil consumes the field pointer unnormalised).
     {
         const wordList& sp = thermo_.species();
         bool haveAllY = true;
@@ -585,7 +617,13 @@ void Foam::solvers::fgmFluid::setupRealGasCoeffTabulation()
                 break;
             }
         }
-        if (haveAllY)
+        if (haveAllY && transportYc_)
+        {
+            Info<< "fgmFluid: Opt-1 base-blend node interpolation skipped "
+                << "(transportYc: transported C is unnormalised Yc, not the "
+                << "table's c axis)" << nl << endl;
+        }
+        else if (haveAllY)
         {
             List<List<scalar>> nodeY(sp.size());
             forAll(sp, s)
@@ -596,7 +634,10 @@ void Foam::solvers::fgmFluid::setupRealGasCoeffTabulation()
             (
                 nodeY, fgmTable_,
                 Z_.primitiveField(), gZ_.primitiveField(),
-                C_.primitiveField(), chi_st_.primitiveField()
+                C_.primitiveField(),
+                fgmTable_.useDilution()
+              ? WPtr_().primitiveField()
+              : chi_st_.primitiveField()
             );
         }
         else
@@ -671,12 +712,17 @@ void Foam::solvers::fgmFluid::rearmRealGasCoeffTabulation()
     }
 
     // (c) Refresh the Opt-1 base-blend stencil field pointers WITHOUT rebuilding
-    //     the (mesh-independent) node mixtures.
+    //     the (mesh-independent) node mixtures. Same 4th-coord choice as the
+    //     initial arming: transported W for a dilution table, chi_st otherwise
+    //     (a no-op if Opt-1 was never armed, e.g. under transportYc).
     hook->refreshBaseBlendFields
     (
         fgmTable_,
         Z_.primitiveField(), gZ_.primitiveField(),
-        C_.primitiveField(), chi_st_.primitiveField()
+        C_.primitiveField(),
+        fgmTable_.useDilution()
+      ? WPtr_().primitiveField()
+      : chi_st_.primitiveField()
     );
 
     // (d) Refresh the Opt-2 patch-face pointers, mirroring exactly the initial
@@ -935,7 +981,11 @@ void Foam::solvers::fgmFluid::updateManifold()
     forAll(gZc, celli)
     {
         const scalar Zcl = max(min(Zc[celli], scalar(1)), scalar(0));
-        const scalar Ccl = max(Cc[celli], scalar(0));
+        // Yc_eq(Z): 1 when the transported variable is already normalised.
+        const scalar Yeq =
+            transportYc_ ? max(fgmTable_.interpolateCnorm(Zcl), SMALL) : 1;
+        const scalar Ccl =
+            min(max(Cc[celli]/Yeq, scalar(0)), scalar(1));
         const scalar rho_l = max(rhoc[celli], SMALL);
 
         // Algebraic mixture-fraction variance + segregation factor; the
@@ -991,8 +1041,10 @@ void Foam::solvers::fgmFluid::updateManifold()
         );
 
         // PV source: tabulated mass-fraction rate [1/s] -> volumetric.
+        // The table stores omega_c = omega_Yc/Yc_eq(Z); transporting Yc needs
+        // the raw omega_Yc, so scale back up (Yeq == 1 otherwise).
         srcc[celli] =
-            sourcePVscale_*rho_l*fgmTable_.interpolate(srcTbl, st);
+            sourcePVscale_*rho_l*Yeq*fgmTable_.interpolate(srcTbl, st);
         Tc[celli] = fgmTable_.interpolate(Ttbl, st);
 
         // UFPV chi-source override: same (Z,gZ,c) but the TRUE local chi_st
@@ -1015,7 +1067,7 @@ void Foam::solvers::fgmFluid::updateManifold()
             }
 
             srcc[celli] =
-                sourcePVscale_*rho_l*gate
+                sourcePVscale_*rho_l*Yeq*gate
                *chiSrcTable_().interpolate(*chiSrcTbl, stChi);
         }
         if (fillY)
@@ -1092,7 +1144,15 @@ void Foam::solvers::fgmFluid::updateManifold()
             {
                 const scalar Zcl = max(min(Zp[fi], scalar(1)), scalar(0));
                 const scalar gz  = min(max(gZp[fi], scalar(0)), scalar(1));
-                const scalar Ccl = max(Cp[fi], scalar(0));
+                // Same c coordinate as the internal fill loop above: with
+                // transportYc the transported C is raw Yc, normalise by
+                // Yc_eq(Z) before entering the table.
+                const scalar Yeqb =
+                    transportYc_
+                  ? max(fgmTable_.interpolateCnorm(Zcl), SMALL)
+                  : 1;
+                const scalar Ccl =
+                    min(max(Cp[fi]/Yeqb, scalar(0)), scalar(1));
                 scalar coord4 = chip[fi];
                 if (useH)
                 {

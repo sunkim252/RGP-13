@@ -144,6 +144,12 @@ class FGMTable
         //  the 4th axis so the standard quadrilinear machinery applies.
         List<scalar> dhRef_table_;
 
+        //- Equilibrium value of the RAW progress variable at each Z axis node,
+        //  Yc_eq(Z) = sum_k w_k Y_k at chemical equilibrium (length nZ). This
+        //  is the normalisation the table's c = Yc/Yc_eq(Z) uses. Optional;
+        //  needed only when the solver transports the UNNORMALISED Yc.
+        List<scalar> Cnorm_table_;
+
         //- Tabulated species mass fractions, keyed by species name.
         //  Each entry is a flat list of length nZ*nGz*nC*nChi.
         HashTable<List<scalar>> Y_tables_;
@@ -415,6 +421,15 @@ public:
 
             //- True if the table ships the adiabatic-enthalpy offset dhRef.
             inline bool hasDhRef() const { return dhRef_table_.size() > 0; }
+
+            //- True if the table ships Yc_eq(Z) (the c normalisation).
+            inline bool hasCnorm() const { return Cnorm_table_.size() > 0; }
+
+            //- Yc_eq(Z): equilibrium value of the raw progress variable.
+            //  Linear interpolation on the Z axis, clamped at both ends.
+            //  Lets the solver transport Yc (whose transport equation has NO
+            //  normalisation cross-terms) and normalise only for the lookup.
+            scalar interpolateCnorm(const scalar Z) const;
 
             //- dhRef(Z,gZ,c) [J/kg]: add to the mixing line to obtain the
             //  manifold's own adiabatic enthalpy, so that

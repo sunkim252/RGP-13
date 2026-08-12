@@ -155,23 +155,43 @@ void Foam::solvers::fgmFluid::momentumPredictor()
     (
         pimple.dict().lookupOrDefault<scalar>("LADbulkCoeff", scalar(0))
     );
-    const volScalarField divU(fvc::div(U));
-    volScalarField betaArt
+    // The whole -grad(betaArt*divU) force is assembled only when the
+    // coefficient is on: fvc::div(U) demands a div(U) entry in the case's
+    // fvSchemes even when the result is multiplied by a zero betaArt, so an
+    // unconditional evaluation makes every case pay LAD-bulk's scheme
+    // requirement (and one divergence per predictor call) with the feature
+    // off. Zero field = exact no-op in the UEqn below.
+    volVectorField fBulkArt
     (
         IOobject
         (
-            "betaArt",
+            "fBulkArt",
             mesh.time().name(),
             mesh,
             IOobject::NO_READ,
             IOobject::NO_WRITE
         ),
         mesh,
-        dimensionedScalar(dimensionSet(1, -1, -1, 0, 0, 0, 0), 0),
-        zeroGradientFvPatchScalarField::typeName
+        dimensionedVector(dimForce/dimVolume, Zero),
+        zeroGradientFvPatchVectorField::typeName
     );
     if (LADbulkCoeff > 0)
     {
+        const volScalarField divU(fvc::div(U));
+        volScalarField betaArt
+        (
+            IOobject
+            (
+                "betaArt",
+                mesh.time().name(),
+                mesh,
+                IOobject::NO_READ,
+                IOobject::NO_WRITE
+            ),
+            mesh,
+            dimensionedScalar(dimensionSet(1, -1, -1, 0, 0, 0, 0), 0),
+            zeroGradientFvPatchScalarField::typeName
+        );
         const scalarField V23(pow(scalarField(mesh.V()), 2.0/3.0));
         betaArt.primitiveFieldRef() =
             LADbulkCoeff*rho.primitiveField()*V23
@@ -179,6 +199,7 @@ void Foam::solvers::fgmFluid::momentumPredictor()
         betaArt.correctBoundaryConditions();
         Info<< "LAD-bulk: betaArt max = " << gMax(betaArt.primitiveField())
             << " kg/(m s)" << endl;
+        fBulkArt = fvc::grad(betaArt*divU);
     }
 
     // --- Korteweg capillary stress (transcritical density interface) --------
@@ -258,7 +279,7 @@ void Foam::solvers::fgmFluid::momentumPredictor()
       + MRF.DDt(rho, U)
       + momentumTransport->divDevTau(U)
       - fvm::laplacian(muArt, U)
-      - fvc::grad(betaArt*divU)
+      - fBulkArt
      ==
         fvModels().source(rho, U)
       + fKorteweg

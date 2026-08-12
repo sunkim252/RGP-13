@@ -80,7 +80,75 @@ CEQ_MIN = 1.0e-4
 DEFAULT_YAML = DATA_DIR / "wang2011_ideal_v32.yaml"
 
 
-def equilibrium_closure(yaml_file, Zq, P, T_fuel, T_ox, species):
+def family_enthalpy_offset(fls, yaml_file, species, P, Zq, hOx, hFuel):
+    """dH(Z) = h_flamelet(most burnt) - h_mix(Z), the enthalpy the DIFFERENTIALLY
+    DIFFUSING family actually carries at its burnt end.
+
+    Why this exists: the c = 1 boundary was closed with the equilibrium at the
+    MIXING enthalpy, i.e. h = (1-Z) hOx + Z hFuel. With unity Lewis that is the
+    flamelet's own enthalpy and everything is consistent. With real-fluid
+    differential diffusion it is NOT -- measured at Z_st, the flamelets sit
+    0.50 MJ/kg (chi=30) to 0.99 MJ/kg (chi=3e4) BELOW the mixing line, and each
+    one is already AT equilibrium for its own enthalpy (equilibrating flamelet
+    4413 at its own h returns 3703.1 K = its own Tmax, to the digit).
+
+    Closing at the mixing enthalpy therefore glues a hotter, higher-enthalpy
+    state onto the burnt edge of a colder family. The manifold's own enthalpy
+    h(T_ad, Y) then JUMPS ~1.0 MJ/kg between c = 0.95 and c = 1, which surfaces
+    in dhRef as a cliff (d(dhRef)/dc up to 2.3e7 J/kg) and makes the solver's
+    temperature hypersensitive to c: a 5% c error becomes a 471 K T error.
+
+    Closing at the family's own burnt enthalpy removes the glue seam."""
+    import cantera as ct
+    g = ct.Solution(str(yaml_file))
+    names = g.species_names
+    idx = {sp: names.index(sp) for sp in species if sp in names}
+    pv_w = ([PV_WEIGHTS[k] for k, sp in enumerate(PV_SPECIES) if sp in names]
+            if PV_WEIGHTS else [1.0]*len([s for s in PV_SPECIES if s in names]))
+    pv_i = [names.index(sp) for sp in PV_SPECIES if sp in names]
+
+    Zall, Yc_all, h_all = [], [], []
+    for fl in fls:
+        T = fl["T"]; n = len(T)
+        Ymat = np.zeros((n, g.n_species))
+        for sp, j in idx.items():
+            Ymat[:, j] = fl["Y"][sp]
+        for i in range(n):
+            ssum = Ymat[i].sum()
+            if ssum <= 0:
+                continue
+            g.TPY = max(float(T[i]), 250.0), P, Ymat[i]/ssum
+            Zall.append(fl["Z"][i])
+            Yc_all.append(sum(w*Ymat[i, k] for w, k in zip(pv_w, pv_i)))
+            h_all.append(g.enthalpy_mass)
+    Zall = np.asarray(Zall); Yc_all = np.asarray(Yc_all); h_all = np.asarray(h_all)
+
+    h_mix = (1.0 - Zq)*hOx + Zq*hFuel
+    dH = np.zeros_like(Zq)
+    half = 0.5*(Zq[1] - Zq[0]) if len(Zq) > 1 else 0.01
+    for i, Z in enumerate(Zq):
+        m = np.abs(Zall - Z) <= max(half, 1e-3)
+        if not m.any():
+            dH[i] = np.nan
+            continue
+        j = int(np.argmax(Yc_all[m]))              # most-burnt point in this Z bin
+        dH[i] = h_all[m][j] - h_mix[i]
+    # 빈 구간은 이웃에서 채우고 완만하게 다듬는다 (경계 Z->0,1 은 0 으로 수렴)
+    ok = np.isfinite(dH)
+    if ok.sum() >= 2:
+        dH = np.interp(Zq, Zq[ok], dH[ok])
+    else:
+        dH[:] = 0.0
+    dH[0] = 0.0; dH[-1] = 0.0
+    k = max(3, len(Zq)//25)
+    dH = np.convolve(dH, np.ones(k)/k, mode="same")
+    print(f"[eq] family enthalpy offset dH(Z): [{dH.min()/1e6:.3f}, "
+          f"{dH.max()/1e6:.3f}] MJ/kg (min at Z={Zq[int(np.argmin(dH))]:.3f})")
+    return dH
+
+
+def equilibrium_closure(yaml_file, Zq, P, T_fuel, T_ox, species,
+                        dH=None):
     """Adiabatic-equilibrium and frozen-mixing states on the Zq grid.
 
     For each mixture fraction Z: the unburnt mixture is the mass-weighted
@@ -111,7 +179,13 @@ def equilibrium_closure(yaml_file, Zq, P, T_fuel, T_ox, species):
         T_u[i] = g.T
         for sp in species:
             Y_u[sp][i] = Ymix[sp_idx[sp]]
-        g.equilibrate("HP")                    # adiabatic equilibrium
+        if dH is not None:
+            # Close at the family's OWN burnt enthalpy, not the mixing line --
+            # otherwise the c=1 edge is glued on at a different enthalpy
+            # convention than the flamelet interior (see
+            # family_enthalpy_offset). Composition/elements unchanged.
+            g.HPY = h + dH[i], P, Ymix
+        g.equilibrate("HP")                    # equilibrium at that enthalpy
         T_eq[i] = g.T
         C_eq[i] = float(sum(w*g.Y[k] for w, k in zip(pv_w, pv_idx)))
         for sp in species:
@@ -757,7 +831,7 @@ def write_fgm_npz(path, Z_axis, g_axis, C_axis, chi_axis, tables,
 
 
 def write_fgm_dict(path, Z_axis, g_axis, C_axis, chi_axis, tables,
-                   species, meta, fourth_kind=None):
+                   species, meta, fourth_kind=None, eq=None):
     """chi_axis=None writes a 3-D (Z, gZ, c) table -- no nChi/chi entries,
     so the solver's FGMTable takes its 3-D legacy path automatically. A
     chi_axis writes the 4-D layout.
@@ -778,6 +852,16 @@ def write_fgm_dict(path, Z_axis, g_axis, C_axis, chi_axis, tables,
 
     blocks = []
     blocks.append(f"sourcePV\n(\n{_fmt(tables['omega_C'].reshape(-1))}\n);")
+
+    # Yc_eq(Z) on the Z axis: the normalisation behind c = Yc/Yc_eq(Z).
+    # The solver needs it to transport the UNNORMALISED Yc (whose equation has
+    # no normalisation cross-terms; see fgmFluid transportYc).
+    if eq is not None and "C_norm_Zq" in eq:
+        Zq_grid = np.linspace(0.0, 1.0, len(eq["C_norm_Zq"]))
+        cnorm_axis = np.interp(Z_axis, Zq_grid, np.asarray(eq["C_norm_Zq"]))
+        blocks.append(f"Cnorm\n(\n{_fmt(cnorm_axis)}\n);")
+        print(f"[write]   Cnorm Yc_eq(Z) on {len(cnorm_axis)} Z nodes: "
+              f"[{cnorm_axis.min():.4g}, {cnorm_axis.max():.4g}]")
     if "T" in tables:
         blocks.append(f"T\n(\n{_fmt(tables['T'].reshape(-1))}\n);")
     if species:
@@ -1094,8 +1178,19 @@ def main():
                    help="directory of flamelet_*.npz files (stage 6 output)")
     p.add_argument("--out", dest="outfile",
                    default=str(DATA_DIR / "fgmProperties_4d"))
+    p.add_argument("--eq-dh-file", default=None,
+                   help="dH(Z) 를 파일에서 읽는다 (Z dH 두 열). --eq-family-"
+                        "enthalpy 의 2패스용: 1패스 테이블의 내부 dhRef 를 "
+                        "그대로 표적으로 삼으면 dhRef(c=1)=dH 가 성립하므로 "
+                        "c=1 계단이 닫힌다.")
+    p.add_argument("--eq-family-enthalpy", action="store_true",
+                   help="c=1 평형을 혼합선이 아니라 패밀리 자신의 연소단 "
+                        "엔탈피에서 잡는다. 차등확산 매니폴드에서 dhRef 가 "
+                        "c=1 에 만드는 ~1.0 MJ/kg 계단을 없앤다.")
     p.add_argument("--n-chi", type=int, default=N_CHI,
-                   help="number of chi_st axis grid points (log-spaced)")
+                   help="number of chi_st axis grid points (log-spaced). "
+                        "a-priori 실측: 9노드는 9자릿수를 덮어 노드 간격이 "
+                        "1자릿수라 소스 재현이 4~5배 어긋난다.")
     p.add_argument("--species", default=None,
                    help="space-separated subset of species to tabulate "
                         "(default: all). Used to build compact tables matching "
@@ -1176,6 +1271,8 @@ def main():
             raise SystemExit(f"--pv-weights {len(PV_WEIGHTS)}개 != PV 종 {len(PV_SPECIES)}개")
         print(f"[build] 가중 진행변수: " + " + ".join(
             f"{w:g}*{s}" for w, s in zip(PV_WEIGHTS, PV_SPECIES)))
+    if args.n_chi != 9:
+        print(f"[cfg] chi 축 노드 {args.n_chi}")
     if args.x_fuel or args.x_ox or args.pv_species:
         print(f"[cfg] streams override: fuel=[{X_FUEL_SURROGATE}] "
               f"ox=[{X_OX}] PV={PV_SPECIES}")
@@ -1220,7 +1317,21 @@ def main():
     # Equilibrium burnt-end closure on the internal Zq grid (same grid the
     # beta-PDF convolution integrates over).
     Zq = np.linspace(0.0, 1.0, N_ZQ)
-    eq = equilibrium_closure(args.yaml_file, Zq, P_ref, T_fuel, T_ox, species)
+    dH = None
+    if args.eq_dh_file:
+        _t = np.loadtxt(args.eq_dh_file)
+        dH = np.interp(Zq, _t[:, 0], _t[:, 1])
+        print(f"[eq] dH(Z) from {args.eq_dh_file}: "
+              f"[{dH.min()/1e6:.3f}, {dH.max()/1e6:.3f}] MJ/kg")
+    elif args.eq_family_enthalpy:
+        import cantera as _ct
+        _g = _ct.Solution(str(args.yaml_file))
+        _g.TPX = T_fuel, P_ref, X_FUEL_SURROGATE; _hF = _g.enthalpy_mass
+        _g.TPX = T_ox, P_ref, X_OX; _hO = _g.enthalpy_mass
+        dH = family_enthalpy_offset(fls, args.yaml_file, species, P_ref, Zq,
+                                    _hO, _hF)
+    eq = equilibrium_closure(args.yaml_file, Zq, P_ref, T_fuel, T_ox, species,
+                             dH=dH)
 
     z_cluster = None
     if args.z_st is not None:
@@ -1254,7 +1365,7 @@ def main():
 
     out_dict = Path(args.outfile)
     write_fgm_dict(out_dict, Z_axis, g_axis, C_axis, chi_axis,
-                   tables, species, meta)
+                   tables, species, meta, eq=eq)
     # Companion npz next to the dict file. apriori_check_4d.py reads this.
     out_npz = out_dict.with_suffix(out_dict.suffix + ".npz") \
               if out_dict.suffix else out_dict.with_name(out_dict.name + ".npz")

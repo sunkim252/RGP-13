@@ -185,7 +185,25 @@ void Foam::solvers::fgmFluid::thermophysicalPredictor()
         // a single dt (omega ~ 1e4 1/s), so clamp both ends -- the standard
         // practice layered on top of the equilibrium closure (Pierce 2004's
         // library truncation; cf. solver-side bounding in tabulated codes).
-        C_ = max(min(C_, scalar(1)), scalar(0));
+        if (transportYc_)
+        {
+            // Yc is bounded by its own equilibrium value at the local Z, not
+            // by 1 -- the c = 1 closure in Yc units is Yc = Yc_eq(Z).
+            scalarField& Cc = C_.primitiveFieldRef();
+            const scalarField& Zc = Z_.primitiveField();
+            forAll(Cc, celli)
+            {
+                const scalar Zcl = max(min(Zc[celli], scalar(1)), scalar(0));
+                Cc[celli] =
+                    max(min(Cc[celli], fgmTable_.interpolateCnorm(Zcl)),
+                        scalar(0));
+            }
+            C_.correctBoundaryConditions();
+        }
+        else
+        {
+            C_ = max(min(C_, scalar(1)), scalar(0));
+        }
     }
 
     // --- Total-enthalpy transport (non-adiabatic FPV, method b) ---
@@ -200,6 +218,78 @@ void Foam::solvers::fgmFluid::thermophysicalPredictor()
     {
         volScalarField& h = hPtr_();
         const volScalarField Dh("Dh", Deff("h"));
+
+        // Compressible work terms. The exact static-enthalpy balance is
+        //
+        //     rho Dh/Dt = Dp/Dt + tau:grad(U) - div(q_rad),
+        //
+        // and h here IS static absolute enthalpy (the manifold coordinate:
+        // hOx/hFuel are static enthalpies at the 800 K reference), so the
+        // FULL material derivative Dp/Dt = dp/dt + U.grad(p) belongs on the
+        // right. This is NOT OpenFOAM's EEqn form: that equation transports
+        // he + K and therefore carries only -dpdt, because U.grad(p) is
+        // absorbed by the kinetic-energy balance. Copying -dpdt alone into an
+        // equation without the K terms would be the wrong form.
+        //
+        // Dropping Dp/Dt is the low-Mach/isobaric approximation, rigorous
+        // only when M^2 << 1 AND the background dp0/dt vanishes. Neither
+        // holds here: the pressure corrector resolves acoustics, |U| reaches
+        // O(500 m/s), and p' /p is O(0.1) rather than O(M^2). Keeping the
+        // acoustics in momentum and pressure while removing their work on
+        // enthalpy leaves the formulation internally inconsistent, so the
+        // terms are ON by default.
+        //
+        // The he<->T drift that forbids an EEqn (see the note at the end of
+        // this function) does NOT apply: T is read from the table, never
+        // inverted from h. h is only the 4th manifold coordinate.
+        //
+        // U.grad(p) is taken in non-conservative form: with pressure work
+        // included h is no longer a conserved scalar, so there is no flux
+        // form to preserve, and the cell-gradient operator avoids the
+        // checkerboard the div(phiv, p) - p div(phiv) pair can seed at the
+        // transcritical interface.
+        const Switch pressureWork
+        (
+            pimple.dict().lookupOrDefault<Switch>("pressureWork", true)
+        );
+        const Switch viscousDissipation
+        (
+            pimple.dict().lookupOrDefault<Switch>("viscousDissipation", true)
+        );
+
+        tmp<volScalarField> tWork
+        (
+            volScalarField::New
+            (
+                "hWork",
+                mesh,
+                dimensionedScalar(dimEnergy/dimVolume/dimTime, 0)
+            )
+        );
+        if (pressureWork)
+        {
+            tWork.ref() += fvc::ddt(p) + (U_ & fvc::grad(p));
+        }
+        if (viscousDissipation)
+        {
+            // tau:grad(U) = 2 mu_eff (S:S) - (2/3) mu_eff (div U)^2 >= 0
+            // (Cauchy-Schwarz), the same form as pepTauS in the pressure
+            // corrector. Measured at 2e-5 of rho U.grad(h) on the developed
+            // cold field. NOT gradU && dev2(T(gradU)): that contraction drops
+            // the gradU:gradU part, vanishes in pure shear and goes NEGATIVE
+            // in rotation-dominated cells (S:S - W:W).
+            const volScalarField muEff
+            (
+                rho*momentumTransport->nuEff()
+            );
+            const volSymmTensorField Sr(symm(fvc::grad(U_)));
+            // div U as tr(S) from the gradient already in hand -- avoids
+            // requiring a div(U) scheme entry in every case's fvSchemes.
+            tWork.ref() +=
+                2.0*muEff*(Sr && Sr)
+              - (2.0/3.0)*muEff*sqr(tr(Sr));
+        }
+
         fvScalarMatrix hEqn
         (
             fvm::ddt(rho, h)
@@ -207,7 +297,8 @@ void Foam::solvers::fgmFluid::thermophysicalPredictor()
           - fvm::Sp(contErr, h)
           - fvm::laplacian(Dh + Dart, h)
          ==
-            fvModels().source(rho, h)
+            tWork()
+          + fvModels().source(rho, h)
         );
 
         hEqn.relax();
@@ -229,9 +320,30 @@ void Foam::solvers::fgmFluid::thermophysicalPredictor()
             const List<scalar>& dhAxis = fgmTable_.chiAxis();
             const scalar dhMin = min(dhAxis.first(), dhAxis.last());
             const scalar dhMax = max(dhAxis.first(), dhAxis.last());
+
+            // A dh axis that stops at 0 (adiabatic) cannot represent an
+            // enthalpy GAIN, which is exactly what compression work produces
+            // -- U.grad(p) > 0 over ~55% of the developed field. With such a
+            // table the pressure-work term is computed and then thrown away
+            // by the bound below, which is worse than not adding it: the
+            // clipping is a silent, spatially selective enthalpy sink.
+            if (pressureWork && dhMax <= 0)
+            {
+                static bool warnedDhCeiling = false;
+                if (!warnedDhCeiling)
+                {
+                    warnedDhCeiling = true;
+                    WarningInFunction
+                        << "pressureWork is on but the manifold dh axis ends "
+                        << "at " << dhMax << " J/kg, so no enthalpy gain is "
+                        << "representable. Rebuild the table with a positive "
+                        << "dh range, or set pressureWork false." << endl;
+                }
+            }
             const scalar hOxb = fgmTable_.hOx();
             const scalar hFuelb = fgmTable_.hFuel();
 
+            label nCeil = 0;
             scalarField& hc = h.primitiveFieldRef();
             const scalarField& Zbnd = Z_.primitiveField();
             // Same reference the lookup uses: with dhRef present the axis is
@@ -246,16 +358,35 @@ void Foam::solvers::fgmFluid::thermophysicalPredictor()
                 scalar hAd = (scalar(1) - Zi)*hOxb + Zi*hFuelb;
                 if (useDhRef)
                 {
+                    // dhRef is tabulated on the NORMALISED c axis: with
+                    // transportYc the transported C is raw Yc and must be
+                    // divided by Yc_eq(Z) first (same coordinate the
+                    // updateManifold lookup uses).
+                    const scalar Yeq =
+                        transportYc_
+                      ? max(fgmTable_.interpolateCnorm(Zi), SMALL)
+                      : 1;
                     hAd += fgmTable_.interpolateDhRef
                     (
                         Zi,
                         min(max(gZbnd[celli], scalar(0)), scalar(1)),
-                        max(Cbnd[celli], scalar(0))
+                        min(max(Cbnd[celli]/Yeq, scalar(0)), scalar(1))
                     );
                 }
+                if (hc[celli] > hAd + dhMax) nCeil++;
                 hc[celli] = max(min(hc[celli], hAd + dhMax), hAd + dhMin);
             }
             h.correctBoundaryConditions();
+
+            // Make the clipping visible: with pressure work on, cells pinned
+            // at the upper bound are where the added energy is being
+            // discarded rather than reaching the table.
+            reduce(nCeil, sumOp<label>());
+            if (nCeil > 0)
+            {
+                Info<< "h bounding: " << nCeil
+                    << " cells at the dh ceiling" << endl;
+            }
         }
     }
 

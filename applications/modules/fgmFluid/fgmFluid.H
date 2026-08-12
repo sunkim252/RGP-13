@@ -169,6 +169,33 @@ protected:
         //  'sourcePVscale' in fgmProperties.
         scalar sourcePVscale_;
 
+        //- Transport the UNNORMALISED progress variable Yc instead of the
+        //  normalised c = Yc/Yc_eq(Z).
+        //
+        //  The table is built on c, and the c transport equation that the
+        //  solver actually solves DROPS the normalisation cross-terms
+        //  (04_build_fgm_table_4d.py: "cross-terms of the exact normalized-c
+        //  transport equation are neglected (standard practice)"):
+        //
+        //    rho Dc/Dt = div(rho D grad c) + w_Yc/Yc_eq
+        //              + 2 rho D (Yc_eq'/Yc_eq) grad Z . grad c        (T1)
+        //              + c rho D (Yc_eq''/Yc_eq) |grad Z|^2            (T2)
+        //
+        //  Both extra terms scale with rho D |grad Z|^2 ~ rho chi/2, and
+        //  Yc_eq(Z) is concave near stoichiometric so T2 is a SINK. Measured
+        //  on the flamelet family, T2 is 60-87% of the source and omitting
+        //  the pair requires a 1.6-2.0x INFLATED source to reproduce the
+        //  flamelet -- which is exactly what the strain-collapsed 3-D table
+        //  supplied (5.2x at chi=3e4), silently masking the defect. Feeding a
+        //  chi-resolved (correct, 1.09x) source without the cross-terms
+        //  removes the compensation and the flame dies.
+        //
+        //  Transporting Yc removes the cross-terms by construction: Yc obeys
+        //  a plain reactive scalar equation. c is then recovered only for the
+        //  lookup, c = Yc/Yc_eq(Z), and the tabulated source is scaled back
+        //  up by Yc_eq(Z). Requires the table to ship Cnorm.
+        bool transportYc_;
+
         //- RUFPV-style limiting of the scalar-dissipation table coordinate
         //  (Gierth et al. 2022; Ihme & Pitsch). For a chi-axis (UFPV) table the
         //  per-cell chi_st = 2 D |grad Z|^2 f(Z_st)/f(Z~) is clamped to

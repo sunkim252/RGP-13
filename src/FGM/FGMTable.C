@@ -202,6 +202,27 @@ Foam::FGMTable::FGMTable
     }
 
     // -------- main PV source table --------
+    // Yc_eq(Z) (optional): the normalisation behind the table's c = Yc/Yc_eq.
+    // Needed only when the solver transports the UNNORMALISED Yc, which is the
+    // formulation that has no normalisation cross-terms (see fgmFluid
+    // transportYc). One value per Z axis node.
+    if (found("Cnorm"))
+    {
+        Cnorm_table_ = List<scalar>(lookup("Cnorm"));
+        if (Cnorm_table_.size() != nZ_)
+        {
+            FatalErrorInFunction
+                << "Cnorm size " << Cnorm_table_.size() << " != nZ " << nZ_
+                << exit(FatalError);
+        }
+        scalar lo = GREAT, hi = -GREAT;
+        forAll(Cnorm_table_, i)
+        {
+            lo = min(lo, Cnorm_table_[i]); hi = max(hi, Cnorm_table_[i]);
+        }
+        Info<< "    Cnorm Yc_eq(Z): [" << lo << ", " << hi << "]" << endl;
+    }
+
     sourcePV_ = List<scalar>(lookup("sourcePV"));
     const label nTot = nZ_*nGz_*nC_*nChi_;
     Info<< "    sourcePV entries: " << sourcePV_.size()
@@ -731,6 +752,26 @@ Foam::scalar Foam::FGMTable::interpolateDhRef
     }
     // 4th-axis-replicated: any coordinate gives the same value.
     return interpolateTable(dhRef_table_, Z, gZ, C, chi_axis_[0]);
+}
+
+
+Foam::scalar Foam::FGMTable::interpolateCnorm(const scalar Z) const
+{
+    if (Cnorm_table_.empty())
+    {
+        FatalErrorInFunction
+            << "Cnorm (Yc_eq(Z)) is not tabulated in fgmProperties; it is "
+            << "required when transportYc is enabled." << exit(FatalError);
+    }
+    const scalar Zc = max(min(Z, Z_axis_[nZ_ - 1]), Z_axis_[0]);
+    label i = 0;
+    while (i < nZ_ - 2 && Z_axis_[i + 1] < Zc)
+    {
+        i++;
+    }
+    const scalar dZ = Z_axis_[i + 1] - Z_axis_[i];
+    const scalar w = (dZ > VSMALL) ? (Zc - Z_axis_[i])/dZ : 0;
+    return (1 - w)*Cnorm_table_[i] + w*Cnorm_table_[i + 1];
 }
 
 
