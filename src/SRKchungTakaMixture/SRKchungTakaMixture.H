@@ -187,6 +187,12 @@ private:
         //  apart), the same identity Tier-2 uses for its coefficients.
         mutable PtrList<thermoMixtureType> nodeMixtures_;
 
+        //- Per-cell scratch for compositionToX in calcMixture (hoisted out of
+        //  the hot loop: reused across cells so the two List allocations are
+        //  paid once, not per cell x per thermo.correct call).
+        mutable List<scalar> Xscratch_;
+        mutable List<scalar> Yscratch_;
+
         //- Opt-1 active flag.
         mutable bool useBaseBlendTab_;
 

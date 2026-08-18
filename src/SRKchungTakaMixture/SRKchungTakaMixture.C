@@ -260,8 +260,8 @@ Foam::SRKchungTakaMixture<ThermoType>::calcMixture
     // utility via compositionToX so live and tabulated coefficients use an
     // identical X).
     const label nSpecies = Y.size();
-    List<scalar> X;
-    List<scalar> Yl;
+    List<scalar>& X = Xscratch_;
+    List<scalar>& Yl = Yscratch_;
     compositionToX(Y, X, Yl);
 
     // Real-gas mixture parameters: bM/coef1-3/cM (SRK) and sigmaM..kappaiM
