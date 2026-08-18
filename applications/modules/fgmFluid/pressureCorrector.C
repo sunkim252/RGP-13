@@ -48,6 +48,8 @@ Description
 #include "fvcReconstruct.H"
 #include "safeReconstruct.H"
 #include "upwind.H"
+#include "localMax.H"
+#include "zeroGradientFvPatchFields.H"
 #include "fvcSmooth.H"
 #include "fvcVolumeIntegrate.H"
 #include "fvmDiv.H"
@@ -1367,6 +1369,71 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
             << " W/m^3" << endl;
     }
 
+    // --- JST sensor-gated face dissipation (low-cost prescription #4) -------
+    // Jameson-Schmidt-Turkel 2nd-difference switch (AIAA 81-1259) adapted to
+    // the pressure-based pEqn: boost the pressure-laplacian face coefficient
+    // by (1 + min(jstCoeff*nu_f, jstBoostMax)), nu = |lap(p)| V^(2/3) / p --
+    // the normalized undivided pressure Laplacian, O(1) on a cell-to-cell
+    // pressure wiggle but O((h/lambda)^2) on smooth acoustics, so the extra
+    // dissipation switches itself off away from spurious oscillations.
+    // nu_f = max(nu_P, nu_N) (localMax, the JST face rule). The boost lives
+    // INSIDE the matrix so pEqn.flux() keeps the laplacian/mass-flux pairing
+    // exact (flux-pairing matrix 2026-08-14: deliberate coefficient
+    // mismatches cost 150-300x in interface Delta-p). Cost: one
+    // fvc::laplacian + one localMax interpolate per outer corrector.
+    // Default off.
+    const Switch jstFaceDissipation
+    (
+        pimple.dict().lookupOrDefault<Switch>("jstFaceDissipation", false)
+    );
+    tmp<surfaceScalarField> tpLapCoeffJST;
+    if (jstFaceDissipation)
+    {
+        const scalar kJST
+        (
+            pimple.dict().lookupOrDefault<scalar>("jstCoeff", 1.0)
+        );
+        const scalar boostMax
+        (
+            pimple.dict().lookupOrDefault<scalar>("jstBoostMax", 4.0)
+        );
+
+        volScalarField nu
+        (
+            IOobject("jstNu", mesh.time().name(), mesh),
+            mesh,
+            dimensionedScalar("jstNu0", dimless, 0.0),
+            zeroGradientFvPatchScalarField::typeName
+        );
+        const volScalarField lapP(fvc::laplacian(p));
+        nu.primitiveFieldRef() =
+            mag(lapP.primitiveField())
+           *pow(static_cast<const scalarField&>(mesh.V()), 2.0/3.0)
+           /p.primitiveField();
+        nu.correctBoundaryConditions();
+
+        const surfaceScalarField nuf
+        (
+            localMax<scalar>(mesh).interpolate(nu)
+        );
+
+        tpLapCoeffJST =
+            (massConservativeP ? rhorAUf : rAUf)
+           *(1.0 + min(kJST*nuf, boostMax));
+
+        label nBoost = 0;
+        forAll(nuf, facei)
+        {
+            if (kJST*nuf[facei] > 0.1)
+            {
+                nBoost++;
+            }
+        }
+        reduce(nBoost, sumOp<label>());
+        Info<< "JST: max nu = " << gMax(nu.primitiveField())
+            << ", boosted faces (>10%) = " << nBoost << endl;
+    }
+
     // Snapshot p before the solve so massConservativeP can apply the stock
     // SIMPLErho density increment below (see the block after the clamp).
     autoPtr<volScalarField> pPre;
@@ -1380,7 +1447,13 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
         fvScalarMatrix pEqn
         (
             pDDtEqn
-          - fvm::laplacian(massConservativeP ? rhorAUf : rAUf, p)
+          - fvm::laplacian
+            (
+                jstFaceDissipation
+              ? tpLapCoeffJST()
+              : (massConservativeP ? rhorAUf : rAUf),
+                p
+            )
         );
 
         pEqn.setReference
