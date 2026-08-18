@@ -40,7 +40,8 @@ T_FUC = float(sys.argv[5]) if len(sys.argv) > 5 else 300.0   # cold fuel (kerose
 T_BOUND = 800.0
 FUEL = {'NC10H22': 0.74, 'PHC3H7': 0.15, 'CYC9H18': 0.11}
 OXID = {'O2': 1.0}
-MECH = 'data/wang2011_srk_v32.yaml'
+import os as _os
+MECH = _os.environ.get('RGP_MECH', 'data/wang2011_srk_v32.yaml')
 T_IGN, DT_IGN = 900.0, 150.0     # source ignition gate (reaction frozen below ~crossover)
 def log(m): print(m, flush=True)
 
@@ -70,11 +71,30 @@ g.TPX = T_BOUND, P, FUEL;  h_fuel = g.enthalpy_mass
 # cold-stream defects set the axis span
 g.TPX = T_OXC, P, OXID;  dh_ox = g.enthalpy_mass - h_ox
 g.TPX = T_FUC, P, FUEL;  dh_fu = g.enthalpy_mass - h_fuel
+# 저온 유입(LOx 100 K / 케로신 300 K)이 요구하는 결손.
+# 주의: 축 좌표는 혼합선이 아니라 dhRef(Z,c) 기준이므로, 실제 요구량은
+#   dh_need(Z,c) = cold(Z) - dhRef(Z,c)
+# 이고 dhRef 가 양인 곳(차등확산으로 살찐 희박·과농측)에서 더 깊어진다.
+# w14 실측: cold 최저 -1.460, dhRef 최대 +0.795 -> 요구 -2.26 MJ/kg 인데
+# 옛 공식 1.05*min(dh_ox,dh_fu) = -1.533 이라 0.6 MJ/kg 모자랐다.
 dh_min = 1.05 * min(dh_ox, dh_fu)         # most negative defect (+5% margin)
-h_axis = np.linspace(dh_min, 0.0, N_H)    # enthalpy defect [J/kg]; dh=0 = adiabatic
+if len(sys.argv) > 7:
+    dh_min = float(sys.argv[7])           # 명시 하한 (요구량 기반)
+# The axis was one-sided (deficit only), which silently clamps every lookup that
+# needs MORE enthalpy than the dh=0 slice. Measured on the 134-member family:
+# the flamelet defect vs the mixing line is positive for 100% of members at
+# Z=0.02-0.08 and Z=0.7 (median +386 kJ/kg at Z=0.04) -- preferential diffusion
+# enriches the lean and rich edges -- and the low-chi members sit ~340 kJ/kg
+# above the dh=0 slice. Those lookups clamped and came back 300-460 K too cold.
+DH_MAX = float(sys.argv[6]) if len(sys.argv) > 6 else 0.0   # J/kg, 0 = 옛 동작
+h_axis = (np.linspace(dh_min, 0.0, N_H) if DH_MAX <= 0 else
+          np.concatenate([np.linspace(dh_min, 0.0, N_H)[:-1],
+                          np.linspace(0.0, DH_MAX, max(2, N_H//2 + 1))]))
 log(f"h_ox(800K)={h_ox/1e6:.3f} h_fuel(800K)={h_fuel/1e6:.3f} MJ/kg")
 log(f"cold defects: O2@{T_OXC:g}K dh={dh_ox/1e6:.3f}  fuel@{T_FUC:g}K dh={dh_fu/1e6:.3f} MJ/kg")
-log(f"enthalpy-defect axis: {N_H} pts, [{h_axis[0]/1e6:.3f}, 0] MJ/kg")
+N_H = len(h_axis)                          # 양의 구간을 붙이면 길이가 늘어난다
+log(f"enthalpy-defect axis: {N_H} pts, "
+    f"[{h_axis[0]/1e6:.3f}, {h_axis[-1]/1e6:+.3f}] MJ/kg")
 
 # ---- build the 4-D arrays (frozen composition, ROBUST h->T inversion) ----
 # Cantera's HPY Newton lands on spurious roots below the 300 K NASA-poly floor
@@ -111,8 +131,15 @@ for iZ in range(nZ):
             # alphabetically, NOT in Cantera's order, so g.TPY=T,P,Yvec (array)
             # SCRAMBLES the composition. A name->value dict is order-independent.
             Ydict = dict(zip(species, Yvec))
-            # monotone h(T) from T_FLOOR up to the local adiabatic T
-            Tgrid = np.linspace(T_FLOOR, max(Tad, T_FLOOR + 50.0), NT)
+            # monotone h(T) from T_FLOOR up to the local adiabatic T.
+            # With a two-sided dh axis the grid must reach ABOVE Tad, otherwise
+            # np.interp clamps every positive-dh slice back to Tad and the whole
+            # extension is a no-op (measured: w15 came out bit-identical to w14).
+            # cp >= ~800 J/kg/K here, so DH_MAX/800 bounds the extra rise.
+            Ttop = max(Tad, T_FLOOR + 50.0)
+            if DH_MAX > 0:
+                Ttop = min(Ttop + DH_MAX/800.0, 4800.0)
+            Tgrid = np.linspace(T_FLOOR, Ttop, NT)
             hgrid = np.empty(NT)
             for j, Tg in enumerate(Tgrid):
                 try:
@@ -128,8 +155,14 @@ for iZ in range(nZ):
             # cools T by the right sensible amount regardless of that offset. (An
             # absolute h_ad=(1-Z)hOx+ZhFuel reference fails because h(Tad,Y) != h_ad
             # for real-fluid flamelets.) Matches the solver's dh = h - h_mix(Z).
-            hAd3[iZ, iG, iC] = hgrid[-1]
-            targets = hgrid[-1] + h_axis
+            # 기준은 h(Tad) 지 격자 끝이 아니다 — 양방향 축이면 끝이 Tad 위에 있다
+            try:
+                hAd = h_at(g, Tad, Ydict)
+            except Exception:
+                hAd = h_at(gi, Tad, Ydict)
+            hAd = float(np.clip(hAd, hgrid[0], hgrid[-1]))   # 단조화 격자 안으로
+            hAd3[iZ, iG, iC] = hAd
+            targets = hAd + h_axis
             Tloc = np.interp(targets, hgrid, Tgrid)  # clamps to [T_FLOOR, Tad]
             Tloc[np.abs(h_axis) < 1e-9] = Tad        # dh=0 slice exact
             T4[iZ, iG, iC, :] = Tloc
@@ -144,8 +177,10 @@ Y4 = {sp: np.repeat(Yk[sp][..., None], N_H, axis=3) for sp in species}
 log(f"4-D build done: {npt} h(T) evals in {time.time()-t0:.0f}s, shape {T4.shape}")
 
 # sanity: dh=0 slice must equal the original 3-D T exactly
-err = np.abs(T4[..., -1] - T3).max()
-log(f"dh=0 slice vs original 3-D Tmax-diff = {err:.3e} K (should be ~0)")
+# 양방향 축에서는 dh=0 이 마지막이 아니라 중간이다. 인덱스를 찾아 쓴다.
+i_ad = int(np.argmin(np.abs(h_axis)))
+err = np.abs(T4[..., i_ad] - T3).max()
+log(f"dh=0 slice (idx {i_ad}/{N_H-1}) vs original 3-D Tmax-diff = {err:.3e} K (should be ~0)")
 
 # ---- write npz + OpenFOAM dict (enthalpy-axis 4-D format) ----
 def fmt(a): return "\n".join(f"    {v:.8e}" for v in np.asarray(a).reshape(-1))

@@ -46,6 +46,10 @@ N_G = 11
 N_C = 41
 N_CHI = 9          # number of chi_st grid points (log-spaced)
 N_ZQ = 200          # internal beta-PDF integration mesh
+C1_ENVELOPE_OWNER = False   # c=1 상태를 포락선 소유자로 (--c1-owner)
+C1_BLEND = 0.0              # c=1 소유자 Z-평활 폭 (--c1-blend), 0=옛 argmax
+CNORM_FAMILY = False        # C_norm 을 패밀리 포락선만으로 (--cnorm-family)
+C1_TMIN_FRAC = 0.0          # 품질 필터를 T_eq 절대기준으로 (--c1-tmin)
 G_MAX = 0.9
 CHI_MIN_DEFAULT = 1.0e-2   # fallback if every flamelet has chi_st = 0
 EPS = 1.0e-6
@@ -131,8 +135,13 @@ def family_enthalpy_offset(fls, yaml_file, species, P, Zq, hOx, hFuel):
         if not m.any():
             dH[i] = np.nan
             continue
-        j = int(np.argmax(Yc_all[m]))              # most-burnt point in this Z bin
-        dH[i] = h_all[m][j] - h_mix[i]
+        # 한 점(argmax)이 dH(Z) 를 결정하면 취약하다 — 저-χ 멤버가 들어오자
+        # Z=0.397 에서 -2.52 MJ/kg 짜리 단일 점이 축 전체를 끌어내렸다.
+        # '연소단'을 상위 10% 집단의 중앙값으로 잡는다.
+        yc = Yc_all[m]; hh = h_all[m]
+        thr = np.quantile(yc, 0.90) if yc.size >= 10 else yc.max()
+        sel = yc >= thr
+        dH[i] = float(np.median(hh[sel])) - h_mix[i]
     # 빈 구간은 이웃에서 채우고 완만하게 다듬는다 (경계 Z->0,1 은 0 으로 수렴)
     ok = np.isfinite(dH)
     if ok.sum() >= 2:
@@ -184,7 +193,12 @@ def equilibrium_closure(yaml_file, Zq, P, T_fuel, T_ox, species,
             # otherwise the c=1 edge is glued on at a different enthalpy
             # convention than the flamelet interior (see
             # family_enthalpy_offset). Composition/elements unchanged.
-            g.HPY = h + dH[i], P, Ymix
+            # 2단 평형: dH 는 연소단 조성에서 잰 값이라 미연 조성에 그대로 얹으면
+            # 목표 엔탈피에 해당하는 T 가 물리 범위에 없다(실측 dH<=-1.5 MJ/kg 에서 T->0).
+            # 먼저 혼합엔탈피로 평형시켜 조성을 연소단으로 옮긴 뒤 목표 엔탈피를 준다.
+            g.TPY = 800.0, P, Ymix
+            g.equilibrate("HP")
+            g.HP = h + dH[i], P
         g.equilibrate("HP")                    # equilibrium at that enthalpy
         T_eq[i] = g.T
         C_eq[i] = float(sum(w*g.Y[k] for w, k in zip(pv_w, pv_idx)))
@@ -529,7 +543,14 @@ def _norm_envelope(fls, eq, Zq, species):
     C_fam = C_f.max(axis=0)
     owner = C_f.argmax(axis=0)
     eq_owns = C_eq >= C_fam
-    C_norm = np.maximum(np.maximum(C_eq, C_fam), CEQ_MIN) * (1.0 + 1.0e-3)
+    if CNORM_FAMILY:
+        # 패밀리 포락선만. 저-χ 를 넣으면 깊은 dH 로 C_eq 가 과농측에서 붕괴해
+        # max() 안에서 family 가 2099배로 독점하고 c 축이 무너진다(w19 실측).
+        # 패밀리가 비는 Z 는 C_eq 로 메워 정규화가 정의되게 둔다.
+        C_norm = np.where(C_fam > CEQ_MIN, C_fam, np.maximum(C_eq, CEQ_MIN))
+        C_norm = np.maximum(C_norm, CEQ_MIN) * (1.0 + 1.0e-3)
+    else:
+        C_norm = np.maximum(np.maximum(C_eq, C_fam), CEQ_MIN) * (1.0 + 1.0e-3)
     # c=1 boundary STATE = chemical equilibrium ALWAYS (Pierce & Moin 2004; van
     # Oijen & de Goey 2000: "the manifold must match the equilibrium composition
     # exactly" at the burnt end). The earlier code used the highest-C flamelet
@@ -546,8 +567,64 @@ def _norm_envelope(fls, eq, Zq, species):
     # pinned to equilibrium. omega = 0 on the whole c=1 row regardless.
     T1 = np.asarray(eq["T_eq"], dtype=float).copy()
     Y1 = {sp: np.asarray(eq["Y_eq"][sp], dtype=float).copy() for sp in species}
+
+    # 2026-08-14: where the FAMILY owns the envelope, pinning the c=1 state to
+    # equilibrium overwrites the owner's own composition -- and the owner is
+    # automatically AT c ~ 1 (c = C_f/(C_f*1.001)). Measured consequence on the
+    # rich side (Z > 0.6, family owns 38% of nodes, C_fam/C_eq up to 66x): the
+    # chi=0.45 flamelet reads back the equilibrium composition, W 84.8 -> 31.0,
+    # |drho/rho| up to 0.64 while T is right to 2 K. There the LOCAL equilibrium
+    # is nearly inert (no oxidiser left, C_eq -> 0), so "burnt = equilibrium" is
+    # not the physical closure; what the flamelet carries is cross-Z diffused
+    # product. Objection (1) above (a finite flamelet sits 30-100 K below T_eq)
+    # does not apply where equilibrium is not the target; objection (2) (a noisy
+    # under-converged member owning max-C) is met by the quality guard below.
+    if C1_ENVELOPE_OWNER:
+        Tmax_f = T_f.max(axis=1)                     # 멤버별 최고 T
+        if C1_TMIN_FRAC > 0:
+            # 절대 기준: 그 Z 의 평형온도 대비. median 기준은 저-χ 가 다수면
+            # median 자체가 내려가 필터가 무력화된다(w19 실측 0/412 배제).
+            Teq_at = np.asarray(eq["T_eq"], dtype=float)
+            good = Tmax_f >= C1_TMIN_FRAC*np.max(Teq_at)
+        else:
+            good = Tmax_f >= 0.80*np.median(Tmax_f)  # 반쯤 꺼진 멤버 배제
+        n_bad = int((~good).sum())
+        C_g = np.where(good[:, None], C_f, -np.inf)
+        own_g = C_g.argmax(axis=0)
+        take = (~eq_owns) & np.isfinite(C_g.max(axis=0))
+        # argmax 는 Z 마다 독립이라 소유자가 인접 Z 에서 갈아타면 c=1 상태가
+        # 불연속으로 튄다. 547점 패밀리에서 실측: 인접 Z 노드 T 점프 p99 383 K
+        # (134점일 땐 257 K) — 패밀리가 촘촘할수록 후보가 많아 더 자주 갈아탄다.
+        # 처방: 포락선을 '거의' 소유하는 멤버들의 가중평균으로 c=1 상태를 잡는다.
+        # 가중치가 Z 에 대해 연속으로 변하므로 전환이 매끄럽다. eps -> 0 이면
+        # argmax 와 같아진다(기본값 = 옛 동작).
+        if C1_BLEND > 0:
+            Cmax = C_g.max(axis=0)
+            with np.errstate(invalid="ignore"):
+                dev = (Cmax[None, :] - C_g)/np.maximum(np.abs(Cmax)[None, :], 1e-30)
+            w = np.where(np.isfinite(dev), np.exp(-np.maximum(dev, 0.0)/C1_BLEND), 0.0)
+            w /= np.maximum(w.sum(axis=0, keepdims=True), 1e-30)
+            neff = 1.0/np.maximum((w**2).sum(axis=0), 1e-30)   # 유효 참여 멤버수
+            for j in np.where(take)[0]:
+                T1[j] = float(w[:, j] @ T_f[:, j])
+                for sp in species:
+                    Y1[sp][j] = float(w[:, j] @ Y_f[sp][:, j])
+            s = np.sum([Y1[sp] for sp in species], axis=0)      # 합=1 복원
+            for sp in species:
+                Y1[sp] = np.where(s > 0, Y1[sp]/np.maximum(s, 1e-30), Y1[sp])
+            print(f"[build] c=1 blend eps={C1_BLEND}: 유효 참여멤버 "
+                  f"중앙 {np.median(neff[take]):.1f} 최대 {neff[take].max():.1f}")
+        else:
+            for j in np.where(take)[0]:
+                k = int(own_g[j])
+                T1[j] = T_f[k, j]
+                for sp in species:
+                    Y1[sp][j] = Y_f[sp][k, j]
+        print(f"[build] c=1 STATE: 평형 {100*(~take).mean():.0f}% / "
+              f"포락선 소유자 {100*take.mean():.0f}% of Z "
+              f"(품질 배제 멤버 {n_bad}/{nf})")
     print(f"[build] C_norm envelope: eq owns {100*eq_owns.mean():.0f}% of Z "
-          f"(c=1 STATE forced to chemical equilibrium everywhere); "
+          f"(c=1 STATE {'환경별' if C1_ENVELOPE_OWNER else 'forced to equilibrium'}); "
           f"family/eq max ratio={np.max(C_fam/np.maximum(C_eq,CEQ_MIN)):.3f}")
     return C_norm, T1, Y1
 
@@ -1187,6 +1264,30 @@ def main():
                    help="c=1 평형을 혼합선이 아니라 패밀리 자신의 연소단 "
                         "엔탈피에서 잡는다. 차등확산 매니폴드에서 dhRef 가 "
                         "c=1 에 만드는 ~1.0 MJ/kg 계단을 없앤다.")
+    p.add_argument("--cnorm-family", action="store_true",
+                   help="C_norm 을 max(C_eq, C_fam) 이 아니라 패밀리 포락선만으로 "
+                        "잡는다. 저-χ 를 넣으면 깊은 dH 때문에 C_eq 가 붕괴해 "
+                        "family/eq 비가 2099배까지 뛰고 c 축이 무너진다(실측).")
+    p.add_argument("--c1-tmin", type=float, default=0.0,
+                   help="c=1 소유자 품질 필터를 median 대신 T_eq 의 이 비율로. "
+                        "저-χ 가 다수면 median 이 내려가 필터가 무력화된다"
+                        "(실측 0/412 배제). 권장 0.85.")
+    p.add_argument("--c1-blend", type=float, default=0.0,
+                   help="c=1 상태를 포락선 소유자 하나가 아니라 거의 소유하는 "
+                        "멤버들의 가중평균으로 잡는다(상대편차 eps 의 지수가중). "
+                        "Z 마다 독립인 argmax 가 인접 Z 에서 갈아타며 만드는 "
+                        "T 점프를 없앤다. 0=끔(기본), 권장 0.02~0.1. "
+                        "--c1-owner 와 함께 쓸 것.")
+    p.add_argument("--c1-owner", action="store_true",
+                   help="패밀리가 C_norm 포락선을 소유하는 Z 에서 c=1 상태를 "
+                        "평형이 아니라 그 소유자 flamelet 의 상태로 쓴다. "
+                        "연료 과농측(Z>0.6)에서 평형은 거의 불활성이라 "
+                        "연소단 closure 로 부적합하다(측정: W 84.8 -> 31.0).")
+    p.add_argument("--n-z", type=int, default=51,
+                   help="Z 축 노드 수 (기본 51). 감사 실측: 인접 Z 노드 T 점프 "
+                        "p99 523 K / 최대 1030 K 로 성기다.")
+    p.add_argument("--n-c", type=int, default=41,
+                   help="c 축 노드 수 (기본 41).")
     p.add_argument("--n-chi", type=int, default=N_CHI,
                    help="number of chi_st axis grid points (log-spaced). "
                         "a-priori 실측: 9노드는 9자릿수를 덮어 노드 간격이 "
@@ -1249,7 +1350,7 @@ def main():
                    help="Gaussian smoothing of T + source in c (sigma in "
                         "cells; Z at half strength). 0=off (default). "
                         "Recommended ~1.0 for deployment: removes interpolant "
-                        "faceting (T roughness 27->9 K, T_max within 0.8%) "
+                        "faceting (T roughness 27->9 K, T_max within 0.8%%) "
                         "while preserving peak/equilibrium/source-magnitude; "
                         "Y_k left intact.")
     p.add_argument("--z-beta", type=float, default=5.0,
@@ -1258,7 +1359,7 @@ def main():
 
     # stream/PV overrides (H2/O2 campaign etc.) -- module globals feed
     # equilibrium_closure() and the Tier-4 lewis block.
-    global X_FUEL_SURROGATE, X_OX, PV_SPECIES, PV_WEIGHTS
+    global X_FUEL_SURROGATE, X_OX, PV_SPECIES, PV_WEIGHTS, N_Z, N_C
     if args.x_fuel:
         X_FUEL_SURROGATE = args.x_fuel
     if args.x_ox:
@@ -1271,6 +1372,17 @@ def main():
             raise SystemExit(f"--pv-weights {len(PV_WEIGHTS)}개 != PV 종 {len(PV_SPECIES)}개")
         print(f"[build] 가중 진행변수: " + " + ".join(
             f"{w:g}*{s}" for w, s in zip(PV_WEIGHTS, PV_SPECIES)))
+    global C1_ENVELOPE_OWNER
+    C1_ENVELOPE_OWNER = args.c1_owner
+    global C1_BLEND
+    C1_BLEND = args.c1_blend
+    global CNORM_FAMILY
+    CNORM_FAMILY = args.cnorm_family
+    global C1_TMIN_FRAC
+    C1_TMIN_FRAC = args.c1_tmin
+    N_Z, N_C = args.n_z, args.n_c
+    if (N_Z, N_C) != (51, 41):
+        print(f'[cfg] 축 해상도 nZ={N_Z} nC={N_C}')
     if args.n_chi != 9:
         print(f"[cfg] chi 축 노드 {args.n_chi}")
     if args.x_fuel or args.x_ox or args.pv_species:
