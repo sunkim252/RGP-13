@@ -169,19 +169,25 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
         rh.correctBoundaryConditions();
     };
 
-    // DIAG (temporary): advective increment scale on the density
-    {
-        const volScalarField Lr0(-uGrad(phiv, divPhiv, r, "div(phiv,rho)"));
-        Info<< "PEQSI advect DIAG: max|dt*Lrho| = "
-            << dt.value()*gMax(mag(Lr0)().primitiveField())
-            << ", max|phiv| = " << gMax(mag(phiv.primitiveField()))
-            << ", max|divPhiv| = " << gMax(mag(divPhiv.primitiveField()))
-            << endl;
-    }
-
     stage(0.0, 1.0);            // q1 = qn + dt L(qn)
+    const volScalarField r1("PEQSI:r1", r);
     stage(0.75, 0.25);          // q2 = 3/4 qn + 1/4 (q1 + dt L(q1))
+    const volScalarField r2("PEQSI:r2", r);
     stage(1.0/3.0, 2.0/3.0);    // q* = 1/3 qn + 2/3 (q2 + dt L(q2))
+
+    // The substep's own compression bookkeeping: SSP-RK3's effective
+    // quadrature q* = q^n + dt (1/6 L0 + 1/6 L1 + 2/3 L2) applied to the
+    // +rho div(phiv) part of the advective operator.  The acoustic
+    // substep uses this as the Helmholtz source so that the Eq. (22)
+    // density increment cancels the substep's mass change identically.
+    sComp_.set
+    (
+        new volScalarField
+        (
+            "PEQSI:sComp",
+            (rhoN_()/6.0 + r1/6.0 + 2.0*r2/3.0)*divPhiv
+        )
+    );
 
     // Publish the starred state into the solver fields (BCs from the
     // registered fields' own conditions)

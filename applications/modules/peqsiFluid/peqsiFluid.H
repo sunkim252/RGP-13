@@ -140,8 +140,23 @@ protected:
         //- h at step start (n-state)
         autoPtr<volScalarField> hN_;
 
+        //- The advective substep's own compression bookkeeping
+        //  sComp = (1/6 rho^n + 1/6 rho^(1) + 2/3 rho^(2)) div(phiv):
+        //  the SSP-RK3 effective quadrature of rho div(u).  Using this as
+        //  the Helmholtz source makes int(coef dp) cancel the substep's
+        //  mass change identically (see correctPressurePEQSI).
+        autoPtr<volScalarField> sComp_;
+
         //- Guard so the acoustic substep runs once per time step
         label acousticTimeIndex_;
+
+        //- Initial domain mass, set on the first acoustic substep;
+        //  reference for the cumulative conservation audit (the paper's
+        //  metric: relative drift of int(rho) dV)
+        scalar initialMass_;
+
+        //- Initial domain integral of rho*h (energy-audit reference)
+        scalar initialRhoH_;
 
 
     // Protected Member Functions
@@ -204,6 +219,14 @@ public:
         //  fractional step already finalised.  TODO(V3): call the
         //  momentum transport correct() here when LES is enabled.
         virtual void postCorrector();
+
+        //- Override WITHOUT the base's rho_ = thermo.rho() re-sync: the
+        //  transported (continuity) density is the scheme's mass ledger
+        //  and must never be replaced by the EOS density (that stomp was
+        //  measured as +0.8% mass/step on the 1-D case A); their
+        //  difference is the family's energy-side drift, reported by the
+        //  thermo closure
+        virtual void postSolve();
 
 
     // Member Operators

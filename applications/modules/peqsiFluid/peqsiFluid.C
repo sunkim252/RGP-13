@@ -89,7 +89,11 @@ Foam::solvers::peqsiFluid::peqsiFluid(fvMesh& mesh)
         zeroGradientFvPatchScalarField::typeName
     ),
 
-    acousticTimeIndex_(-1)
+    acousticTimeIndex_(-1),
+
+    initialMass_(-1),
+
+    initialRhoH_(0)
 {
     if (fv::localEulerDdt::enabled(mesh))
     {
@@ -154,6 +158,17 @@ void Foam::solvers::peqsiFluid::postCorrector()
     // No-op: the acoustic substep finalised the state; the base
     // implementation must not re-sync density or transport here.
     // TODO(V3): momentumTransport correct() for LES.
+}
+
+
+void Foam::solvers::peqsiFluid::postSolve()
+{
+    // Base postSolve does  rho_ = thermo.rho()  every step end -- the
+    // solver's continuity density is SEPARATE storage from the thermo's
+    // EOS density, and that re-sync silently replaced the transported
+    // (mass-conserving) field with the EOS one (+0.8% mass/step measured
+    // on case A before this override).  Keep only the cleanup.
+    divrhoU.clear();
 }
 
 

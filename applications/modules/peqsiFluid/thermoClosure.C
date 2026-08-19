@@ -159,24 +159,23 @@ void Foam::solvers::peqsiFluid::invertTemperature()
         }
     }
 
-    const volScalarField rhoTrans("PEQSI:rhoTrans", rho_);
-
+    // The solver's continuity density rho_ is SEPARATE storage from the
+    // thermo's EOS density: correct() refreshes the thermo state (psi,
+    // mu, kappa and its own rho) at (p, T) and never touches rho_.  The
+    // gap between the two densities is the family's energy-side parking
+    // (cf. the transported-vs-EOS drift of the rhoTransport campaign).
     thermo_.correct();
 
-    // rho_ now holds the EOS density: measure the drift, then restore
     scalar maxDrift = 0;
     {
-        const scalarField& re = rho_.primitiveField();
-        const scalarField& rt = rhoTrans.primitiveField();
-        forAll(re, i)
+        const scalarField& re = thermo_.rho()().primitiveField();
+        const scalarField& rt = rho_.primitiveField();
+        forAll(rt, i)
         {
             maxDrift = max(maxDrift, mag(re[i] - rt[i])/max(rt[i], small));
         }
         reduce(maxDrift, maxOp<scalar>());
     }
-
-    rho_ = rhoTrans;
-    rho_.correctBoundaryConditions();
 
     Info<< "PEQSI thermo closure: T = ["
         << gMin(thermo_.T().primitiveField()) << ", "

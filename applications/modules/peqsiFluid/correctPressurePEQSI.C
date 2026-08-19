@@ -96,10 +96,54 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
         fvc::flux(2.0*coef*UN_())/dt
     );
 
-    // Modified Helmholtz, PEQSI Eq. (19): the RHS carries the
-    // consistency-substituted volumetric source
-    //   (4/dt) * (1/2) ( rho^n div u^n + rho^* div u^* )
-    // in place of WKK Eq. (28)'s discrete continuity residual.
+    // Helmholtz RHS -- the PEQSI Eq. (18) consistency substitution
+    // evaluated with the SUBSTEP'S OWN quadrature (default), or the
+    // paper's trapezoidal form (A/B switch):
+    //
+    // default (substep-consistent): source = (4/dt) sComp, where sComp is
+    //   the advective substep's accumulated compression bookkeeping
+    //   (1/6 rho^n + 1/6 rho^(1) + 2/3 rho^(2)) div(phiv).  Integrating
+    //   the Helmholtz equation over a periodic domain, the laplacian and
+    //   convective terms telescope, leaving int(coef dp) = dt int(sComp)
+    //   -- exactly the substep's mass change (its conservative-flux part
+    //   telescopes too), so Eq. (22) restores global mass conservation
+    //   identically, for any interpolation scheme.  Locally sComp is of
+    //   the rho div(u) form (zero at a passive contact), so the
+    //   pressure-equilibrium property is preserved.  This is Eq. (18)'s
+    //   own principle -- "substitute what the substep actually solved" --
+    //   applied to our SSP-RK3 discretisation instead of the reference's
+    //   trapezoid.
+    //
+    // trapezoid form (PEQSI Eq. 19 literal): (2/dt)(rho^n div u^n +
+    //   rho^* div u^*)/... exact only if the substep satisfies the
+    //   trapezoidal advective continuity; with our substep the assumption
+    //   error was measured at +5.6% mass per period (case A).  Kept for
+    //   the A/B against the reference.
+    //
+    // (The un-substituted WKK Eq. 28 residual form was also tried: it is
+    // mass-exact by the same telescoping argument, but its RHS carries
+    // the interface-localised divergence mismatch and blew up within 6
+    // steps -- the very pathology PEQSI Sec. II B documents.)
+    const Switch consistencyRHS
+    (
+        pimple.dict().lookupOrDefault<Switch>("peqsiTrapezoidRHS", false)
+    );
+
+    tmp<volScalarField> tRhs;
+    if (consistencyRHS)
+    {
+        tRhs =
+            (2.0/dt)
+           *(
+                rhoN_()*fvc::div(UN_())
+              + rhoStar*fvc::div(UStar)
+            );
+    }
+    else
+    {
+        tRhs = (4.0/dt)*sComp_();
+    }
+
     fvScalarMatrix dpEqn
     (
         fvm::laplacian(dp)
@@ -107,11 +151,7 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
       + fvm::Sp(4.0*coef/sqr(dt), dp)
      ==
       - fvc::laplacian(pStar + pN_())
-      + (2.0/dt)
-       *(
-            rhoN_()*fvc::div(UN_())
-          + rhoStar*fvc::div(UStar)
-        )
+      + tRhs()
     );
 
     dpEqn.solve();
@@ -167,20 +207,33 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
     phi_ = fvc::flux(rho_*U_);
 
     // ------------------------------------------------------------------
-    // Mass audit: the fractional step conserves mass by construction;
-    // report the residual of the discrete budget it satisfies.
+    // Conservation audit, the papers' metric: cumulative relative drift
+    // of int(rho) dV and int(rho h) dV from the initial state (an
+    // instantaneous ddt+div residual cannot measure the error of this
+    // non-conservative-form scheme -- measured on case A: residual -4e-9
+    // while the mass actually grew +5.6%/period with the consistency RHS).
     // ------------------------------------------------------------------
     {
-        const volScalarField contErr
-        (
-            (rho_ - rhoN_())/dt + fvc::div(phi_)
-        );
-        Info<< "PEQSI mass balance: int(contErr) dV = "
-            << gSum
-               (
-                   contErr.primitiveField()*mesh.V().primitiveField()
-               )
-            << " kg/s" << endl;
+        const scalar M =
+            gSum(rho_.primitiveField()*mesh.V().primitiveField());
+        const scalar E =
+            gSum
+            (
+                rho_.primitiveField()*h_.primitiveField()
+               *mesh.V().primitiveField()
+            );
+
+        if (initialMass_ < 0)
+        {
+            initialMass_ = M;
+            initialRhoH_ = E;
+        }
+
+        Info<< "PEQSI conservation: mass rel = "
+            << (M - initialMass_)/initialMass_
+            << ", rho*h rel = "
+            << (E - initialRhoH_)/max(mag(initialRhoH_), small)
+            << endl;
     }
 
     // ------------------------------------------------------------------
@@ -196,6 +249,7 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
     UN_.clear();
     pN_.clear();
     hN_.clear();
+    sComp_.clear();
 }
 
 
