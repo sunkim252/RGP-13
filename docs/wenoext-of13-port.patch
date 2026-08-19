@@ -170,7 +170,7 @@ index 0fc169e..74702e9 100644
              const word fieldName
          ) const;
 diff --git a/libWENOEXT/WENOBase/geometryWENO/geometryWENO.H b/libWENOEXT/WENOBase/geometryWENO/geometryWENO.H
-index e113b7a..401aae4 100644
+index e113b7a..dde484f 100644
 --- a/libWENOEXT/WENOBase/geometryWENO/geometryWENO.H
 +++ b/libWENOEXT/WENOBase/geometryWENO/geometryWENO.H
 @@ -45,7 +45,12 @@ Author
@@ -187,6 +187,17 @@ index e113b7a..401aae4 100644
  #include "blaze/Math.h"
  #include "BlazeIO.H"
  #include "List3D.H"
+@@ -70,7 +75,9 @@ namespace geometryWENO
+     //- For static matrices a custom allocator is required when dynamic
+     //  allocation is used. OpenFOAM does not provide an option for an 
+     //  allocator with a list. 
+-    using blazeList = std::vector<geometryWENO::scalarSquareMatrix,blaze::AlignedAllocator<scalar>>;
++    // OF-13 port: allocator value_type must match the element type
++    // (libstdc++ static_assert, correctly enforced by gcc 9)
++    using blazeList = std::vector<geometryWENO::scalarSquareMatrix,blaze::AlignedAllocator<geometryWENO::scalarSquareMatrix>>;
+     
+     // Member Functions
+ 
 diff --git a/libWENOEXT/WENOBase/globalfvMesh.C b/libWENOEXT/WENOBase/globalfvMesh.C
 index 1170072..2e0fcc1 100644
 --- a/libWENOEXT/WENOBase/globalfvMesh.C
@@ -256,93 +267,90 @@ index a2de6cf..3746483 100644
  #include "Ostream.H"
  #include "blaze/Math.h"
 diff --git a/libWENOEXT/WENOBase/reconstructRegionalMesh.C b/libWENOEXT/WENOBase/reconstructRegionalMesh.C
-index 621f029..23a6378 100644
+index 621f029..0a0d6b8 100644
 --- a/libWENOEXT/WENOBase/reconstructRegionalMesh.C
 +++ b/libWENOEXT/WENOBase/reconstructRegionalMesh.C
-@@ -1,534 +1,32 @@
+@@ -1,11 +1,11 @@
  /*---------------------------------------------------------------------------*\
--       ██╗    ██╗███████╗███╗   ██╗ ██████╗     ███████╗██╗  ██╗████████╗
--       ██║    ██║██╔════╝████╗  ██║██╔═══██╗    ██╔════╝╚██╗██╔╝╚══██╔══╝
+        ██╗    ██╗███████╗███╗   ██╗ ██████╗     ███████╗██╗  ██╗████████╗
+        ██║    ██║██╔════╝████╗  ██║██╔═══██╗    ██╔════╝╚██╗██╔╝╚══██╔══╝
 -       ██║ █╗ ██║█████╗  ██╔██╗ ██║██║   ██║    █████╗   ╚███╔╝    ██║   
 -       ██║███╗██║██╔══╝  ██║╚██╗██║██║   ██║    ██╔══╝   ██╔██╗    ██║   
 -       ╚███╔███╔╝███████╗██║ ╚████║╚██████╔╝    ███████╗██╔╝ ██╗   ██║   
 -        ╚══╝╚══╝ ╚══════╝╚═╝  ╚═══╝ ╚═════╝     ╚══════╝╚═╝  ╚═╝   ╚═╝   
 --------------------------------------------------------------------------------                                                                                                                                                 
++       ██║ █╗ ██║█████╗  ██╔██╗ ██║██║   ██║    █████╗   ╚███╔╝    ██║
++       ██║███╗██║██╔══╝  ██║╚██╗██║██║   ██║    ██╔══╝   ██╔██╗    ██║
++       ╚███╔███╔╝███████╗██║ ╚████║╚██████╔╝    ███████╗██╔╝ ██╗   ██║
++        ╚══╝╚══╝ ╚══════╝╚═╝  ╚═══╝ ╚═════╝     ╚══════╝╚═╝  ╚═╝   ╚═╝
++-------------------------------------------------------------------------------
  License
--    This file is part of WENO Ext.
--
--    WENO Ext is free software: you can redistribute it and/or modify it
--    under the terms of the GNU General Public License as published by
--    the Free Software Foundation, either version 3 of the License, or
--    (at your option) any later version.
--
--    WENO Ext is distributed in the hope that it will be useful, but WITHOUT
--    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
--    FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
--    for more details.
--
--    You should have received a copy of the GNU General Public License
--    along with  WENO Ext.  If not, see <http://www.gnu.org/licenses/>.
--
--Author
--    Jan Wilhelm Gärtner <jan.gaertner@outlook.de> Copyright (C) 2020
--
-+    This file is part of WENO Ext library.  GPL v3 or later.
-+
-+    OF-13 PORT NOTE (2026-08-19): the original implementation stitched
-+    neighbouring processor meshes geometrically with
-+    faceCoupleInfo(mesh, mesh, tol, perfectMatch), a constructor removed
-+    upstream (only the explicit-addressing constructor remains in
-+    OpenFOAM-13).  The parallel halo-mesh reconstruction is therefore not
-+    yet ported: serial runs never reach this code (all call sites in
-+    globalfvMesh are gated on Pstream::parRun()), and parallel runs abort
-+    with a clear message instead of miscomputing stencils.
+     This file is part of WENO Ext.
+ 
+@@ -24,13 +24,18 @@ License
+ 
+ Author
+     Jan Wilhelm Gärtner <jan.gaertner@outlook.de> Copyright (C) 2020
++    (OF-13 port: RGP-13 project, 2026 -- see header note)
+ 
  \*---------------------------------------------------------------------------*/
  
  #include "reconstructRegionalMesh.H"
 -#include "masterUncollatedFileOperation.H"
 -
--
++#include "polyMeshAdder.H"
++#include "fvMeshAdder.H"
++#include "processorPolyPatch.H"
++#include "mergePoints.H"
++#include "PstreamBuffers.H"
+ 
++// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
  
  Foam::autoPtr<Foam::fvMesh> Foam::reconstructRegionalMesh::reconstruct
  (
-     const labelList& processorList,
--    const labelList& sendToProcessorList,
-+    const labelList& sendToProcessor,
+@@ -39,76 +44,39 @@ Foam::autoPtr<Foam::fvMesh> Foam::reconstructRegionalMesh::reconstruct
      const fvMesh& localMesh
  )
  {
 -    // Get points, faces, neighbour, owner lists from processors 
--    List<faceList>   allFaces(Pstream::nProcs());
--    List<pointField> allPoints(Pstream::nProcs());
--    List<labelList>  allOwners(Pstream::nProcs());
--    List<labelList>  allNeighbours(Pstream::nProcs());
++    // Get points, faces, neighbour, owner lists from processors
+     List<faceList>   allFaces(Pstream::nProcs());
+     List<pointField> allPoints(Pstream::nProcs());
+     List<labelList>  allOwners(Pstream::nProcs());
+     List<labelList>  allNeighbours(Pstream::nProcs());
+ 
 -
+     getMeshInformation(allFaces,allPoints,allOwners,allNeighbours,
+         processorList,sendToProcessorList,localMesh);
+ 
 -
--    getMeshInformation(allFaces,allPoints,allOwners,allNeighbours,
--        processorList,sendToProcessorList,localMesh);
--
--
--    List<wordList> allPatchNames;
--    List<labelList> allPatchSize;
--    List<labelList> allStart;
--    List<labelList> allIndex;
+     List<wordList> allPatchNames;
+     List<labelList> allPatchSize;
+     List<labelList> allStart;
+     List<labelList> allIndex;
 -    
--    getPatchInformation(allPatchNames,allPatchSize,allStart,allIndex,
--        processorList,sendToProcessorList,localMesh);
--
++
+     getPatchInformation(allPatchNames,allPatchSize,allStart,allIndex,
+         processorList,sendToProcessorList,localMesh);
+ 
 -    // Get the dimensions of the current processor domain and calculate the 
 -    // merging tolerance
 -    word regionName = polyMesh::defaultRegion;
 -    word regionDir = word::null;
--
++    const word regionName = polyMesh::defaultRegion;
+ 
 -    scalar mergeTol = 1E-7;
 -    
 -    // Read point on individual processors to determine merge tolerance
 -    // (otherwise single cell domains might give problems)
--    const boundBox bb = procBounds(processorList,allPoints);
--    const scalar mergeDist = mergeTol*bb.mag();
--
++    // Merge tolerance: absolute distance from the halo bounding box.
++    // Halo faces are copies of one decomposed mesh, so coupled
++    // boundary-face centres coincide bitwise; the tolerance only has to
++    // stay below the smallest face-centre spacing.
++    const scalar mergeTol = 1e-7;
+     const boundBox bb = procBounds(processorList,allPoints);
+     const scalar mergeDist = mergeTol*bb.mag();
+ 
 -    //Info<< "Overall mesh bounding box  : " << bb << nl
 -        //<< "Relative tolerance         : " << mergeTol << nl
 -        //<< "Absolute matching distance : " << mergeDist << nl
@@ -382,16 +390,19 @@ index 621f029..23a6378 100644
 -        // --> Solution construct without boundary
 -
 -        fvMesh meshToAdd
--        (
--            IOobject
--            (
--                regionName,
--                localMesh.time().constant(),
--                localMesh.time(),
--                IOobject::NO_READ,
--                IOobject::NO_WRITE,
--                false
--            ),
++    // Helper: construct the (boundary-less) mesh of processor procI and
++    // dress it with single-type "patch" boundaries so polyMeshAdder can
++    // merge patches by name
++    auto makeProcMesh = [&](const label procI) -> fvMesh*
++    {
++        fvMesh* m = new fvMesh
+         (
+             IOobject
+             (
+@@ -119,71 +87,137 @@ Foam::autoPtr<Foam::fvMesh> Foam::reconstructRegionalMesh::reconstruct
+                 IOobject::NO_WRITE,
+                 false
+             ),
 -            #ifdef FOAM_MOVE_CONSTRUCTOR
 -                std::move(allPoints[procI]),
 -                std::move(allFaces[procI]),
@@ -404,18 +415,25 @@ index 621f029..23a6378 100644
 -                xferMove(allNeighbours[procI]),
 -            #endif
 -            false // Do not synchronize --> in polyMesh() bounds_ calls an mpirecv 
--        );
--
++            std::move(allPoints[procI]),
++            std::move(allFaces[procI]),
++            std::move(allOwners[procI]),
++            std::move(allNeighbours[procI]),
++            false   // no parallel sync: this is a local scratch mesh
+         );
+ 
 -        // Now add the boundaries by creating a polyPatch with a type patch 
 -        // for generic value
 -
 -        // // Access to boundary mesh
 -        const polyBoundaryMesh& polyMeshRef = meshToAdd.boundaryMesh();
--
--        List<polyPatch*> patches(allPatchNames[procI].size());
++        const polyBoundaryMesh& polyMeshRef = m->boundaryMesh();
+ 
+         List<polyPatch*> patches(allPatchNames[procI].size());
 - 
--        forAll(patches, patchi)
--        {
++
+         forAll(patches, patchi)
+         {
 -            patches[patchi] = 
 -                (
 -                    polyPatch::New
@@ -428,14 +446,45 @@ index 621f029..23a6378 100644
 -                        polyMeshRef
 -                    )
 -                ).ptr();
--        }
--
++            patches[patchi] = polyPatch::New
++            (
++                "patch",    // generic type; names must match for merging
++                allPatchNames[procI][patchi],
++                allPatchSize[procI][patchi],
++                allStart[procI][patchi],
++                allIndex[procI][patchi],
++                polyMeshRef
++            ).ptr();
+         }
+ 
 -        meshToAdd.addPatches(patches,false);
--
--
++        // fvMesh-level patch addition: builds the fvPatches alongside the
++        // polyPatches (polyMesh::addPatches would leave the fvBoundaryMesh
++        // with hanging fvPatch slots -- fatal on first boundary access in
++        // OpenFOAM-13, whose fvMesh geometry touches the fv boundary)
++        m->addFvPatches(patches, false);
+ 
++        return m;
++    };
+ 
 -        // Find geometrically shared points/faces.
 -        autoPtr<faceCoupleInfo> couples
--        (
++    // Seed the master mesh with the first processor's mesh directly
++    // (the upstream code started from an empty mesh; seeding avoids the
++    // empty-mesh edge case in the explicit-addressing faceCoupleInfo)
++    fvMesh* masterMesh = makeProcMesh(processorList.first());
++
++    for (label i = 1; i < processorList.size(); i++)
++    {
++        const label procI = processorList[i];
++
++        autoPtr<fvMesh> meshToAdd(makeProcMesh(procI));
++
++        // Find the geometrically coupled boundary-face pairs (the
++        // OF-13 replacement for the removed perfect-match constructor)
++        labelList masterAddr, slaveAddr;
++        matchCoupledBoundaryFaces
+         (
 -            new faceCoupleInfo
 -            (
 -                *masterMesh,
@@ -443,197 +492,251 @@ index 621f029..23a6378 100644
 -                mergeDist,      // Absolute merging distance
 -                true            // Matching faces identical
 -            )
--        );
--
++            *masterMesh,
++            meshToAdd(),
++            mergeDist,
++            masterAddr,
++            slaveAddr
+         );
+ 
 -        // Add elements to mesh
 -        autoPtr<mapAddedPolyMesh> map = add
--        (
--            *masterMesh,
++        faceCoupleInfo couples
+         (
+             *masterMesh,
 -            meshToAdd,
 -            couples,
 -            false // do not synchronize
--        );
++            masterAddr,
++            meshToAdd(),
++            slaveAddr
+         );
 -        
--    }
--
--    return autoPtr<fvMesh>(masterMesh);
--}
--
--
--Foam::autoPtr<Foam::mapAddedPolyMesh> Foam::reconstructRegionalMesh::add
--(
--    fvMesh& mesh0,
--    const fvMesh& mesh1,
--    const faceCoupleInfo& coupleInfo,
--    const bool validBoundary
--)
--{
--    // -----------------------------------
--    // Function taken from fvMeshAddr::add
--    // -----------------------------------
--    
--    mesh0.clearOut();
--    
--    // Resulting merged mesh (polyMesh only!)
--    autoPtr<mapAddedPolyMesh> mapPtr
--    (
--        polyMeshAdder::add
--        (
--            mesh0,
--            mesh1,
--            coupleInfo,
--            validBoundary
--        )
--    );
--    
--    return mapPtr;
--}
--
--
--Foam::boundBox Foam::reconstructRegionalMesh::procBounds
--(
--    const labelList processorList,
--    const List<pointField>& allPoints
--)
--{
--    boundBox bb = boundBox::invertedBox;
--
--    forAll(processorList, procI)
--    {
--        boundBox domainBb(allPoints[processorList[procI]], false);
--
--        bb.min() = min(bb.min(), domainBb.min());
--        bb.max() = max(bb.max(), domainBb.max());
--    }
--
--    return bb;
--}
--
--
--void Foam::reconstructRegionalMesh::getMeshInformation
--(
--    List<faceList>& allFaces,
--    List<pointField>& allPoints,
--    List<labelList>& allOwner,
--    List<labelList>& allNeighbours,
--    const labelList& processorList,
--    const labelList& sendToProcessorList,
--    const fvMesh& mesh
--)
--{
--    // Add points and faces for own processor
--    allFaces[Pstream::myProcNo()] = mesh.faces();
--    allPoints[Pstream::myProcNo()] = mesh.points();
--    allOwner[Pstream::myProcNo()] = mesh.faceOwner();
--    allNeighbours[Pstream::myProcNo()] = mesh.faceNeighbour();
--
--    PstreamBuffers pBufs(Pstream::commsTypes::nonBlocking);
--
--    for (label procI : sendToProcessorList)
--    {
--        // Check for own processor ID as sendToProcessor contains its own procI
--        if (procI == Pstream::myProcNo())
--            continue;
--
--        UOPstream send(procI,pBufs);
--        send << allFaces[Pstream::myProcNo()];
--        send << allPoints[Pstream::myProcNo()];
--        send << allOwner[Pstream::myProcNo()];
--        send << allNeighbours[Pstream::myProcNo()];
--    }
--
--    pBufs.finishedSends();
--
--    for (label procI : processorList)
--    {
--        if (procI == Pstream::myProcNo())
--            continue;
--        
--        UIPstream recv(procI,pBufs);
--        recv >> allFaces[procI];
--        recv >> allPoints[procI];
--        recv >> allOwner[procI];
--        recv >> allNeighbours[procI];
--    }
--}
--
--
--
--void Foam::reconstructRegionalMesh::getPatchInformation
--(
--    List<wordList>& allPatchNames,
--    List<labelList>& allPatchSize,
--    List<labelList>& allStart,
--    List<labelList>& allIndex,
--    const labelList& processorList,
--    const labelList& sendToProcessorList,
--    const fvMesh& mesh  
--)
--{
--    // Add points and faces for own processor
--    allPatchNames.resize(Pstream::nProcs());
--    allPatchSize.resize(Pstream::nProcs());
--    allStart.resize(Pstream::nProcs());
--    allIndex.resize(Pstream::nProcs());
--
--    // Get local boundary mesh
--    const polyBoundaryMesh& bMesh = mesh.boundaryMesh();
--
--    allPatchNames[Pstream::myProcNo()].resize(bMesh.size());
--    allPatchSize[Pstream::myProcNo()].resize(bMesh.size());
--    allStart[Pstream::myProcNo()].resize(bMesh.size());
--    allIndex[Pstream::myProcNo()].resize(bMesh.size());
--
--    // Loop over all patches
--    forAll(bMesh,i)
--    {
--        const polyPatch& patch = bMesh[i];
--        allPatchNames[Pstream::myProcNo()][i] = patch.name();
--        allPatchSize[Pstream::myProcNo()][i] = patch.size();
--        allStart[Pstream::myProcNo()][i] = patch.start();
--        allIndex[Pstream::myProcNo()][i] = patch.index();
--    }
-+    FatalErrorInFunction
-+        << "WENOEXT OF-13 port: parallel halo-mesh reconstruction "
-+        << "(reconstructRegionalMesh) is not yet ported -- "
-+        << "run WENO schemes in serial, or port faceCoupleInfo-based "
-+        << "stitching to the OpenFOAM-13 API."
-+        << exit(FatalError);
++
++        add(*masterMesh, meshToAdd(), couples, false);
++    }
++
++    if (processorList.size() == 1)
++    {
++        return autoPtr<fvMesh>(masterMesh);
++    }
++
++    // polyMeshAdder::add manipulates the polyMesh boundary behind the
++    // fvMesh's back, leaving the fvBoundaryMesh with hanging fvPatch
++    // slots (measured: UPtrList<fvPatch> deref fatal on the first
++    // boundary access).  Rebuild a clean fvMesh from the merged
++    // topology and add the patches through addFvPatches so the poly-
++    // and fv-level boundaries stay consistent.
++    pointField mergedPoints(masterMesh->points());
++    faceList mergedFaces(masterMesh->faces());
++    labelList mergedOwner(masterMesh->faceOwner());
++    labelList mergedNeighbour(masterMesh->faceNeighbour());
++
++    const polyBoundaryMesh& mergedBnd = masterMesh->boundaryMesh();
++
++    wordList patchNames(mergedBnd.size());
++    labelList patchSizes(mergedBnd.size());
++    labelList patchStarts(mergedBnd.size());
++    forAll(mergedBnd, patchi)
++    {
++        patchNames[patchi] = mergedBnd[patchi].name();
++        patchSizes[patchi] = mergedBnd[patchi].size();
++        patchStarts[patchi] = mergedBnd[patchi].start();
+     }
  
--    PstreamBuffers pBufs(Pstream::commsTypes::nonBlocking);
--
--    for (label procI : sendToProcessorList)
--    {
--        // Check for own processor ID as sendToProcessor contains its own procI
--        if (procI == Pstream::myProcNo())
--            continue;
--
--        UOPstream send(procI,pBufs);
--
--        send << allPatchNames[Pstream::myProcNo()];
--        send << allPatchSize[Pstream::myProcNo()];
--        send << allStart[Pstream::myProcNo()];
--        send << allIndex[Pstream::myProcNo()];
--    }
--
--    pBufs.finishedSends();
--
--    for (label procI : processorList)
--    {
--        if (procI == Pstream::myProcNo())
--            continue;
+-    return autoPtr<fvMesh>(masterMesh);
++    delete masterMesh;
++
++    fvMesh* result = new fvMesh
++    (
++        IOobject
++        (
++            regionName,
++            localMesh.time().constant(),
++            localMesh.time(),
++            IOobject::NO_READ,
++            IOobject::NO_WRITE,
++            false
++        ),
++        std::move(mergedPoints),
++        std::move(mergedFaces),
++        std::move(mergedOwner),
++        std::move(mergedNeighbour),
++        false
++    );
++
++    List<polyPatch*> patches(patchNames.size());
++    forAll(patches, patchi)
++    {
++        patches[patchi] = polyPatch::New
++        (
++            "patch",
++            patchNames[patchi],
++            patchSizes[patchi],
++            patchStarts[patchi],
++            patchi,
++            result->boundaryMesh()
++        ).ptr();
++    }
++    result->addFvPatches(patches, false);
++
++    return autoPtr<fvMesh>(result);
+ }
+ 
+ 
+@@ -196,11 +230,11 @@ Foam::autoPtr<Foam::mapAddedPolyMesh> Foam::reconstructRegionalMesh::add
+ )
+ {
+     // -----------------------------------
+-    // Function taken from fvMeshAddr::add
++    // Function taken from fvMeshAdder::add
+     // -----------------------------------
+-    
++
+     mesh0.clearOut();
+-    
++
+     // Resulting merged mesh (polyMesh only!)
+     autoPtr<mapAddedPolyMesh> mapPtr
+     (
+@@ -212,14 +246,93 @@ Foam::autoPtr<Foam::mapAddedPolyMesh> Foam::reconstructRegionalMesh::add
+             validBoundary
+         )
+     );
+-    
++
+     return mapPtr;
+ }
+ 
+ 
++void Foam::reconstructRegionalMesh::matchCoupledBoundaryFaces
++(
++    const fvMesh& masterMesh,
++    const fvMesh& meshToAdd,
++    const scalar mergeDist,
++    labelList& masterAddr,
++    labelList& slaveAddr
++)
++{
++    const label nMasterBnd = masterMesh.nFaces() - masterMesh.nInternalFaces();
++    const label nSlaveBnd  = meshToAdd.nFaces() - meshToAdd.nInternalFaces();
++
++    // Boundary-face centres of both meshes in one list:
++    // [0, nMasterBnd) master, [nMasterBnd, nMasterBnd+nSlaveBnd) slave
++    pointField centres(nMasterBnd + nSlaveBnd);
++
++    for (label i = 0; i < nMasterBnd; i++)
++    {
++        centres[i] =
++            masterMesh.faces()[masterMesh.nInternalFaces() + i]
++           .centre(masterMesh.points());
++    }
++    for (label i = 0; i < nSlaveBnd; i++)
++    {
++        centres[nMasterBnd + i] =
++            meshToAdd.faces()[meshToAdd.nInternalFaces() + i]
++           .centre(meshToAdd.points());
++    }
++
++    labelList pointMap;
++    const label nUnique = mergePoints(centres, mergeDist, false, pointMap);
++
++    // A merged index shared by one master and one slave face = a couple
++    labelList mergedToMaster(nUnique, -1);
++    labelList mergedToSlave(nUnique, -1);
++    label nCouples = 0;
++
++    for (label i = 0; i < nMasterBnd; i++)
++    {
++        mergedToMaster[pointMap[i]] = i;
++    }
++    for (label i = 0; i < nSlaveBnd; i++)
++    {
++        const label m = pointMap[nMasterBnd + i];
++
++        if (mergedToSlave[m] != -1)
++        {
++            FatalErrorInFunction
++                << "Two boundary faces of the added processor mesh share "
++                << "one face-centre location -- merge tolerance "
++                << mergeDist << " too large for this mesh"
++                << exit(FatalError);
++        }
++        mergedToSlave[m] = i;
++
++        if (mergedToMaster[m] != -1)
++        {
++            nCouples++;
++        }
++    }
++
++    masterAddr.setSize(nCouples);
++    slaveAddr.setSize(nCouples);
++
++    label coupleI = 0;
++    for (label m = 0; m < nUnique; m++)
++    {
++        if (mergedToMaster[m] != -1 && mergedToSlave[m] != -1)
++        {
++            masterAddr[coupleI] =
++                masterMesh.nInternalFaces() + mergedToMaster[m];
++            slaveAddr[coupleI] =
++                meshToAdd.nInternalFaces() + mergedToSlave[m];
++            coupleI++;
++        }
++    }
++}
++
++
+ Foam::boundBox Foam::reconstructRegionalMesh::procBounds
+ (
+-    const labelList processorList,
++    const labelList& processorList,
+     const List<pointField>& allPoints
+ )
+ {
+@@ -275,7 +388,7 @@ void Foam::reconstructRegionalMesh::getMeshInformation
+     {
+         if (procI == Pstream::myProcNo())
+             continue;
 -        
--        UIPstream recv(procI,pBufs);
++
+         UIPstream recv(procI,pBufs);
+         recv >> allFaces[procI];
+         recv >> allPoints[procI];
+@@ -285,7 +398,6 @@ void Foam::reconstructRegionalMesh::getMeshInformation
+ }
+ 
+ 
 -
+ void Foam::reconstructRegionalMesh::getPatchInformation
+ (
+     List<wordList>& allPatchNames,
+@@ -294,7 +406,7 @@ void Foam::reconstructRegionalMesh::getPatchInformation
+     List<labelList>& allIndex,
+     const labelList& processorList,
+     const labelList& sendToProcessorList,
+-    const fvMesh& mesh  
++    const fvMesh& mesh
+ )
+ {
+     // Add points and faces for own processor
+@@ -343,10 +455,9 @@ void Foam::reconstructRegionalMesh::getPatchInformation
+     {
+         if (procI == Pstream::myProcNo())
+             continue;
+-        
++
+         UIPstream recv(procI,pBufs);
+ 
 -        // Create temporary lists
--        recv >> allPatchNames[procI];
--        recv >> allPatchSize[procI];
--        recv >> allStart[procI];
--        recv >> allIndex[procI];
--    }
--}
--
--
+         recv >> allPatchNames[procI];
+         recv >> allPatchSize[procI];
+         recv >> allStart[procI];
+@@ -355,180 +466,4 @@ void Foam::reconstructRegionalMesh::getPatchInformation
+ }
+ 
+ 
 -// * * * * * * * * * * * Depricated Functions * * * * * * * * * * * * * * * * *
 -
 -Foam::fileName Foam::reconstructRegionalMesh::localPath
@@ -810,81 +913,92 @@ index 621f029..23a6378 100644
 -{
 -    // call reset before destruction
 -    reset();
-+    return autoPtr<fvMesh>(nullptr);
- }
+-}
++// ************************************************************************* //
 diff --git a/libWENOEXT/WENOBase/reconstructRegionalMesh.H b/libWENOEXT/WENOBase/reconstructRegionalMesh.H
-index 45f56b7..36552e1 100644
+index 45f56b7..f4a400a 100644
 --- a/libWENOEXT/WENOBase/reconstructRegionalMesh.H
 +++ b/libWENOEXT/WENOBase/reconstructRegionalMesh.H
-@@ -1,49 +1,24 @@
+@@ -1,11 +1,11 @@
  /*---------------------------------------------------------------------------*\
--       ██╗    ██╗███████╗███╗   ██╗ ██████╗     ███████╗██╗  ██╗████████╗
--       ██║    ██║██╔════╝████╗  ██║██╔═══██╗    ██╔════╝╚██╗██╔╝╚══██╔══╝
+        ██╗    ██╗███████╗███╗   ██╗ ██████╗     ███████╗██╗  ██╗████████╗
+        ██║    ██║██╔════╝████╗  ██║██╔═══██╗    ██╔════╝╚██╗██╔╝╚══██╔══╝
 -       ██║ █╗ ██║█████╗  ██╔██╗ ██║██║   ██║    █████╗   ╚███╔╝    ██║   
 -       ██║███╗██║██╔══╝  ██║╚██╗██║██║   ██║    ██╔══╝   ██╔██╗    ██║   
 -       ╚███╔███╔╝███████╗██║ ╚████║╚██████╔╝    ███████╗██╔╝ ██╗   ██║   
 -        ╚══╝╚══╝ ╚══════╝╚═╝  ╚═══╝ ╚═════╝     ╚══════╝╚═╝  ╚═╝   ╚═╝   
 --------------------------------------------------------------------------------                                                                                                                                                  
++       ██║ █╗ ██║█████╗  ██╔██╗ ██║██║   ██║    █████╗   ╚███╔╝    ██║
++       ██║███╗██║██╔══╝  ██║╚██╗██║██║   ██║    ██╔══╝   ██╔██╗    ██║
++       ╚███╔███╔╝███████╗██║ ╚████║╚██████╔╝    ███████╗██╔╝ ██╗   ██║
++        ╚══╝╚══╝ ╚══════╝╚═╝  ╚═══╝ ╚═════╝     ╚══════╝╚═╝  ╚═╝   ╚═╝
++-------------------------------------------------------------------------------
  License
--    This file is part of WENO Ext.
--
--    WENO Ext is free software: you can redistribute it and/or modify it
--    under the terms of the GNU General Public License as published by
--    the Free Software Foundation, either version 3 of the License, or
--    (at your option) any later version.
--
--    WENO Ext is distributed in the hope that it will be useful, but WITHOUT
--    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
--    FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
--    for more details.
--
--    You should have received a copy of the GNU General Public License
--    along with  WENO Ext.  If not, see <http://www.gnu.org/licenses/>.
-+    This file is part of WENO Ext library.  GPL v3 or later.
+     This file is part of WENO Ext.
+ 
+@@ -23,27 +23,43 @@ License
+     along with  WENO Ext.  If not, see <http://www.gnu.org/licenses/>.
  
  Description
 -    Reconstruct regional mesh.
 -    Bases on reconstructParMesh.C of OpenFOAM 
-+    OF-13 PORT (2026-08-19): slimmed interface.  The original header pulled
-+    polyMeshAdder/faceCoupleInfo/fvMeshAdder for the geometric processor-mesh
-+    stitching; that constructor family was removed upstream and the parallel
-+    halo reconstruction is not yet ported (see reconstructRegionalMesh.C --
-+    serial call paths never reach it).
+-
+-SourceFiles
+-    reconstructRegionalMesh.C
++    Reconstruct the regional (halo) mesh from neighbouring processor meshes.
++
++    OF-13 PORT (2026-08-19): the upstream implementation stitched the
++    processor meshes with the geometric faceCoupleInfo constructor
++    (mesh, mesh, tol, perfectMatch), which was removed in OpenFOAM-13
++    (only the explicit-addressing constructor remains).  This port finds
++    the coupled boundary-face pairs itself by merging boundary-face
++    centres (Foam::mergePoints) and hands the matched addressing to the
++    remaining constructor.  This is valid because the halo faces are
++    processor-boundary faces of one and the same decomposed mesh: their
++    point coordinates are bitwise identical and decomposePar stores the
++    neighbour-side face as the reversed owner face with the zero-point
++    preserved -- exactly the ordering contract the explicit-addressing
++    faceCoupleInfo requires.
++
++    The upstream file-reading fallback (localPath/readHeader/readFaceList/
++    fileHandlerControl) was deprecated upstream and is not ported: all
++    mesh data travels via Pstream.
  
- SourceFiles
-     reconstructRegionalMesh.C
--
--Author
--    Jan Wilhelm Gärtner <jan.gaertner@outlook.de> Copyright (C) 2020
--
+ Author
+     Jan Wilhelm Gärtner <jan.gaertner@outlook.de> Copyright (C) 2020
++    (OF-13 port: RGP-13 project, 2026)
++
++SourceFiles
++    reconstructRegionalMesh.C
+ 
  \*---------------------------------------------------------------------------*/
  
 -#include "IOobjectList.H"
 -#include "labelIOList.H"
 -#include "processorPolyPatch.H"
--#include "mapAddedPolyMesh.H"
--#include "polyMeshAdder.H"
--#include "faceCoupleInfo.H"
--#include "fvMeshAdder.H"
--#include "polyTopoChange.H"
--#include "extrapolatedCalculatedFvPatchFields.H"
--#include "IFstream.H"
 +#ifndef reconstructRegionalMesh_H
 +#define reconstructRegionalMesh_H
 +
 +#include "fvMesh.H"
 +#include "labelList.H"
 +#include "autoPtr.H"
++#include "boundBox.H"
+ #include "mapAddedPolyMesh.H"
+-#include "polyMeshAdder.H"
+ #include "faceCoupleInfo.H"
+-#include "fvMeshAdder.H"
+-#include "polyTopoChange.H"
+-#include "extrapolatedCalculatedFvPatchFields.H"
+-#include "IFstream.H"
  #include "codeRules.H"
  
  namespace Foam
-@@ -51,114 +26,17 @@ namespace Foam
+@@ -51,22 +67,22 @@ namespace Foam
  
  namespace reconstructRegionalMesh
  {
 -    //- Reconsturct mesh depending on processor list
 +    //- Reconstruct mesh depending on processor list
-+    //  (OF-13 port: aborts -- parallel halo reconstruction unported)
      autoPtr<fvMesh> reconstruct
      (
          const labelList& processorList,
@@ -893,42 +1007,62 @@ index 45f56b7..36552e1 100644
      );
 -    
 -    //- Get the bounds of the current domain 
--    boundBox procBounds
--    (
++
++    //- Get the bounds of the current domain
+     boundBox procBounds
+     (
 -        const labelList processorList,
--        const List<pointField>& allPoints
--    );
++        const labelList& processorList,
+         const List<pointField>& allPoints
+     );
 -    
 -    //- Add two mesh objects together 
--    autoPtr<mapAddedPolyMesh> add
--    (
--        fvMesh& mesh0,
--        const fvMesh& mesh1,
--        const faceCoupleInfo& coupleInfo,
--        const bool validBoundary
--    );
++
++    //- Add two mesh objects together
+     autoPtr<mapAddedPolyMesh> add
+     (
+         fvMesh& mesh0,
+@@ -74,9 +90,22 @@ namespace reconstructRegionalMesh
+         const faceCoupleInfo& coupleInfo,
+         const bool validBoundary
+     );
 - 
--    //- Get the points and faces of neighbouring processor meshes
++
++    //- Find the geometrically coupled boundary-face pairs of two meshes
++    //  by merging boundary-face centres within mergeDist.  Fills the
++    //  matched face-label lists (mesh face labels, pairwise coupled).
++    void matchCoupledBoundaryFaces
++    (
++        const fvMesh& masterMesh,
++        const fvMesh& meshToAdd,
++        const scalar mergeDist,
++        labelList& masterAddr,
++        labelList& slaveAddr
++    );
++
+     //- Get the points and faces of neighbouring processor meshes
 -    void getMeshInformation(
--        List<faceList>& allFaces,
--        List<pointField>& allPoints,
--        List<labelList>& allOwner,
--        List<labelList>& allNeighbours,
--        const labelList& processorList,
--        const labelList& sendToProcessorList,
--        const fvMesh& mesh
--    );
--
++    void getMeshInformation
++    (
+         List<faceList>& allFaces,
+         List<pointField>& allPoints,
+         List<labelList>& allOwner,
+@@ -86,8 +115,9 @@ namespace reconstructRegionalMesh
+         const fvMesh& mesh
+     );
+ 
 -    //- Get the patch type, size, start index etc
 -    void getPatchInformation(
--        List<wordList>& allPatchNames,
--        List<labelList>& allPatchSize,
--        List<labelList>& allStart,
--        List<labelList>& allIndex,
--        const labelList& processorList,
--        const labelList& sendToProcessorList,
--        const fvMesh& mesh
--    );
++    //- Get the patch layout of neighbouring processor meshes
++    void getPatchInformation
++    (
+         List<wordList>& allPatchNames,
+         List<labelList>& allPatchSize,
+         List<labelList>& allStart,
+@@ -96,69 +126,9 @@ namespace reconstructRegionalMesh
+         const labelList& sendToProcessorList,
+         const fvMesh& mesh
+     );
 - 
 -    // ------------------------------------------------------------------------
 -    // Depricated functions 
@@ -980,23 +1114,26 @@ index 45f56b7..36552e1 100644
 -                word oldFileHandlerType;
 -
 -            public:
- 
+-
 -                fileHandlerControl() = default;
 -                
 -                ~fileHandlerControl();
 -                
 -                // Set the file hander to uncollated
 -                void setUncollated();
-+} // End namespace reconstructRegionalMesh
- 
+-
 -                // Reset the file handler to the old type
 -                void reset();
 -        };
 -        
 -}
-+} // End namespace Foam
- 
+-
 -}
++
++} // End namespace reconstructRegionalMesh
++
++} // End namespace Foam
++
 +#endif
 diff --git a/libWENOEXT/WENOUpwindFit/WENOUpwindFit.C b/libWENOEXT/WENOUpwindFit/WENOUpwindFit.C
 index c5d507f..832bdd5 100644
