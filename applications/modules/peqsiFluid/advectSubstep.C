@@ -216,6 +216,22 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
                     ladCoeff*(c/rhoN_())*biLapRho*pow(Delta, 5)
                 )
             );
+
+            // The artificial diffusivity is an INTERIOR discontinuity
+            // regularisation: zero it on domain boundary faces.  An
+            // inflow face carries a rho jump that is a boundary
+            // condition, not a captured discontinuity; letting the mass
+            // diffusion act through it injects boundary mass whose
+            // Eq. (24) momentum consistency (u_cell x massArt) is at its
+            // least valid point.  Measured on the 2-D jet: inlet-cell
+            // pressure collapse (4 -> 1.7 MPa by step 5) and T
+            // undershoot to the Newton floor, blow-up by step ~15; with
+            // the boundary flux removed the startup is smooth.
+            forAll(tDart.ref().boundaryFieldRef(), patchi)
+            {
+                tDart.ref().boundaryFieldRef()[patchi] == 0.0;
+            }
+
             Info<< "PEQSI LAD: rho_art max = "
                 << gMax(tDart().primitiveField()) << " m^2/s" << endl;
         }
@@ -240,6 +256,14 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
                     ladKappaCoeff*rhoN_()*pow3(c)/sqr(T)*biLapT*pow(Delta, 5)
                 )
             );
+
+            // Interior regularisation only (same rationale as Dart):
+            // the molecular kappa keeps its boundary flux
+            forAll(tKappaArt.ref().boundaryFieldRef(), patchi)
+            {
+                tKappaArt.ref().boundaryFieldRef()[patchi] == 0.0;
+            }
+
             Info<< "PEQSI LAD: kappa_art max = "
                 << gMax(tKappaArt().primitiveField()) << " W/(m K)" << endl;
         }

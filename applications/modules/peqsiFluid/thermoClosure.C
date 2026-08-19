@@ -166,6 +166,17 @@ void Foam::solvers::peqsiFluid::invertTemperature()
     // (cf. the transported-vs-EOS drift of the rhoTransport campaign).
     thermo_.correct();
 
+    // Boundary values of the transported density: its 'calculated'
+    // patches are updated by NO equation (the base postSolve sync that
+    // used to refresh them was removed to protect the interior mass
+    // ledger), so without this they stay frozen at the construction-time
+    // state.  Refresh the BOUNDARY only from the EOS state so boundary
+    // fluxes (inflow mass through div(phiv, rho), the Fdp convective
+    // coefficient) see the current (p, T) surface state; the interior
+    // stays transported.  The 1-D periodic validation could never expose
+    // this; the 2-D jet's Dirichlet-state inlet does.
+    rho_.boundaryFieldRef() == thermo_.rho()().boundaryField();
+
     scalar maxDrift = 0;
     {
         const scalarField& re = thermo_.rho()().primitiveField();

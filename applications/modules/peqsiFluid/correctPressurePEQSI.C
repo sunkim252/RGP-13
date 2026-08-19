@@ -144,26 +144,42 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
         pimple.dict().lookupOrDefault<Switch>("peqsiTrapezoidRHS", false)
     );
 
+    // Temporal order of the Helmholtz equation (WKK App. E, Eq. E.3):
+    // theta = 0.5 -> second order, theta = 1.0 -> first order.  The
+    // references use FIRST order everywhere except the smoothed 1-D
+    // case C: 1-D cases A/B "diverged with the second order" (PEQSI
+    // Sec. III A 2), and for 2-D/3-D "a converged solution in the
+    // pressure correction step cannot be obtained" at second order
+    // (PEQSI Sec. IV).  Default therefore 1.0; set 0.5 only for the
+    // case-C temporal-accuracy study.  The mass-conservation telescoping
+    // is theta-independent: int(coef dp) = dt int(sComp) either way.
+    const scalar theta
+    (
+        pimple.dict().lookupOrDefault<scalar>("peqsiHelmholtzTheta", 1.0)
+    );
+
     tmp<volScalarField> tRhs;
     if (consistencyRHS)
     {
+        // Literal theta-weighted trapezoid (E.3 with the PEQSI Eq. 18/19
+        // consistency substitution applied at each end point)
         tRhs =
-            (2.0/dt)
+            (2.0/(theta*dt))
            *(
-                rhoN_()*fvc::div(UN_())
-              + rhoStar*fvc::div(UStar)
+                (1.0 - theta)*rhoN_()*fvc::div(UN_())
+              + theta*rhoStar*fvc::div(UStar)
             );
     }
     else
     {
-        tRhs = (4.0/dt)*sComp_();
+        tRhs = (2.0/(theta*dt))*sComp_();
     }
 
     fvScalarMatrix dpEqn
     (
         fvm::laplacian(dp)
       + fvm::div(Fdp, dp)
-      + fvm::Sp(4.0*coef/sqr(dt), dp)
+      + fvm::Sp((2.0/theta)*coef/sqr(dt), dp)
      ==
       - fvc::laplacian(pStar + pN_())
       + tRhs()
@@ -173,7 +189,8 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
 
     Info<< "PEQSI: dp min/max = "
         << gMin(dp.primitiveField()) << " / "
-        << gMax(dp.primitiveField()) << " Pa" << endl;
+        << gMax(dp.primitiveField()) << " Pa (theta = " << theta << ")"
+        << endl;
 
     // ------------------------------------------------------------------
     // Coupled updates with dp (WKK Eqs. 22-24; PEQSI Eqs. 11-13)
