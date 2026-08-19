@@ -29,6 +29,7 @@ License
 #include "fvcGrad.H"
 #include "fvcFlux.H"
 #include "fvcLaplacian.H"
+#include "fvcSurfaceIntegrate.H"
 
 // * * * * * * * * * * * * * * * Local Functions * * * * * * * * * * * * * * //
 
@@ -177,6 +178,24 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
 
     if (ladCoeff > 0 || ladKappaCoeff > 0)
     {
+        // TK's length scale is DIRECTIONAL (Eqs. 22-24, 33: the
+        // diffusivity is a SCALAR whose magnitude sums the per-
+        // direction terms |d4 q/dx_l^4| Delta_l^5).  Two isotropic
+        // shortcuts both fail on anisotropic grids (measured):
+        //   - |lap(lap q))| * V^(5/3): overestimates by
+        //     (V^(1/3)/dy_min)^5 = 243x on the paper's 17.5 x 8.2 um
+        //     jet grid -> LAD diffusion number 6.4, blow-up in 4 steps;
+        //   - the isotropic biharmonic times the FACE spacing^5:
+        //     charges the y-front's 4th derivative to the coarse
+        //     x-faces (38x overshoot on the smoke grid).
+        // Faithful translation on a Cartesian grid: directional second
+        // derivatives via direction-weighted Laplacians,
+        //   d2_l(q) = lap(w_l, q),  w_l = (n_f . e_l)^2,
+        // applied twice for |d4_l q|, each weighted by the per-cell
+        // spacing Delta_l^5 (face-normal spacing averaged per cell).
+
+        // Gaussian filter correction (benign percent-level term):
+        // isotropic V^(1/3) length retained
         const volScalarField Delta
         (
             IOobject("PEQSI:Delta", runTime.name(), mesh),
@@ -189,6 +208,68 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
             pow(scalarField(mesh.V()), 1.0/3.0);
         DeltaRef.correctBoundaryConditions();
 
+        const surfaceScalarField deltaF(mag(mesh.delta()));
+
+        // Per-direction face weights and per-cell spacings
+        PtrList<surfaceScalarField> wDir(3);
+        PtrList<volScalarField> DeltaDir(3);
+        for (direction cmpt = 0; cmpt < 3; cmpt++)
+        {
+            vector e(Zero);
+            e[cmpt] = 1;
+
+            wDir.set
+            (
+                cmpt,
+                new surfaceScalarField
+                (
+                    sqr((mesh.Sf()/mesh.magSf()) & e)
+                )
+            );
+
+            const surfaceScalarField wA(wDir[cmpt]*mesh.magSf());
+
+            DeltaDir.set
+            (
+                cmpt,
+                new volScalarField
+                (
+                    completeField
+                    (
+                        "PEQSI:DeltaDir",
+                        mesh,
+                        fvc::surfaceSum(wA*deltaF)()
+                       /max
+                        (
+                            fvc::surfaceSum(wA)(),
+                            dimensionedScalar(dimArea, vSmall)
+                        )
+                    )
+                )
+            );
+        }
+
+        // Directional |d4 q/dx_l^4| Delta_l^5 sum for a filtered field
+        auto d4Sum = [&](const volScalarField& qBar) -> tmp<volScalarField>
+        {
+            tmp<volScalarField> tSum;
+            for (direction cmpt = 0; cmpt < 3; cmpt++)
+            {
+                const volScalarField d2
+                (
+                    fvc::laplacian(wDir[cmpt], qBar)
+                );
+                tmp<volScalarField> term
+                (
+                    mag(fvc::laplacian(wDir[cmpt], d2))
+                   *pow(DeltaDir[cmpt], 5)
+                );
+                if (tSum.valid()) tSum.ref() += term();
+                else tSum = term;
+            }
+            return tSum;
+        };
+
         // sound speed c = sqrt(gamma/psi)
         const volScalarField c
         (
@@ -198,14 +279,10 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
 
         if (ladCoeff > 0)
         {
-            // filtered density and its biharmonic magnitude
+            // filtered density (TK truncated Gaussian, 2nd-order form)
             const volScalarField rhoBar
             (
                 rhoN_() + sqr(Delta)/24.0*fvc::laplacian(rhoN_())
-            );
-            const volScalarField biLapRho
-            (
-                mag(fvc::laplacian(fvc::laplacian(rhoBar)()))
             );
 
             tDart = tmp<volScalarField>
@@ -213,7 +290,7 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
                 new volScalarField
                 (
                     "PEQSI:Dart",
-                    ladCoeff*(c/rhoN_())*biLapRho*pow(Delta, 5)
+                    ladCoeff*(c/rhoN_())*d4Sum(rhoBar)
                 )
             );
 
@@ -243,17 +320,13 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
             (
                 T + sqr(Delta)/24.0*fvc::laplacian(T)
             );
-            const volScalarField biLapT
-            (
-                mag(fvc::laplacian(fvc::laplacian(TBar)()))
-            );
 
             tKappaArt = tmp<volScalarField>
             (
                 new volScalarField
                 (
                     "PEQSI:kappaArt",
-                    ladKappaCoeff*rhoN_()*pow3(c)/sqr(T)*biLapT*pow(Delta, 5)
+                    ladKappaCoeff*rhoN_()*pow3(c)/sqr(T)*d4Sum(TBar)
                 )
             );
 
