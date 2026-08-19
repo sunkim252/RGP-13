@@ -1,0 +1,17 @@
+FoamFile { format ascii; class dictionary; object controlDict; }
+application     foamRun;
+solver          peqsiFluid;
+libs            ("$HOME/openfoam/rgpout_peqsi/libRGP13realFluid.so" "$HOME/openfoam/rgpout_peqsi/libpeqsiFluid.so" "$HOME/openfoam/rgpout_peqsi/libWENOEXT.so");
+startFrom       startTime;
+startTime       0;
+stopAt          endTime;
+endTime         1e-3;
+deltaT          1e-7;
+writeControl    runTime;
+writeInterval   5e-5;
+purgeWrite      0;
+writeFormat     ascii;
+writePrecision  10;
+timeFormat      general;
+timePrecision   9;
+adjustTimeStep  no;

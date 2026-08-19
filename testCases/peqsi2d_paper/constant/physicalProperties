@@ -1,0 +1,23 @@
+FoamFile
+{
+    format ascii;
+    class dictionary;
+    object physicalProperties;
+}
+
+thermoType
+{
+    type            heRhoThermo;
+    mixture         SRKchungTakaMixture;
+    transport       chung;
+    thermo          janaf;
+    energy          absoluteEnthalpy;
+    equationOfState SRKGas;
+    specie          rfSpecie;
+}
+
+species ( N2 );
+
+defaultSpecie N2;
+
+#include "thermo.n2"
