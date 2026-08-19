@@ -37,6 +37,15 @@ License
 
 // * * * * * * * * * * * * * * Member Functions  * * * * * * * * * * * * * * //
 
+void Foam::solvers::fgmFluid::motionCorrector()
+{
+    // Static-mesh no-op (2026-08-19): see fgmFluid.H. The base implementation
+    // dereferences divrhoU() on restart (allocated only under conditions the
+    // static-mayer restart does not satisfy); fgmFluid does not support mesh
+    // motion, so there is nothing to correct.
+}
+
+
 void Foam::solvers::fgmFluid::momentumPredictor()
 {
     volVectorField& U(U_);

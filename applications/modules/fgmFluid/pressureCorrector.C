@@ -889,12 +889,150 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
     (
         pimple.dict().lookupOrDefault<scalar>("rcDdtScale", scalar(1))
     );
+    // --- ddtGateOpen: un-gate the MWI transient term ------------------------
+    // Bartholomew et al., JCP 375 (2018), Eq. (51), third term:
+    //
+    //     + c^O_f dHat_f ( vartheta^O_f - <u^O>_f . n )
+    //
+    // exists to cancel the time-step dependence of the pressure term: with
+    // dHat_f = d_f/(1 + c_f d_f) and c_f = rho_f/dt, dHat_f -> dt/rho_f -> 0
+    // as dt -> 0, so WITHOUT this term the pressure-velocity coupling fades in
+    // proportion to dt (paper Sec. 3.4: "pressure-velocity decoupling reported
+    // for small time-steps"). That is the positive feedback observed here:
+    // spurious |U| -> dt down -> coupling weaker -> more spurious |U|.
+    //
+    // OpenFOAM HAS this term (fvc::ddtCorr) but multiplies it by
+    //     ddtCouplingCoeff = 1 - min(|phiCorr|/(|phi| + SMALL), 1)
+    // (ddtScheme.C), which vanishes exactly where |phiCorr| ~ |phi| -- i.e. at
+    // a decoupled interface, precisely where the term is needed. The gate is a
+    // safety limiter (it stops the correction exceeding the flux it corrects),
+    // so it is NOT removed outright: ddtGateOpen in [0,1] blends between the
+    // stock gated form (0, default = unchanged behaviour) and the raw
+    // ungated Eq. (51) term (1).
+    const scalar ddtGateOpen
+    (
+        pimple.dict().lookupOrDefault<scalar>("ddtGateOpen", scalar(0))
+    );
+
     surfaceScalarField phiHbyAv
     (
         "phiHbyAv",
         fvc::flux(HbyA)
-      + rcDdtScale*rhorAUf*fvc::ddtCorr(rho, U, phi, rhoUf)/rhof  // rho-consistent RC
+      + (1 - ddtGateOpen)
+       *rcDdtScale*rhorAUf*fvc::ddtCorr(rho, U, phi, rhoUf)/rhof  // stock, gated
     );
+
+    if (ddtGateOpen > 0)
+    {
+        // rho^O_f/dt, LTS-aware
+        tmp<volScalarField> trDeltaT;
+        if (fv::localEulerDdt::enabled(mesh))
+        {
+            trDeltaT = volScalarField::New
+            (
+                "rDeltaTgate", fv::localEulerDdt::localRDeltaT(mesh)
+            );
+        }
+        else
+        {
+            trDeltaT = volScalarField::New
+            (
+                "rDeltaTgate",
+                mesh,
+                dimensionedScalar(dimless/dimTime, 1/mesh.time().deltaTValue())
+            );
+        }
+
+        const surfaceScalarField rhofOld
+        (
+            "rhofOld", fvc::interpolate(rho.oldTime())
+        );
+        // vartheta^O_f - <u^O>_f . n  : the SAME quantity OpenFOAM calls
+        // phiCorr, but used here without the coupling-coefficient limiter.
+        const surfaceScalarField phiCorrRaw
+        (
+            "phiCorrRaw",
+            phi.oldTime()/rhofOld - fvc::flux(U.oldTime())
+        );
+
+        phiHbyAv +=
+            ddtGateOpen*rcDdtScale
+           *rAUf*rhofOld*fvc::interpolate(trDeltaT())*phiCorrRaw;
+
+        // Measure the gate OpenFOAM would have applied, to test the claim that
+        // it collapses at the interface.
+        const surfaceScalarField gate
+        (
+            "ddtGate",
+            1
+          - min
+            (
+                mag(phiCorrRaw*rhofOld)
+               /(mag(phi) + dimensionedScalar(phi.dimensions(), small)),
+                dimensionedScalar(dimless, 1)
+            )
+        );
+        Info<< "ddtGate: min = " << gMin(gate.primitiveField())
+            << "  mean = " << gAverage(gate.primitiveField())
+            << "  cells with gate < 0.1: "
+            << gSum(pos0(0.1 - gate)().primitiveField())
+            << endl;
+    }
+
+    // --- mwiBD: density weighting of the MWI pressure term ------------------
+    // Bartholomew, Denner, Abdol-Azis, Marquis & van Wachem, JCP 375 (2018)
+    // 177-208, Sec. 5.1. The MWI pressure term is
+    //
+    //     dHat_f [ grad(p)|_f - rho_f ( l_f/rho_P grad(p)|_P
+    //                                 + (1-l_f)/rho_F grad(p)|_F ) ]   Eq. (92)
+    //     1/rho_f = l_f/rho_P + (1-l_f)/rho_F                          Eq. (93)
+    //
+    // i.e. the CELL gradients that are subtracted are weighted by 1/rho and
+    // rescaled by a HARMONICALLY averaged face density. OpenFOAM's stock RC
+    // subtracts the plain interpolated gradient (rho_f = 1 in the above), which
+    // Sec. 5 shows underpredicts grad(p) in the heavy phase and overpredicts it
+    // in the light phase: "the large and unphysical force applied to the lighter
+    // phase may lead to divergence of the solution algorithm". That is the
+    // failure this solver exhibits at the transcritical interface.
+    //
+    // The subtracted gradient is implicit in OpenFOAM: HbyA carries <dHat
+    // grad(p)>_f through the momentum solution, and the pEqn laplacian supplies
+    // -dHat_f grad(p)|_f. So the ONLY change needed is the explicit difference
+    // between the plain and the density-weighted interpolation,
+    //
+    //     + dHat_f [ <grad(p)>_f - rho_f <grad(p)/rho>_f ] . Sf_hat ,
+    //
+    // which is identically zero for uniform density. Default off.
+    const Switch mwiBD
+    (
+        pimple.dict().lookupOrDefault<Switch>("mwiBD", false)
+    );
+    if (mwiBD)
+    {
+        // Eq. (93): harmonic face density with the SAME weights as the
+        // gradient interpolation, so the two are mutually consistent.
+        const surfaceScalarField rhofH
+        (
+            "rhofH", 1.0/fvc::interpolate(1.0/rho)
+        );
+        const volVectorField gradP("gradP", fvc::grad(p));
+
+        const surfaceScalarField dwCorr
+        (
+            "mwiDwCorr",
+            rAUf
+           *(
+                (fvc::interpolate(gradP) & mesh.Sf())
+              - rhofH*(fvc::interpolate(gradP/rho) & mesh.Sf())
+            )
+        );
+        phiHbyAv += dwCorr;
+
+        Info<< "mwiBD: density-weighted MWI correction, max |dPhi|/|phi| = "
+            << gMax(mag(dwCorr.primitiveField()))
+              /max(gMax(mag(phiHbyAv.primitiveField())), vSmall)
+            << endl;
+    }
     MRF.makeRelative(phiHbyAv);
 
     // --- massConservativeP: restore the STOCK mass-conserving pressure eqn ---
@@ -1436,8 +1574,14 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
 
     // Snapshot p before the solve so massConservativeP can apply the stock
     // SIMPLErho density increment below (see the block after the clamp).
+    // pepCorrectRho (2026-08-19): PEQSI Eq. (11) port for the PEP path --
+    // see the increment block after the positivity clamp.
+    const Switch pepCorrectRho
+    (
+        pimple.dict().lookupOrDefault<Switch>("pepCorrectRho", false)
+    );
     autoPtr<volScalarField> pPre;
-    if (massConservativeP)
+    if (massConservativeP || pepCorrectRho)
     {
         pPre.set(new volScalarField("pPre", p));
     }
@@ -1584,6 +1728,31 @@ void Foam::solvers::fgmFluid::correctPressurePEP()
                 << gMin(rho.primitiveField()) << " / "
                 << gMax(rho.primitiveField()) << " kg/m^3" << endl;
         }
+    }
+
+    // pepCorrectRho (2026-08-19): PEQSI Eq. (11) ported to the PEP path --
+    // give the density the SAME compressibility increment the PEP diagonal
+    // just moved volume flux for: drho = rho*psis*dp (Wada, Kai, Pillai,
+    // Yamada & Kurose, Phys. Fluids 36 (2024) 116104, Eq. (11)). psis is the
+    // identical (frozen/capped, isentropic if selected) field the pDDtEqn
+    // used, so the realized density change matches the acoustic bookkeeping
+    // discretely. Motivated by the rd0110 mass audit (2026-08-19): spurious
+    // mass rate tracks -1.02 kg/s per (bar/500it) of d<p>/dt -- the EOS
+    // re-sync under-delivers exactly this increment. Floored like
+    // mcpCorrectRho (flame-zone psi*dp can be huge). The next outer's
+    // manifold+EOS re-sync partly overwrites it; the Mayer A/B measures the
+    // surviving effect on the mass ledger.
+    if (!massConservativeP && pepCorrectRho && pPre.valid())
+    {
+        rho = max
+        (
+            rho + rho*psis*(p - pPre()),
+            dimensionedScalar(dimDensity, 1e-3)
+        );
+        rho.correctBoundaryConditions();
+        Info<< "pepCorrectRho: rho min/max = "
+            << gMin(rho.primitiveField()) << " / "
+            << gMax(rho.primitiveField()) << " kg/m^3" << endl;
     }
 
     // Thermodynamic density update: the stock SIMPLErho increment
@@ -2090,6 +2259,42 @@ void Foam::solvers::fgmFluid::pressureCorrector()
             mesh.lookupObjectRef<volScalarField>("psisFrozen") = psisNow;
         }
         psisFrozenTimeIndex_ = mesh.time().timeIndex();
+
+        // psisFreezeAdvect (RFQC-lite, 2026-08-14): advect the frozen
+        // coefficient once per step with the previous step's converged flux
+        // before freezing it for the correctors. Bai et al. (arXiv:2602.00658
+        // / JCP 564 (2026)) show the frozen-coefficient family only stays
+        // oscillation-free at MOVING interfaces when the coefficients are
+        // ADVECTED (advective form, Abgrall's telescoping requirement) and
+        // re-linearised from the EOS each step -- which is exactly this
+        // freeze/reset cadence plus a single upwind advection increment.
+        // Bounded by the pre-advection field range (the frozen coefficient
+        // must remain a convex combination of EOS states).
+        if
+        (
+            psisFreezeStep
+         && pimple.dict().lookupOrDefault<Switch>("psisFreezeAdvect", false)
+        )
+        {
+            volScalarField& pf =
+                mesh.lookupObjectRef<volScalarField>("psisFrozen");
+            const surfaceScalarField phiv
+            (
+                "phivPsisAdv", phi_/fvc::interpolate(rho_)
+            );
+            const surfaceScalarField pfUp
+            (
+                upwind<scalar>(mesh, phiv).interpolate(pf)
+            );
+            const scalar lo = gMin(pf.primitiveField());
+            const scalar hi = gMax(pf.primitiveField());
+            pf -=
+                mesh.time().deltaT()
+               *(fvc::div(phiv*pfUp) - pf*fvc::div(phiv));
+            pf.primitiveFieldRef() =
+                max(min(pf.primitiveField(), hi), lo);
+            pf.correctBoundaryConditions();
+        }
     }
 
     while (pimple.correct())

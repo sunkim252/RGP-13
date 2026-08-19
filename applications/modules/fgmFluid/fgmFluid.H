@@ -418,6 +418,12 @@ public:
         //  velocity overshoot at the transcritical density interface
         virtual void momentumPredictor();
 
+        //- Static-mesh no-op override (2026-08-19): the base
+        //  motionCorrector dereferences divrhoU() on restart of a static
+        //  case where preSolve never allocated it (mayer pathC A/B).
+        //  fgmFluid does not support mesh motion; nothing to correct.
+        virtual void motionCorrector();
+
         //- Construct and solve the pressure equation in the PISO loop using a
         //  pressure-equilibrium-preserving (pressure-evolution) formulation
         //  that removes the spurious pressure spike at the transcritical
