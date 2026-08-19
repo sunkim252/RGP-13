@@ -106,14 +106,36 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
     // L_h: enthalpy-equation RHS without Dp/Dt (WKK Eq. 3) -- here the
     // conductive part div(kappa grad T); viscous heating is neglected as
     // in the reference low-Mach cryogenic-jet applications.
-    const volScalarField kappa
+    volScalarField kappa
     (
         completeField("PEQSI:kappa", mesh, thermo_.kappa())
     );
-    const volScalarField mu
+    volScalarField mu
     (
         completeField("PEQSI:mu", mesh, thermo_.mu())
     );
+
+    // Subgrid contribution (V3, paper 3-D LES: SGS model with SGS
+    // Prandtl number 0.7 for the subgrid heat flux).  The base class's
+    // momentumTransport is corrected at the n-state; with
+    // simulationType laminar nut == 0 and this is a no-op.
+    {
+        momentumTransport->correct();
+
+        const scalar prSgs
+        (
+            pimple.dict().lookupOrDefault<scalar>("peqsiPrSGS", 0.7)
+        );
+
+        const volScalarField muSgs
+        (
+            "PEQSI:muSgs",
+            rhoN_()*momentumTransport->nut()
+        );
+
+        mu += muSgs;
+        kappa += muSgs*thermo_.Cp()/prSgs;
+    }
 
     // (L_h is assembled after the LAD block: TK Eq. 33 augments the
     // conductivity with kappa_art)

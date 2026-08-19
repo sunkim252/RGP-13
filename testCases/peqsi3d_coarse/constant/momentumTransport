@@ -1,0 +1,9 @@
+FoamFile { format ascii; class dictionary; object momentumTransport; }
+simulationType LES;
+LES
+{
+    model           WALE;
+    turbulence      on;
+    delta           cubeRootVol;
+    cubeRootVolCoeffs { deltaCoeff 1; }
+}

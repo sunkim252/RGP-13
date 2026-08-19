@@ -1,0 +1,5 @@
+FoamFile { format ascii; class dictionary; object decomposeParDict; }
+numberOfSubdomains 128;
+decomposer hierarchical;
+distributor none;
+hierarchicalCoeffs { n (8 4 4); order xyz; }
