@@ -35,6 +35,7 @@ License
 #include "fvcSnGrad.H"
 #include "fvcReconstruct.H"
 #include "zeroGradientFvPatchFields.H"
+#include "fixedValueFvPatchFields.H"
 
 // * * * * * * * * * * * * * * * Member Functions  * * * * * * * * * * * * * //
 
@@ -77,15 +78,29 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
         rhoN_()*(1.0 - alpha_)/beta_
     );
 
-    // dp with zero-gradient boundaries (constraint patches override);
-    // outflow/non-reflecting treatment is introduced with the 2-D jet
-    // stage -- the 1-D validation cases are periodic.
+    // dp boundary types derived from the p field: a fixed-pressure
+    // boundary (the 2-D jet outlet: p fixed to chamber pressure, PEQSI
+    // Sec. III B) must hold dp = 0 there; everything else (walls, inlets,
+    // constraint patches) is zero-gradient.
+    wordList dpBcTypes
+    (
+        p_.boundaryField().size(),
+        zeroGradientFvPatchScalarField::typeName
+    );
+    forAll(p_.boundaryField(), patchi)
+    {
+        if (isA<fixedValueFvPatchScalarField>(p_.boundaryField()[patchi]))
+        {
+            dpBcTypes[patchi] = fixedValueFvPatchScalarField::typeName;
+        }
+    }
+
     volScalarField dp
     (
         IOobject("PEQSI:dp", runTime.name(), mesh),
         mesh,
         dimensionedScalar(dimPressure, 0),
-        zeroGradientFvPatchScalarField::typeName
+        dpBcTypes
     );
 
     // Implicit convective-coefficient face flux:

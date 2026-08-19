@@ -999,7 +999,7 @@ index 45f56b7..36552e1 100644
 -}
 +#endif
 diff --git a/libWENOEXT/WENOUpwindFit/WENOUpwindFit.C b/libWENOEXT/WENOUpwindFit/WENOUpwindFit.C
-index c5d507f..4007a71 100644
+index c5d507f..832bdd5 100644
 --- a/libWENOEXT/WENOUpwindFit/WENOUpwindFit.C
 +++ b/libWENOEXT/WENOUpwindFit/WENOUpwindFit.C
 @@ -39,9 +39,9 @@ template<class Type>
@@ -1014,7 +1014,12 @@ index c5d507f..4007a71 100644
  )    const
  {
      // Limit the explicit correction if the polynome at the face would exceed
-@@ -62,12 +62,12 @@ void Foam::WENOUpwindFit<Type>::calcLimiter
+@@ -57,17 +57,15 @@ void Foam::WENOUpwindFit<Type>::calcLimiter
+     const labelUList& N = mesh.neighbour();
+ 
+     const label nComp = pTraits<Type>::nComponents;
+-
+-
      // --------------- Calculate theta ----------------------------------------
      // ------------------------------------------------------------------------
      
@@ -1029,7 +1034,7 @@ index c5d507f..4007a71 100644
              mesh,
              IOobject::NO_READ,
              IOobject::NO_WRITE,
-@@ -108,7 +108,7 @@ void Foam::WENOUpwindFit<Type>::calcLimiter
+@@ -108,7 +106,7 @@ void Foam::WENOUpwindFit<Type>::calcLimiter
      }
  
      // Calculate theta for boundary:
@@ -1038,7 +1043,7 @@ index c5d507f..4007a71 100644
      #ifdef FOAM_NEW_GEOMFIELD_RULES
          Boundary& btheta = theta.boundaryFieldRef();
      #else 
-@@ -210,10 +210,10 @@ void Foam::WENOUpwindFit<Type>::calcLimiter
+@@ -210,14 +208,13 @@ void Foam::WENOUpwindFit<Type>::calcLimiter
  
  
  template<class Type>
@@ -1051,7 +1056,11 @@ index c5d507f..4007a71 100644
  ) const
  {
      const fvMesh& mesh = this->mesh();
-@@ -227,14 +227,14 @@ Foam::WENOUpwindFit<Type>::correction
+-
+     // Get degrees of freedom from WENOCoeff class
+     tmp<Field<Field<Type> > > coeffsWeightedTmp = WENOCoeff_.getWENOPol(vf);
+     const Field<Field<Type> >& coeffsWeighted = coeffsWeightedTmp();
+@@ -227,14 +224,14 @@ Foam::WENOUpwindFit<Type>::correction
      const labelUList& P = mesh.owner();
      const labelUList& N = mesh.neighbour();
  
@@ -1069,7 +1078,7 @@ index c5d507f..4007a71 100644
                  mesh,
                  IOobject::NO_READ,
                  IOobject::NO_WRITE,
-@@ -244,7 +244,7 @@ Foam::WENOUpwindFit<Type>::correction
+@@ -244,7 +241,7 @@ Foam::WENOUpwindFit<Type>::correction
              dimensioned<Type>(vf.name(), vf.dimensions(), pTraits<Type>::zero)
          )
      );
@@ -1078,7 +1087,7 @@ index c5d507f..4007a71 100644
      #ifdef FOAM_NEW_TMP_RULES
          tsfCorrP.ref();
      #else 
-@@ -327,7 +327,7 @@ template<class Type>
+@@ -327,7 +324,7 @@ template<class Type>
  void Foam::WENOUpwindFit<Type>::swapData
  (
      const fvMesh& mesh,
@@ -1087,7 +1096,7 @@ index c5d507f..4007a71 100644
      #ifdef FOAM_NEW_GEOMFIELD_RULES
          Boundary& btsf
      #else 
-@@ -389,28 +389,28 @@ template<class Type>
+@@ -389,28 +386,28 @@ template<class Type>
  void Foam::WENOUpwindFit<Type>::coupledRiemannSolver
  (
      const fvMesh& mesh,
@@ -1122,7 +1131,7 @@ index c5d507f..4007a71 100644
                  mesh,
                  IOobject::NO_READ,
                  IOobject::NO_WRITE,
-@@ -421,14 +421,14 @@ void Foam::WENOUpwindFit<Type>::coupledRiemannSolver
+@@ -421,14 +418,14 @@ void Foam::WENOUpwindFit<Type>::coupledRiemannSolver
                  (vf.name(), vf.dimensions(), pTraits<Type>::zero)
          )
      );
@@ -1139,7 +1148,7 @@ index c5d507f..4007a71 100644
      #ifdef FOAM_NEW_GEOMFIELD_RULES
          Boundary& btsfUD = tsfUD.boundaryFieldRef();
      #else 
-@@ -503,7 +503,7 @@ void Foam::WENOUpwindFit<Type>::coupledRiemannSolver
+@@ -503,7 +500,7 @@ void Foam::WENOUpwindFit<Type>::coupledRiemannSolver
              {
                  #ifdef FOAM_NEW_COUPLED_PATCHES
                  const label neighbPatchID = refCast<const cyclicFvPatch>
@@ -1148,12 +1157,12 @@ index c5d507f..4007a71 100644
                  #else 
                  const label neighbPatchID = refCast<const cyclicFvPatch>
                          (patches[patchI]).neighbPatchID();
-@@ -516,7 +516,7 @@ void Foam::WENOUpwindFit<Type>::coupledRiemannSolver
+@@ -516,7 +513,7 @@ void Foam::WENOUpwindFit<Type>::coupledRiemannSolver
                  }
              }
          }
 -        else if (isA<cyclicAMIFvPatch>(patches[patchI]))
-+        else if (false)  // OF-13 port: cyclicAMI is ESI-only; org-13 uses nonConformalCyclic (unhandled here, as upstream)
++        else if (false)  // OF-13 port: cyclicAMI is ESI-only
          {
              /*************************** NOTE *******************************
              * Currently not used as it is not quite clear how 

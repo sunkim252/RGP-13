@@ -135,6 +135,48 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
     const volScalarField aL("PEQSI:aL", alpha_/(1.0 - alpha_));
     const volScalarField iL("PEQSI:iL", 1.0/(1.0 - alpha_));
 
+    // Localized artificial diffusivity, PAPER-FAITHFUL for the 2-D jet:
+    // PEQSI Sec. III B 2 uses the Terashima-Koshi LAD with a user
+    // coefficient of 0.002 ("to prevent the unphysical solutions because
+    // of the nonlinearity of the EoS").  Density-gradient-sensed form as
+    // in this project's fgmFluid implementation (Cook & Cabot 2004;
+    // Kawai et al. 2015):
+    //     D_art = C V^(2/3) |U| |grad rho| / rho     [m2/s]
+    // applied to rho and rho h, and as mu_art = rho D_art to rho u.
+    // Default 0 (the 1-D validation runs without it, as in the paper).
+    const scalar ladCoeff
+    (
+        pimple.dict().lookupOrDefault<scalar>("peqsiLADCoeff", scalar(0))
+    );
+    // NOTE: the field must be heap-allocated INTO the tmp -- assigning a
+    // stack-local field to a tmp creates a non-owning reference that
+    // dangles when the local goes out of scope (measured: freed-memory
+    // name() read -> std::length_error in fvc::laplacian's name concat).
+    tmp<volScalarField> tDart;
+    if (ladCoeff > 0)
+    {
+        tDart = tmp<volScalarField>
+        (
+            new volScalarField
+            (
+                IOobject("PEQSI:Dart", runTime.name(), mesh),
+                mesh,
+                dimensionedScalar(sqr(dimLength)/dimTime, 0),
+                zeroGradientFvPatchScalarField::typeName
+            )
+        );
+        volScalarField& Dart = tDart.ref();
+        const scalarField V23(pow(scalarField(mesh.V()), 2.0/3.0));
+        Dart.primitiveFieldRef() =
+            ladCoeff*V23
+           *mag(UN_())().primitiveField()
+           *mag(fvc::grad(rhoN_()))().primitiveField()
+           /rhoN_().primitiveField();
+        Dart.correctBoundaryConditions();
+        Info<< "PEQSI LAD: Dart max = "
+            << gMax(Dart.primitiveField()) << " m^2/s" << endl;
+    }
+
     // RK working fields (rho h transported as a product)
     volScalarField r("PEQSI:rkRho", rhoN_());
     volVectorField ru("PEQSI:rkRhoU", rhoN_()*UN_());
@@ -144,8 +186,8 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
     // One SSP-RK3 stage: q <- cOld*qn + cNew*(q + dt*L(q))
     auto stage = [&](const scalar cOld, const scalar cNew)
     {
-        const volScalarField Lr(-uGrad(phiv, divPhiv, r, "div(phiv,rho)"));
-        const volVectorField Lru
+        volScalarField Lr(-uGrad(phiv, divPhiv, r, "div(phiv,rho)"));
+        volVectorField Lru
         (
             -uGrad(phiv, divPhiv, ru, "div(phiv,rhoU)") + divTau
         );
@@ -153,10 +195,17 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
         (
             -uGrad(phiv, divPhiv, pw, "div(phiv,p)") + aL*Lh
         );
-        const volScalarField Lrh
+        volScalarField Lrh
         (
             -uGrad(phiv, divPhiv, rh, "div(phiv,rhoh)") + iL*Lh
         );
+
+        if (tDart.valid())
+        {
+            Lr += fvc::laplacian(tDart(), r);
+            Lru += fvc::laplacian(rhoN_()*tDart(), UN_())();
+            Lrh += fvc::laplacian(tDart(), rh);
+        }
 
         r == cOld*rhoN_() + cNew*(r + dt*Lr);
         ru == cOld*(rhoN_()*UN_()) + cNew*(ru + dt*Lru);
