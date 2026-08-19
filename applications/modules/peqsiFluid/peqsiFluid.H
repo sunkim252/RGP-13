@@ -150,6 +150,12 @@ protected:
         //- Guard so the acoustic substep runs once per time step
         label acousticTimeIndex_;
 
+        //- Per-phase cumulative CPU-time accounting (peqsiTimers switch):
+        //  setup, sgs, lad, rk3, helmAsm, helmSolve, updates, newton,
+        //  coeffs
+        mutable scalar tPhase_[9] = {0,0,0,0,0,0,0,0,0};
+        mutable label tPhaseSteps_ = 0;
+
         //- Initial domain mass, set on the first acoustic substep;
         //  reference for the cumulative conservation audit (the paper's
         //  metric: relative drift of int(rho) dV)

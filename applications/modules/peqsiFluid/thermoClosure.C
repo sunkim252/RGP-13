@@ -50,11 +50,9 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
 
     const auto tCp = thermo_.Cp();
     const auto tCv = thermo_.Cv();
-    const auto tGamma = thermo_.gamma();
 
     const scalarField& cp = tCp().primitiveField();
     const scalarField& cv = tCv().primitiveField();
-    const scalarField& gam = tGamma().primitiveField();
     const scalarField& psi = thermo_.psi().primitiveField();
     const scalarField& T = thermo_.T().primitiveField();
     const scalarField& rho = rho_.primitiveField();
@@ -76,8 +74,10 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
         b[i] = (dpdv - dpdT*dhdv/xi)/rho[i];
 
         // App. D identity: beta/(1-alpha) == -rho c^2, c^2 = gamma/psi
+        // (gamma = cp/cv from the already-evaluated fields -- the
+        // thermo.gamma() call re-evaluates BOTH Cp and Cv sweeps)
         const scalar lhs = b[i]/(1.0 - a[i]);
-        const scalar rhs = -rho[i]*gam[i]/psi[i];
+        const scalar rhs = -rho[i]*(cp[i]/cv[i])/psi[i];
         maxDev = max(maxDev, mag(lhs - rhs)/max(mag(rhs), small));
     }
 
@@ -127,13 +127,15 @@ void Foam::solvers::peqsiFluid::invertTemperature()
         label iter = 0;
         scalar maxRel = great;
 
-        // cp slope refreshed once per Newton pass (adequate: cp varies
-        // slowly over the per-step temperature increments)
+        // cp slope evaluated ONCE per step (adequate: cp varies slowly
+        // over the per-step temperature increments; profiling showed the
+        // per-iteration Cp() re-evaluation doubled the Newton cost)
+        const auto tCp = thermo_.Cp();
+        const scalarField& cpf = tCp().primitiveField();
+
         for (; iter < 60 && maxRel > tol; ++iter)
         {
             const volScalarField hk(thermo_.he(p_, Tw));
-            const auto tCp = thermo_.Cp();
-            const scalarField& cpf = tCp().primitiveField();
 
             scalarField& Tf = Tw.primitiveFieldRef();
             const scalarField& hf = h_.primitiveField();

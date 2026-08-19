@@ -55,6 +55,21 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
     }
     acousticTimeIndex_ = runTime.timeIndex();
 
+    const bool timers
+    (
+        pimple.dict().lookupOrDefault<Switch>("peqsiTimers", false)
+    );
+    scalar tMark = timers ? runTime.elapsedCpuTime() : 0;
+    auto mark = [&](scalar& acc)
+    {
+        if (timers)
+        {
+            const scalar now = runTime.elapsedCpuTime();
+            acc += now - tMark;
+            tMark = now;
+        }
+    };
+
     if (!rhoN_.valid())
     {
         FatalErrorInFunction
@@ -185,7 +200,11 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
       + tRhs()
     );
 
+    mark(tPhase_[4]);
+
     dpEqn.solve();
+
+    mark(tPhase_[5]);
 
     Info<< "PEQSI: dp min/max = "
         << gMin(dp.primitiveField()) << " / "
@@ -238,6 +257,8 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
     // End-of-step mass flux
     phi_ = fvc::flux(rho_*U_);
 
+    mark(tPhase_[6]);
+
     // ------------------------------------------------------------------
     // Conservation audit, the papers' metric: cumulative relative drift
     // of int(rho) dV and int(rho h) dV from the initial state (an
@@ -274,7 +295,28 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
     // alpha/beta coefficient fields for the next step.
     // ------------------------------------------------------------------
     invertTemperature();
+    mark(tPhase_[7]);
     updateCoefficients();
+    mark(tPhase_[8]);
+
+    if (timers && (++tPhaseSteps_ % 50 == 0))
+    {
+        static const char* nm[9] =
+        {
+            "setup", "sgs", "lad", "rk3(WENO)",
+            "helmAsm", "helmSolve", "updates", "T-Newton", "coeffs"
+        };
+        scalar tot = 0;
+        for (int i = 0; i < 9; i++) tot += tPhase_[i];
+        Info<< "PEQSI timers after " << tPhaseSteps_ << " steps (cpu s, "
+            << "this rank):" << nl;
+        for (int i = 0; i < 9; i++)
+        {
+            Info<< "    " << nm[i] << " = " << tPhase_[i]
+                << " (" << 100*tPhase_[i]/max(tot, small) << "%)" << nl;
+        }
+        Info<< "    accounted total = " << tot << endl;
+    }
 
     // Release the substep state
     rhoN_.clear();
