@@ -211,6 +211,33 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
         << gMax(dp.primitiveField()) << " Pa (theta = " << theta << ")"
         << endl;
 
+    // Blow-up forensics: when dp leaves the physical band, report the
+    // extreme cell's location and coefficient state (each rank reports
+    // its own extreme -- cheap, only fires when already abnormal)
+    {
+        const scalarField& dpi = dp.primitiveField();
+        label iMax = -1; scalar vMax = 0;
+        forAll(dpi, i)
+        {
+            if (mag(dpi[i]) > vMax) { vMax = mag(dpi[i]); iMax = i; }
+        }
+        if (iMax >= 0 && vMax > 1e6)
+        {
+            Pout<< "PEQSI dpExtreme: |dp|=" << dpi[iMax]
+                << " at " << mesh.C()[iMax]
+                << " T=" << thermo_.T()[iMax]
+                << " rho=" << rho_[iMax]
+                << " rhoEOS-drift=" << (thermo_.rho()()[iMax] - rho_[iMax])
+                << " alpha=" << alpha_[iMax]
+                << " 1-alpha=" << (1.0 - alpha_[iMax])
+                << " beta=" << beta_[iMax]
+                << " coef=" << coef[iMax]
+                << " sComp=" << sComp_()[iMax]
+                << " h=" << h_[iMax]
+                << endl;
+        }
+    }
+
     // ------------------------------------------------------------------
     // Coupled updates with dp (WKK Eqs. 22-24; PEQSI Eqs. 11-13)
     // ------------------------------------------------------------------
