@@ -199,7 +199,7 @@ index e113b7a..dde484f 100644
      // Member Functions
  
 diff --git a/libWENOEXT/WENOBase/globalfvMesh.C b/libWENOEXT/WENOBase/globalfvMesh.C
-index 1170072..2e0fcc1 100644
+index 1170072..ea29d45 100644
 --- a/libWENOEXT/WENOBase/globalfvMesh.C
 +++ b/libWENOEXT/WENOBase/globalfvMesh.C
 @@ -256,19 +256,15 @@ Foam::labelList Foam::WENO::globalfvMesh::localToGlobalCellIDList()
@@ -226,7 +226,7 @@ index 1170072..2e0fcc1 100644
              
              if (globalCellIndex >= 0)
                  localToGlobalCellID[cellI] = globalCellIndex;
-@@ -337,23 +333,19 @@ Foam::labelList Foam::WENO::globalfvMesh::globalToLocalCellIDList()
+@@ -337,36 +333,38 @@ Foam::labelList Foam::WENO::globalfvMesh::globalToLocalCellIDList()
              }
          }
          
@@ -254,6 +254,26 @@ index 1170072..2e0fcc1 100644
                      
                  if (globalCellIndex >= 0)
                  {
+                     globalToLocalCellID[globalCellIndex] = cellI;
+                     procList_[globalCellIndex] = neighborProcessor_[procI];
+                 }
+-                else
++                else if (neighborProcessor_[procI] == Pstream::myProcNo())
++                {
++                    // Own cells must ALWAYS be present in the halo mesh
+                     FatalErrorInFunction << "Processor local point not found in global mesh" <<nl
+                                << "For local cell "<<localCellCentersI[cellI]
+                                << " of processor "<<procI
+                                << " for global mesh of processor "
+                                <<Pstream::myProcNo()<<nl
+                                << exit(FatalError);
++                }
++                // else: the neighbour sent only its halo BAND (see
++                // reconstructRegionalMesh haloLayers); cells outside the
++                // band are legitimately absent from the halo mesh
+             }
+         }
+     }
 diff --git a/libWENOEXT/WENOBase/matrixDB.H b/libWENOEXT/WENOBase/matrixDB.H
 index a2de6cf..3746483 100644
 --- a/libWENOEXT/WENOBase/matrixDB.H
@@ -267,7 +287,7 @@ index a2de6cf..3746483 100644
  #include "Ostream.H"
  #include "blaze/Math.h"
 diff --git a/libWENOEXT/WENOBase/reconstructRegionalMesh.C b/libWENOEXT/WENOBase/reconstructRegionalMesh.C
-index 621f029..0a0d6b8 100644
+index 621f029..bf71cd1 100644
 --- a/libWENOEXT/WENOBase/reconstructRegionalMesh.C
 +++ b/libWENOEXT/WENOBase/reconstructRegionalMesh.C
 @@ -1,11 +1,11 @@
@@ -287,7 +307,7 @@ index 621f029..0a0d6b8 100644
  License
      This file is part of WENO Ext.
  
-@@ -24,13 +24,18 @@ License
+@@ -24,13 +24,19 @@ License
  
  Author
      Jan Wilhelm Gärtner <jan.gaertner@outlook.de> Copyright (C) 2020
@@ -303,53 +323,71 @@ index 621f029..0a0d6b8 100644
 +#include "processorPolyPatch.H"
 +#include "mergePoints.H"
 +#include "PstreamBuffers.H"
++#include "IOdictionary.H"
  
 +// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
  
  Foam::autoPtr<Foam::fvMesh> Foam::reconstructRegionalMesh::reconstruct
  (
-@@ -39,76 +44,39 @@ Foam::autoPtr<Foam::fvMesh> Foam::reconstructRegionalMesh::reconstruct
+@@ -39,76 +45,54 @@ Foam::autoPtr<Foam::fvMesh> Foam::reconstructRegionalMesh::reconstruct
      const fvMesh& localMesh
  )
  {
 -    // Get points, faces, neighbour, owner lists from processors 
-+    // Get points, faces, neighbour, owner lists from processors
++    // Halo band depth (in local cell sizes): only cells within
++    // haloLayers x cellSize of a receiver's bounding box are sent to it.
++    // 0 or negative restores the upstream full-mesh exchange.
++    label haloLayers = 8;
++    {
++        IOdictionary dict
++        (
++            IOobject
++            (
++                "WENODict",
++                localMesh.time().system(),
++                localMesh.time(),
++                IOobject::READ_IF_PRESENT,
++                IOobject::NO_WRITE
++            )
++        );
++        haloLayers = dict.lookupOrDefault<label>("haloLayers", 8);
++    }
++
++    // Get points, faces, neighbour, owner lists and patch layouts
      List<faceList>   allFaces(Pstream::nProcs());
      List<pointField> allPoints(Pstream::nProcs());
      List<labelList>  allOwners(Pstream::nProcs());
      List<labelList>  allNeighbours(Pstream::nProcs());
- 
 -
++    List<wordList>   allPatchNames(Pstream::nProcs());
++    List<labelList>  allPatchSize(Pstream::nProcs());
++    List<labelList>  allStart(Pstream::nProcs());
+ 
      getMeshInformation(allFaces,allPoints,allOwners,allNeighbours,
-         processorList,sendToProcessorList,localMesh);
- 
+-        processorList,sendToProcessorList,localMesh);
 -
-     List<wordList> allPatchNames;
-     List<labelList> allPatchSize;
-     List<labelList> allStart;
-     List<labelList> allIndex;
+-
+-    List<wordList> allPatchNames;
+-    List<labelList> allPatchSize;
+-    List<labelList> allStart;
+-    List<labelList> allIndex;
 -    
-+
-     getPatchInformation(allPatchNames,allPatchSize,allStart,allIndex,
-         processorList,sendToProcessorList,localMesh);
- 
+-    getPatchInformation(allPatchNames,allPatchSize,allStart,allIndex,
+-        processorList,sendToProcessorList,localMesh);
+-
 -    // Get the dimensions of the current processor domain and calculate the 
 -    // merging tolerance
 -    word regionName = polyMesh::defaultRegion;
 -    word regionDir = word::null;
-+    const word regionName = polyMesh::defaultRegion;
- 
+-
 -    scalar mergeTol = 1E-7;
 -    
 -    // Read point on individual processors to determine merge tolerance
 -    // (otherwise single cell domains might give problems)
-+    // Merge tolerance: absolute distance from the halo bounding box.
-+    // Halo faces are copies of one decomposed mesh, so coupled
-+    // boundary-face centres coincide bitwise; the tolerance only has to
-+    // stay below the smallest face-centre spacing.
-+    const scalar mergeTol = 1e-7;
-     const boundBox bb = procBounds(processorList,allPoints);
-     const scalar mergeDist = mergeTol*bb.mag();
+-    const boundBox bb = procBounds(processorList,allPoints);
+-    const scalar mergeDist = mergeTol*bb.mag();
++        allPatchNames,allPatchSize,allStart,
++        processorList,sendToProcessorList,localMesh,haloLayers);
  
 -    //Info<< "Overall mesh bounding box  : " << bb << nl
 -        //<< "Relative tolerance         : " << mergeTol << nl
@@ -382,13 +420,21 @@ index 621f029..0a0d6b8 100644
 -                #endif
 -            )
 -        );
--
++    const word regionName = polyMesh::defaultRegion;
+ 
 -    for (label procI : processorList)
 -    {        
 -        // Mesh cannot be constructed with boundaries as this calls the 
 -        // updateMesh() function of coupled processors and causes an MPI error
 -        // --> Solution construct without boundary
--
++    // Merge tolerance: absolute distance from the halo bounding box.
++    // Halo faces are copies of one decomposed mesh, so coupled
++    // boundary-face centres coincide bitwise; the tolerance only has to
++    // stay below the smallest face-centre spacing.
++    const scalar mergeTol = 1e-7;
++    const boundBox bb = procBounds(processorList,allPoints);
++    const scalar mergeDist = mergeTol*bb.mag();
+ 
 -        fvMesh meshToAdd
 +    // Helper: construct the (boundary-less) mesh of processor procI and
 +    // dress it with single-type "patch" boundaries so polyMeshAdder can
@@ -399,7 +445,7 @@ index 621f029..0a0d6b8 100644
          (
              IOobject
              (
-@@ -119,71 +87,137 @@ Foam::autoPtr<Foam::fvMesh> Foam::reconstructRegionalMesh::reconstruct
+@@ -119,71 +103,137 @@ Foam::autoPtr<Foam::fvMesh> Foam::reconstructRegionalMesh::reconstruct
                  IOobject::NO_WRITE,
                  false
              ),
@@ -452,7 +498,7 @@ index 621f029..0a0d6b8 100644
 +                allPatchNames[procI][patchi],
 +                allPatchSize[procI][patchi],
 +                allStart[procI][patchi],
-+                allIndex[procI][patchi],
++                patchi,
 +                polyMeshRef
 +            ).ptr();
          }
@@ -463,12 +509,10 @@ index 621f029..0a0d6b8 100644
 +        // with hanging fvPatch slots -- fatal on first boundary access in
 +        // OpenFOAM-13, whose fvMesh geometry touches the fv boundary)
 +        m->addFvPatches(patches, false);
- 
++
 +        return m;
 +    };
- 
--        // Find geometrically shared points/faces.
--        autoPtr<faceCoupleInfo> couples
++
 +    // Seed the master mesh with the first processor's mesh directly
 +    // (the upstream code started from an empty mesh; seeding avoids the
 +    // empty-mesh edge case in the explicit-addressing faceCoupleInfo)
@@ -477,9 +521,11 @@ index 621f029..0a0d6b8 100644
 +    for (label i = 1; i < processorList.size(); i++)
 +    {
 +        const label procI = processorList[i];
-+
+ 
 +        autoPtr<fvMesh> meshToAdd(makeProcMesh(procI));
-+
+ 
+-        // Find geometrically shared points/faces.
+-        autoPtr<faceCoupleInfo> couples
 +        // Find the geometrically coupled boundary-face pairs (the
 +        // OF-13 replacement for the removed perfect-match constructor)
 +        labelList masterAddr, slaveAddr;
@@ -542,9 +588,8 @@ index 621f029..0a0d6b8 100644
 +        patchNames[patchi] = mergedBnd[patchi].name();
 +        patchSizes[patchi] = mergedBnd[patchi].size();
 +        patchStarts[patchi] = mergedBnd[patchi].start();
-     }
- 
--    return autoPtr<fvMesh>(masterMesh);
++    }
++
 +    delete masterMesh;
 +
 +    fvMesh* result = new fvMesh
@@ -577,14 +622,15 @@ index 621f029..0a0d6b8 100644
 +            patchi,
 +            result->boundaryMesh()
 +        ).ptr();
-+    }
+     }
 +    result->addFvPatches(patches, false);
-+
+ 
+-    return autoPtr<fvMesh>(masterMesh);
 +    return autoPtr<fvMesh>(result);
  }
  
  
-@@ -196,11 +230,11 @@ Foam::autoPtr<Foam::mapAddedPolyMesh> Foam::reconstructRegionalMesh::add
+@@ -196,11 +246,11 @@ Foam::autoPtr<Foam::mapAddedPolyMesh> Foam::reconstructRegionalMesh::add
  )
  {
      // -----------------------------------
@@ -599,7 +645,7 @@ index 621f029..0a0d6b8 100644
      // Resulting merged mesh (polyMesh only!)
      autoPtr<mapAddedPolyMesh> mapPtr
      (
-@@ -212,14 +246,93 @@ Foam::autoPtr<Foam::mapAddedPolyMesh> Foam::reconstructRegionalMesh::add
+@@ -212,14 +262,93 @@ Foam::autoPtr<Foam::mapAddedPolyMesh> Foam::reconstructRegionalMesh::add
              validBoundary
          )
      );
@@ -695,45 +741,437 @@ index 621f029..0a0d6b8 100644
      const List<pointField>& allPoints
  )
  {
-@@ -275,7 +388,7 @@ void Foam::reconstructRegionalMesh::getMeshInformation
-     {
-         if (procI == Pstream::myProcNo())
-             continue;
--        
-+
-         UIPstream recv(procI,pBufs);
-         recv >> allFaces[procI];
-         recv >> allPoints[procI];
-@@ -285,7 +398,6 @@ void Foam::reconstructRegionalMesh::getMeshInformation
+@@ -237,88 +366,260 @@ Foam::boundBox Foam::reconstructRegionalMesh::procBounds
  }
  
  
--
- void Foam::reconstructRegionalMesh::getPatchInformation
+-void Foam::reconstructRegionalMesh::getMeshInformation
++namespace Foam
++{
++namespace reconstructRegionalMesh
++{
++
++// Patch layout (names, sizes, starts) of a mesh, as sendable lists
++static void patchLayout
  (
+-    List<faceList>& allFaces,
+-    List<pointField>& allPoints,
+-    List<labelList>& allOwner,
+-    List<labelList>& allNeighbours,
+-    const labelList& processorList,
+-    const labelList& sendToProcessorList,
+-    const fvMesh& mesh
++    const polyBoundaryMesh& bMesh,
++    wordList& names,
++    labelList& sizes,
++    labelList& starts
+ )
+ {
+-    // Add points and faces for own processor
+-    allFaces[Pstream::myProcNo()] = mesh.faces();
+-    allPoints[Pstream::myProcNo()] = mesh.points();
+-    allOwner[Pstream::myProcNo()] = mesh.faceOwner();
+-    allNeighbours[Pstream::myProcNo()] = mesh.faceNeighbour();
++    names.setSize(bMesh.size());
++    sizes.setSize(bMesh.size());
++    starts.setSize(bMesh.size());
++    forAll(bMesh, i)
++    {
++        names[i] = bMesh[i].name();
++        sizes[i] = bMesh[i].size();
++        starts[i] = bMesh[i].start();
++    }
++}
+ 
+-    PstreamBuffers pBufs(Pstream::commsTypes::nonBlocking);
+ 
+-    for (label procI : sendToProcessorList)
++// Extract the band cell set of a mesh as raw sendable mesh primitives.
++// (fvMeshSubset is unusable here: it clones the base mesh's PROCESSOR
++// patches into the submesh, whose topoChange then talks to the neighbour
++// rank -- which is concurrently subsetting a DIFFERENT cell set:
++// measured segfault in processorPolyPatch via polyBoundaryMesh::
++// topoChange.)  The compact keep-order cell renumbering is monotone, so
++// the base mesh's upper-triangular internal-face ordering is preserved
++// and the both-sides-in-band faces can be taken in base order without
++// sorting or owner/neighbour flips.  Cut faces (one side in band) are
++// appended as one extra generic patch, flipped where needed so they
++// point out of the band.
++static void extractBand
++(
++    const fvMesh& mesh,
++    const labelHashSet& band,
++    faceList& subFaces,
++    pointField& subPoints,
++    labelList& subOwner,
++    labelList& subNeighbour,
++    wordList& patchNames,
++    labelList& patchSizes,
++    labelList& patchStarts
++)
++{
++    const labelList& own = mesh.faceOwner();
++    const labelList& nei = mesh.faceNeighbour();
++    const faceList& faces = mesh.faces();
++    const polyBoundaryMesh& bnd = mesh.boundaryMesh();
++
++    // compact keep-order cell renumbering
++    labelList cellMap(mesh.nCells(), -1);
+     {
+-        // Check for own processor ID as sendToProcessor contains its own procI
+-        if (procI == Pstream::myProcNo())
+-            continue;
++        label n = 0;
++        forAll(cellMap, i)
++        {
++            if (band.found(i)) cellMap[i] = n++;
++        }
++    }
+ 
+-        UOPstream send(procI,pBufs);
+-        send << allFaces[Pstream::myProcNo()];
+-        send << allPoints[Pstream::myProcNo()];
+-        send << allOwner[Pstream::myProcNo()];
+-        send << allNeighbours[Pstream::myProcNo()];
++    // classify faces
++    DynamicList<label> internalFaces(mesh.nInternalFaces()/4);
++    DynamicList<label> cutFaces(1024);
++    DynamicList<bool> cutFlip(1024);
++
++    for (label fi = 0; fi < mesh.nInternalFaces(); fi++)
++    {
++        const bool o = cellMap[own[fi]] >= 0;
++        const bool n = cellMap[nei[fi]] >= 0;
++        if (o && n)
++        {
++            internalFaces.append(fi);
++        }
++        else if (o)
++        {
++            cutFaces.append(fi);
++            cutFlip.append(false);
++        }
++        else if (n)
++        {
++            cutFaces.append(fi);
++            cutFlip.append(true);
++        }
+     }
+ 
+-    pBufs.finishedSends();
++    List<DynamicList<label>> patchFaces(bnd.size());
++    forAll(bnd, pi)
++    {
++        const polyPatch& pp = bnd[pi];
++        forAll(pp, i)
++        {
++            const label fi = pp.start() + i;
++            if (cellMap[own[fi]] >= 0)
++            {
++                patchFaces[pi].append(fi);
++            }
++        }
++    }
+ 
+-    for (label procI : processorList)
++    label nFacesTot = internalFaces.size() + cutFaces.size();
++    forAll(patchFaces, pi)
+     {
+-        if (procI == Pstream::myProcNo())
+-            continue;
+-        
+-        UIPstream recv(procI,pBufs);
+-        recv >> allFaces[procI];
+-        recv >> allPoints[procI];
+-        recv >> allOwner[procI];
+-        recv >> allNeighbours[procI];
++        nFacesTot += patchFaces[pi].size();
++    }
++
++    subFaces.setSize(nFacesTot);
++    subOwner.setSize(nFacesTot);
++    subNeighbour.setSize(internalFaces.size());
++
++    label k = 0;
++    forAll(internalFaces, i)
++    {
++        const label fi = internalFaces[i];
++        subFaces[k] = faces[fi];
++        subOwner[k] = cellMap[own[fi]];
++        subNeighbour[k] = cellMap[nei[fi]];
++        k++;
++    }
++
++    // original patches (in order), then the cut-face patch
++    patchNames.setSize(bnd.size() + 1);
++    patchSizes.setSize(bnd.size() + 1);
++    patchStarts.setSize(bnd.size() + 1);
++
++    forAll(bnd, pi)
++    {
++        patchNames[pi] = bnd[pi].name();
++        patchSizes[pi] = patchFaces[pi].size();
++        patchStarts[pi] = k;
++        forAll(patchFaces[pi], i)
++        {
++            const label fi = patchFaces[pi][i];
++            subFaces[k] = faces[fi];
++            subOwner[k] = cellMap[own[fi]];
++            k++;
++        }
++    }
++
++    patchNames[bnd.size()] = "oldInternalFaces";
++    patchSizes[bnd.size()] = cutFaces.size();
++    patchStarts[bnd.size()] = k;
++    forAll(cutFaces, i)
++    {
++        const label fi = cutFaces[i];
++        if (cutFlip[i])
++        {
++            subFaces[k] = faces[fi].reverseFace();
++            subOwner[k] = cellMap[nei[fi]];
++        }
++        else
++        {
++            subFaces[k] = faces[fi];
++            subOwner[k] = cellMap[own[fi]];
++        }
++        k++;
++    }
++
++    // compact keep-order point renumbering
++    const pointField& points = mesh.points();
++    labelList pointMap(points.size(), -1);
++    forAll(subFaces, fi)
++    {
++        const face& f = subFaces[fi];
++        forAll(f, i)
++        {
++            pointMap[f[i]] = 0;
++        }
++    }
++    label nPts = 0;
++    forAll(pointMap, i)
++    {
++        if (pointMap[i] == 0) pointMap[i] = nPts++;
++        else pointMap[i] = -1;
++    }
++    subPoints.setSize(nPts);
++    forAll(pointMap, i)
++    {
++        if (pointMap[i] >= 0) subPoints[pointMap[i]] = points[i];
++    }
++    forAll(subFaces, fi)
++    {
++        face& f = subFaces[fi];
++        forAll(f, i)
++        {
++            f[i] = pointMap[f[i]];
++        }
+     }
+ }
+ 
++} // End namespace reconstructRegionalMesh
++} // End namespace Foam
+ 
+ 
+-void Foam::reconstructRegionalMesh::getPatchInformation
++void Foam::reconstructRegionalMesh::getMeshInformation
+ (
++    List<faceList>& allFaces,
++    List<pointField>& allPoints,
++    List<labelList>& allOwner,
++    List<labelList>& allNeighbours,
      List<wordList>& allPatchNames,
-@@ -294,7 +406,7 @@ void Foam::reconstructRegionalMesh::getPatchInformation
-     List<labelList>& allIndex,
+     List<labelList>& allPatchSize,
+     List<labelList>& allStart,
+-    List<labelList>& allIndex,
      const labelList& processorList,
      const labelList& sendToProcessorList,
 -    const fvMesh& mesh  
-+    const fvMesh& mesh
++    const fvMesh& mesh,
++    const label haloLayers
  )
  {
-     // Add points and faces for own processor
-@@ -343,10 +455,9 @@ void Foam::reconstructRegionalMesh::getPatchInformation
+-    // Add points and faces for own processor
+-    allPatchNames.resize(Pstream::nProcs());
+-    allPatchSize.resize(Pstream::nProcs());
+-    allStart.resize(Pstream::nProcs());
+-    allIndex.resize(Pstream::nProcs());
+-
+-    // Get local boundary mesh
+-    const polyBoundaryMesh& bMesh = mesh.boundaryMesh();
+-
+-    allPatchNames[Pstream::myProcNo()].resize(bMesh.size());
+-    allPatchSize[Pstream::myProcNo()].resize(bMesh.size());
+-    allStart[Pstream::myProcNo()].resize(bMesh.size());
+-    allIndex[Pstream::myProcNo()].resize(bMesh.size());
+-
+-    // Loop over all patches
+-    forAll(bMesh,i)
++    const label myProc = Pstream::myProcNo();
++
++    // The own mesh always enters the halo mesh WHOLE
++    allFaces[myProc] = mesh.faces();
++    allPoints[myProc] = mesh.points();
++    allOwner[myProc] = mesh.faceOwner();
++    allNeighbours[myProc] = mesh.faceNeighbour();
++    patchLayout
++    (
++        mesh.boundaryMesh(),
++        allPatchNames[myProc],
++        allPatchSize[myProc],
++        allStart[myProc]
++    );
++
++    // Band selection support: all processor bounding boxes, and a
++    // per-cell reach measure (2 x the largest cell-centre-to-face
++    // distance -- an upper bound of the local cell size in any
++    // direction, valid on anisotropic cells)
++    List<boundBox> procBb(Pstream::nProcs());
++    scalarField cellReach;
++
++    if (haloLayers > 0)
      {
-         if (procI == Pstream::myProcNo())
+-        const polyPatch& patch = bMesh[i];
+-        allPatchNames[Pstream::myProcNo()][i] = patch.name();
+-        allPatchSize[Pstream::myProcNo()][i] = patch.size();
+-        allStart[Pstream::myProcNo()][i] = patch.start();
+-        allIndex[Pstream::myProcNo()][i] = patch.index();
++        procBb[myProc] = boundBox(mesh.points(), false);
++        Pstream::gatherList(procBb);
++        Pstream::scatterList(procBb);
++
++        cellReach.setSize(mesh.nCells(), 0.0);
++        const vectorField& C = mesh.cellCentres();
++        const vectorField& Cf = mesh.faceCentres();
++        const cellList& cells = mesh.cells();
++        forAll(cells, celli)
++        {
++            scalar r = 0;
++            forAll(cells[celli], i)
++            {
++                r = max(r, magSqr(Cf[cells[celli][i]] - C[celli]));
++            }
++            cellReach[celli] = 2.0*Foam::sqrt(r);
++        }
+     }
+ 
+     PstreamBuffers pBufs(Pstream::commsTypes::nonBlocking);
+@@ -326,209 +627,106 @@ void Foam::reconstructRegionalMesh::getPatchInformation
+     for (label procI : sendToProcessorList)
+     {
+         // Check for own processor ID as sendToProcessor contains its own procI
+-        if (procI == Pstream::myProcNo())
++        if (procI == myProc)
+             continue;
+ 
+         UOPstream send(procI,pBufs);
+ 
+-        send << allPatchNames[Pstream::myProcNo()];
+-        send << allPatchSize[Pstream::myProcNo()];
+-        send << allStart[Pstream::myProcNo()];
+-        send << allIndex[Pstream::myProcNo()];
++        if (haloLayers > 0)
++        {
++            // Cells within haloLayers x cellReach of the receiver's
++            // bounding box.  WENO stencils of the receiver only ever
++            // reach a few layers into this domain; the rest of the mesh
++            // is dead weight in the receiver's halo.
++            const boundBox& bb = procBb[procI];
++            const vectorField& C = mesh.cellCentres();
++
++            labelHashSet band(mesh.nCells()/8);
++            forAll(C, celli)
++            {
++                const point& p = C[celli];
++                scalar d2 = 0;
++                for (direction cmpt = 0; cmpt < 3; cmpt++)
++                {
++                    const scalar lo = bb.min()[cmpt] - p[cmpt];
++                    const scalar hi = p[cmpt] - bb.max()[cmpt];
++                    const scalar d = max(max(lo, hi), scalar(0));
++                    d2 += d*d;
++                }
++                if (d2 <= sqr(haloLayers*cellReach[celli]))
++                {
++                    band.insert(celli);
++                }
++            }
++
++            if (band.empty())
++            {
++                // Should not happen for true stencil neighbours; fall
++                // back to the full mesh rather than sending nothing
++                WarningInFunction
++                    << "Empty halo band for receiver " << procI
++                    << " -- sending the full mesh" << endl;
++
++                send << allFaces[myProc];
++                send << allPoints[myProc];
++                send << allOwner[myProc];
++                send << allNeighbours[myProc];
++                send << allPatchNames[myProc];
++                send << allPatchSize[myProc];
++                send << allStart[myProc];
++                continue;
++            }
++
++            faceList subFaces;
++            pointField subPoints;
++            labelList subOwner, subNeighbour;
++            wordList names;
++            labelList sizes, starts;
++
++            extractBand
++            (
++                mesh, band,
++                subFaces, subPoints, subOwner, subNeighbour,
++                names, sizes, starts
++            );
++
++            send << subFaces;
++            send << subPoints;
++            send << subOwner;
++            send << subNeighbour;
++            send << names;
++            send << sizes;
++            send << starts;
++        }
++        else
++        {
++            send << allFaces[myProc];
++            send << allPoints[myProc];
++            send << allOwner[myProc];
++            send << allNeighbours[myProc];
++            send << allPatchNames[myProc];
++            send << allPatchSize[myProc];
++            send << allStart[myProc];
++        }
+     }
+ 
+     pBufs.finishedSends();
+ 
+     for (label procI : processorList)
+     {
+-        if (procI == Pstream::myProcNo())
++        if (procI == myProc)
              continue;
 -        
-+
-         UIPstream recv(procI,pBufs);
+-        UIPstream recv(procI,pBufs);
  
 -        // Create temporary lists
++        UIPstream recv(procI,pBufs);
++        recv >> allFaces[procI];
++        recv >> allPoints[procI];
++        recv >> allOwner[procI];
++        recv >> allNeighbours[procI];
          recv >> allPatchNames[procI];
          recv >> allPatchSize[procI];
          recv >> allStart[procI];
-@@ -355,180 +466,4 @@ void Foam::reconstructRegionalMesh::getPatchInformation
+-        recv >> allIndex[procI];
+     }
  }
  
  
@@ -916,7 +1354,7 @@ index 621f029..0a0d6b8 100644
 -}
 +// ************************************************************************* //
 diff --git a/libWENOEXT/WENOBase/reconstructRegionalMesh.H b/libWENOEXT/WENOBase/reconstructRegionalMesh.H
-index 45f56b7..f4a400a 100644
+index 45f56b7..dbe50b3 100644
 --- a/libWENOEXT/WENOBase/reconstructRegionalMesh.H
 +++ b/libWENOEXT/WENOBase/reconstructRegionalMesh.H
 @@ -1,11 +1,11 @@
@@ -1022,11 +1460,13 @@ index 45f56b7..f4a400a 100644
      autoPtr<mapAddedPolyMesh> add
      (
          fvMesh& mesh0,
-@@ -74,9 +90,22 @@ namespace reconstructRegionalMesh
+@@ -74,91 +90,44 @@ namespace reconstructRegionalMesh
          const faceCoupleInfo& coupleInfo,
          const bool validBoundary
      );
 - 
+-    //- Get the points and faces of neighbouring processor meshes
+-    void getMeshInformation(
 +
 +    //- Find the geometrically coupled boundary-face pairs of two meshes
 +    //  by merging boundary-face centres within mergeDist.  Fills the
@@ -1040,28 +1480,36 @@ index 45f56b7..f4a400a 100644
 +        labelList& slaveAddr
 +    );
 +
-     //- Get the points and faces of neighbouring processor meshes
--    void getMeshInformation(
++    //- Get the points, faces and patch layout of neighbouring processor
++    //  meshes.  With haloLayers > 0 each receiver is sent only the BAND
++    //  of cells within haloLayers local-cell-sizes of the receiver's
++    //  bounding box (fvMeshSubset; exposed cut faces land in the
++    //  auto-added generic patch) instead of the whole mesh -- the halo
++    //  memory then scales with the band surface, not with
++    //  (1 + nNeighbours) x cells/rank.  haloLayers <= 0 restores the
++    //  full-mesh exchange.
 +    void getMeshInformation
 +    (
          List<faceList>& allFaces,
          List<pointField>& allPoints,
          List<labelList>& allOwner,
-@@ -86,8 +115,9 @@ namespace reconstructRegionalMesh
-         const fvMesh& mesh
-     );
- 
+         List<labelList>& allNeighbours,
+-        const labelList& processorList,
+-        const labelList& sendToProcessorList,
+-        const fvMesh& mesh
+-    );
+-
 -    //- Get the patch type, size, start index etc
 -    void getPatchInformation(
-+    //- Get the patch layout of neighbouring processor meshes
-+    void getPatchInformation
-+    (
          List<wordList>& allPatchNames,
          List<labelList>& allPatchSize,
          List<labelList>& allStart,
-@@ -96,69 +126,9 @@ namespace reconstructRegionalMesh
+-        List<labelList>& allIndex,
+         const labelList& processorList,
          const labelList& sendToProcessorList,
-         const fvMesh& mesh
+-        const fvMesh& mesh
++        const fvMesh& mesh,
++        const label haloLayers
      );
 - 
 -    // ------------------------------------------------------------------------

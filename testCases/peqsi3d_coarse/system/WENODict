@@ -1,0 +1,2 @@
+FoamFile { format ascii; class dictionary; object WENODict; }
+writeData false;
