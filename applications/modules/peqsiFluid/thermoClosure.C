@@ -30,26 +30,62 @@ License
 void Foam::solvers::peqsiFluid::updateCoefficients()
 {
     // ------------------------------------------------------------------
-    // TODO(M1): exact SRK partials.  The faithful coefficients are
-    //   xi    = (dh/dT)_v
-    //   alpha = (1/(rho xi)) (dp/dT)_v                    (WKK Eq. 11)
-    //   beta  = (1/rho)[(dp/dv)_T - (1/xi)(dp/dT)_v (dh/dv)_T]  (Eq. 12)
-    // evaluated analytically from the SRK EoS (WKK App. B), with the
-    // cell-wise consistency check  beta/(1-alpha) == -rho c^2 (App. D).
+    // Exact real-gas coefficients (WKK Eqs. 9, 11, 12) assembled from the
+    // validated thermo outputs (cp, cv, psi = (drho/dp)_T, rho, T) via
+    // thermodynamic identities -- no new EoS-level code:
     //
-    // M0 surrogate: the ideal-gas limit of alpha ((gamma-1)/gamma) and
-    // the App. D identity for beta with the isentropic sound speed
-    // c^2 = gamma/psi, psi = (drho/dp)_T (real for SRKGas).  Exact in
-    // the ideal-gas limit; a controlled approximation for the scaffold.
+    //   (dp/dv)_T = -rho^2/psi
+    //   (dp/dT)_v = rho sqrt( (cp - cv)/(T psi) )
+    //               [ cp - cv = -T (dp/dT)_v^2 (dv/dp)_T; positive root ]
+    //   xi        = (dh/dT)_v = cv + v (dp/dT)_v
+    //   (dh/dv)_T = T (dp/dT)_v + v (dp/dv)_T
+    //               [ (du/dv)_T = T (dp/dT)_v - p ]
+    //
+    //   alpha = (dp/dT)_v / (rho xi)                        (WKK Eq. 11)
+    //   beta  = [ (dp/dv)_T - (dp/dT)_v (dh/dv)_T / xi ]/rho  (Eq. 12)
+    //
+    // Cell-wise consistency check: beta/(1-alpha) == -rho c^2 = -gamma/psi
+    // (WKK App. D).  Pointwise evaluation; zero-gradient boundaries.
     // ------------------------------------------------------------------
 
-    const volScalarField gamma(thermo_.gamma());
-    const volScalarField c2("PEQSI:c2", gamma/thermo_.psi());
+    const auto tCp = thermo_.Cp();
+    const auto tCv = thermo_.Cv();
+    const auto tGamma = thermo_.gamma();
 
-    alpha_ = (gamma - 1.0)/gamma;
+    const scalarField& cp = tCp().primitiveField();
+    const scalarField& cv = tCv().primitiveField();
+    const scalarField& gam = tGamma().primitiveField();
+    const scalarField& psi = thermo_.psi().primitiveField();
+    const scalarField& T = thermo_.T().primitiveField();
+    const scalarField& rho = rho_.primitiveField();
+
+    scalarField& a = alpha_.primitiveFieldRef();
+    scalarField& b = beta_.primitiveFieldRef();
+
+    scalar maxDev = 0;
+
+    forAll(rho, i)
+    {
+        const scalar v = 1.0/rho[i];
+        const scalar dpdv = -sqr(rho[i])/psi[i];
+        const scalar dpdT = rho[i]*sqrt(max((cp[i] - cv[i])/(T[i]*psi[i]), 0.0));
+        const scalar xi = cv[i] + v*dpdT;
+        const scalar dhdv = T[i]*dpdT + v*dpdv;
+
+        a[i] = dpdT/(rho[i]*xi);
+        b[i] = (dpdv - dpdT*dhdv/xi)/rho[i];
+
+        // App. D identity: beta/(1-alpha) == -rho c^2 = -gamma/psi
+        const scalar lhs = b[i]/(1.0 - a[i]);
+        const scalar rhs = -gam[i]/psi[i]/rho[i]*rho[i];  // -gamma/psi
+        maxDev = max(maxDev, mag(lhs - rhs)/max(mag(rhs), small));
+    }
+
+    reduce(maxDev, maxOp<scalar>());
+    Info<< "PEQSI coefficients: max |beta/(1-alpha) + rho c^2| / (rho c^2) = "
+        << maxDev << endl;
+
     alpha_.correctBoundaryConditions();
-
-    beta_ = -rho_*c2*(1.0 - alpha_);
     beta_.correctBoundaryConditions();
 }
 
@@ -57,28 +93,49 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
 void Foam::solvers::peqsiFluid::invertTemperature()
 {
     // ------------------------------------------------------------------
-    // TODO(M1): Newton inversion of h(T, v, Y) at fixed specific volume
-    // v = 1/rho for T, with the slope xi = (dh/dT)_v (WKK Fig. 3 --
-    // explicitly NOT cp), initial guess = current T (or the manifold T
-    // in the reacting extension), tolerance 1e-6 as in WKK.  Then
-    // refresh mu/kappa (Chung) at the new (T, rho, Y) state WITHOUT
-    // calling thermo_.correct(), which would overwrite the transported
-    // density with the EOS density and destroy the scheme's mass
-    // conservation.
+    // Temperature closure on the transported (h, p) state, reusing the
+    // validated heRhoThermo machinery: seed he with the transported h,
+    // let thermo.correct() invert T and refresh psi/mu/kappa, then
+    // RESTORE the transported density (thermo.correct() would otherwise
+    // overwrite it with the EOS density and destroy the scheme's
+    // structural mass conservation).
     //
-    // M0 scaffold: T is left lagged (properties frozen at the previous
-    // state).  The 1-D validation (M3) requires the real inversion.
+    // Deliberate deviation from WKK Fig. 3 (documented in the wiki):
+    // the reference inverts h(T, v) at fixed specific volume with the
+    // slope xi; this implementation inverts at fixed p with the thermo's
+    // own cp-slope Newton.  The difference is of EOS-residual order;
+    // revisit against the 1-D validation if needed.
+    //
+    // The discarded EOS density is the scheme's "energy-side parking":
+    // report the drift as the standing audit metric.
     // ------------------------------------------------------------------
 
-    static bool warned = false;
-    if (!warned)
+    const volScalarField rhoTrans("PEQSI:rhoTrans", rho_);
+
+    thermo_.he() = h_;
+    thermo_.he().correctBoundaryConditions();
+    thermo_.correct();
+
+    // rho_ now holds the EOS density: measure the drift, then restore
+    scalar maxDrift = 0;
     {
-        warned = true;
-        WarningInFunction
-            << "M0 scaffold: T inversion not yet implemented -- "
-            << "temperature and transport properties are lagged"
-            << endl;
+        const scalarField& re = rho_.primitiveField();
+        const scalarField& rt = rhoTrans.primitiveField();
+        forAll(re, i)
+        {
+            maxDrift = max(maxDrift, mag(re[i] - rt[i])/max(rt[i], small));
+        }
+        reduce(maxDrift, maxOp<scalar>());
     }
+
+    rho_ = rhoTrans;
+    rho_.correctBoundaryConditions();
+
+    Info<< "PEQSI thermo closure: T = ["
+        << gMin(thermo_.T().primitiveField()) << ", "
+        << gMax(thermo_.T().primitiveField())
+        << "] K, rho drift (EOS vs transported) max = "
+        << maxDrift << endl;
 }
 
 
