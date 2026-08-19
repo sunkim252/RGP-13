@@ -116,7 +116,7 @@ index b0c6c5e..b1bd443 100644
   -lmeshTools
   -lspecie
 diff --git a/libWENOEXT/WENOBase/WENOBase.C b/libWENOEXT/WENOBase/WENOBase.C
-index d1febeb..30d2f32 100644
+index d1febeb..6fc18db 100644
 --- a/libWENOEXT/WENOBase/WENOBase.C
 +++ b/libWENOEXT/WENOBase/WENOBase.C
 @@ -29,8 +29,22 @@ Author
@@ -142,7 +142,29 @@ index d1febeb..30d2f32 100644
  #include "labelListIOList.H"
  #include "OFstream.H"
  #include "IFstream.H"
-@@ -748,11 +762,11 @@ Foam::WENOBase::WENOBase
+@@ -292,7 +306,20 @@ void Foam::WENOBase::sortStencil
+     }
+ 
+     auto itStart = indices.begin();
+-    std::advance(itStart,1.2*nDvt_);
++    // Sort the WHOLE stencil (only the central cell stays first).
++    // Upstream kept the first 1.2*nDvt entries in BFS-append order
++    // (Tsoutsanis compact-sort shortcut), but that order follows the
++    // std::map cell-ID iteration -- and cell IDs differ between the
++    // serial mesh and the parallel halo mesh, so the post-cut stencil
++    // SET differed at processor boundaries (measured: parallel-vs-
++    // serial field differences concentrated exactly on processor-
++    // boundary cell rows, seeding the 2-D shear-layer blow-up), and
++    // geometrically identical cells got different matrices (defeating
++    // the matrixDB dedup on constant-ratio grids).  A full geometric
++    // ordering (distance + lexicographic tie-break, as below) makes
++    // the stencils identical for identical geometry -- serial or
++    // parallel, cell numbering be damned.
++    std::advance(itStart,1);
+ 
+ 
+     std::stable_sort
+@@ -748,11 +775,11 @@ Foam::WENOBase::WENOBase
  
          // ------------------ Start Processing ---------------------------------
        
@@ -156,7 +178,7 @@ index d1febeb..30d2f32 100644
          createStencilID(globalMesh,globalfvMesh.localToGlobalCellID(),nStencils,extendRatio);
          
          // Copy globalStencilID list to stencilID 
-@@ -767,7 +781,7 @@ Foam::WENOBase::WENOBase
+@@ -767,7 +794,7 @@ Foam::WENOBase::WENOBase
          }
          
  
@@ -165,7 +187,7 @@ index d1febeb..30d2f32 100644
          // Split the stencil in several sectorial stencils
          const labelList& localToGlobalCellID = globalfvMesh.localToGlobalCellID();
          for
-@@ -780,7 +794,7 @@ Foam::WENOBase::WENOBase
+@@ -780,7 +807,7 @@ Foam::WENOBase::WENOBase
              splitStencil(globalMesh, localMesh, localCellI, globalCellI, extendRatio, nStencils[localCellI]);
          }
  
@@ -174,7 +196,7 @@ index d1febeb..30d2f32 100644
          // Get the least squares matrices and their pseudoinverses
          LSmatrix_.resize(localMesh.nCells());
      
-@@ -817,7 +831,7 @@ Foam::WENOBase::WENOBase
+@@ -817,7 +844,7 @@ Foam::WENOBase::WENOBase
              LSMatrixCheck();
          
          
@@ -183,7 +205,7 @@ index d1febeb..30d2f32 100644
          // Get the smoothness indicator matrices
          B_.setSize(localMesh.nCells());
  
-@@ -855,13 +869,26 @@ Foam::WENOBase::WENOBase
+@@ -855,13 +882,26 @@ Foam::WENOBase::WENOBase
  
  
          bool writeOutData = WENODict.lookupOrAddDefault<bool>("writeData",true);
@@ -216,7 +238,7 @@ index d1febeb..30d2f32 100644
          }
      }
      
-@@ -875,7 +902,7 @@ Foam::WENOBase::WENOBase
+@@ -875,7 +915,7 @@ Foam::WENOBase::WENOBase
            IOobject
            (
             "excludeStencil",
@@ -225,7 +247,7 @@ index d1febeb..30d2f32 100644
             mesh,
             IOobject::NO_READ,
             IOobject::NO_WRITE
-@@ -901,7 +928,7 @@ Foam::WENOBase::WENOBase
+@@ -901,7 +941,7 @@ Foam::WENOBase::WENOBase
            IOobject
            (
             "PseudoInverseDimension",

@@ -246,7 +246,25 @@ void Foam::solvers::peqsiFluid::invertTemperature()
     // coefficient) see the current (p, T) surface state; the interior
     // stays transported.  The 1-D periodic validation could never expose
     // this; the 2-D jet's Dirichlet-state inlet does.
-    rho_.boundaryFieldRef() == thermo_.rho()().boundaryField();
+    {
+        const volScalarField::Boundary& rhoEosB =
+            thermo_.rho()().boundaryField();
+        forAll(rho_.boundaryFieldRef(), patchi)
+        {
+            // PHYSICAL patches only: processor/cyclic patches must keep
+            // their COUPLED exchange values (the neighbour cell's
+            // transported density) -- blanket-assigning the one-sided
+            // EOS value there broke every boundary operator at
+            // processor faces (measured: parallel-vs-serial differences
+            // pinned to processor-boundary cell rows, seeding the 2-D
+            // shear-layer blow-up at a processor boundary)
+            if (!rho_.boundaryField()[patchi].coupled())
+            {
+                rho_.boundaryFieldRef()[patchi] == rhoEosB[patchi];
+            }
+        }
+        rho_.correctBoundaryConditions();
+    }
 
     scalar maxDrift = 0;
     {
