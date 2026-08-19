@@ -1,0 +1,6 @@
+peqsiFluid.C
+advectSubstep.C
+correctPressurePEQSI.C
+thermoClosure.C
+
+LIB = $(FOAM_USER_LIBBIN)/libpeqsiFluid
