@@ -116,18 +116,74 @@ index b0c6c5e..b1bd443 100644
   -lmeshTools
   -lspecie
 diff --git a/libWENOEXT/WENOBase/WENOBase.C b/libWENOEXT/WENOBase/WENOBase.C
-index d1febeb..03828eb 100644
+index d1febeb..30d2f32 100644
 --- a/libWENOEXT/WENOBase/WENOBase.C
 +++ b/libWENOEXT/WENOBase/WENOBase.C
-@@ -31,6 +31,7 @@ Author
+@@ -29,8 +29,22 @@ Author
+ 
+ #include "codeRules.H"
  #include "WENOBase.H"
++#include <fstream>
++
++namespace
++{
++    // resident-set size of this rank in GB (Linux)
++    double rssGB()
++    {
++        std::ifstream f("/proc/self/statm");
++        long tot = 0, res = 0;
++        f >> tot >> res;
++        return res*4096.0/1073741824.0;
++    }
++}
  #include "SVD.H"
  #include "processorFvPatch.H"
 +#include "OSspecific.H"  // OF-13 port: isDir/mkDir (previously via fvCFD.H chain)
  #include "labelListIOList.H"
  #include "OFstream.H"
  #include "IFstream.H"
-@@ -855,13 +856,26 @@ Foam::WENOBase::WENOBase
+@@ -748,11 +762,11 @@ Foam::WENOBase::WENOBase
+ 
+         // ------------------ Start Processing ---------------------------------
+       
+-        Info << "\t1) Init volume integrals..." << endl;
++        Info << "\t1) Init volume integrals..." << " [rank RSS " << rssGB() << " GB]" << endl;
+         // Initialize the volume integrals 
+         initVolIntegrals(globalfvMesh);
+ 
+-        Info << "\t2) Create local stencils..." << endl;
++        Info << "\t2) Create local stencils..." << " [rank RSS " << rssGB() << " GB]" << endl;
+         createStencilID(globalMesh,globalfvMesh.localToGlobalCellID(),nStencils,extendRatio);
+         
+         // Copy globalStencilID list to stencilID 
+@@ -767,7 +781,7 @@ Foam::WENOBase::WENOBase
+         }
+         
+ 
+-        Info << "\t3) Split stencil ... " << endl;
++        Info << "\t3) Split stencil ... " << " [rank RSS " << rssGB() << " GB]" << endl;
+         // Split the stencil in several sectorial stencils
+         const labelList& localToGlobalCellID = globalfvMesh.localToGlobalCellID();
+         for
+@@ -780,7 +794,7 @@ Foam::WENOBase::WENOBase
+             splitStencil(globalMesh, localMesh, localCellI, globalCellI, extendRatio, nStencils[localCellI]);
+         }
+ 
+-        Info << "\t4) Calculate LS matrix ..." << endl;
++        Info << "\t4) Calculate LS matrix ..." << " [rank RSS " << rssGB() << " GB]" << endl;
+         // Get the least squares matrices and their pseudoinverses
+         LSmatrix_.resize(localMesh.nCells());
+     
+@@ -817,7 +831,7 @@ Foam::WENOBase::WENOBase
+             LSMatrixCheck();
+         
+         
+-        Info << "\t5) Calcualte smoothness indicator B..."<<endl;
++        Info << "\t5) Calcualte smoothness indicator B..." << " [rank RSS " << rssGB() << " GB]" << endl;
+         // Get the smoothness indicator matrices
+         B_.setSize(localMesh.nCells());
+ 
+@@ -855,13 +869,26 @@ Foam::WENOBase::WENOBase
  
  
          bool writeOutData = WENODict.lookupOrAddDefault<bool>("writeData",true);
@@ -160,7 +216,7 @@ index d1febeb..03828eb 100644
          }
      }
      
-@@ -875,7 +889,7 @@ Foam::WENOBase::WENOBase
+@@ -875,7 +902,7 @@ Foam::WENOBase::WENOBase
            IOobject
            (
             "excludeStencil",
@@ -169,7 +225,7 @@ index d1febeb..03828eb 100644
             mesh,
             IOobject::NO_READ,
             IOobject::NO_WRITE
-@@ -901,7 +915,7 @@ Foam::WENOBase::WENOBase
+@@ -901,7 +928,7 @@ Foam::WENOBase::WENOBase
            IOobject
            (
             "PseudoInverseDimension",
