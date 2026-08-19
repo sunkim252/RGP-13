@@ -235,46 +235,53 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
         // applied twice for |d4_l q|, each weighted by the per-cell
         // spacing Delta_l^5 (face-normal spacing averaged per cell).
 
-        const surfaceScalarField deltaF(mag(mesh.delta()));
-
-        // Per-direction face weights and per-cell spacings
-        PtrList<surfaceScalarField> wDir(3);
-        PtrList<volScalarField> DeltaDir(3);
-        for (direction cmpt = 0; cmpt < 3; cmpt++)
+        // Direction weights/spacings depend only on the (static) mesh:
+        // built once, cached as members
+        if (!ladWDir_.valid())
         {
-            vector e(Zero);
-            e[cmpt] = 1;
+            const surfaceScalarField deltaF(mag(mesh.delta()));
 
-            wDir.set
-            (
-                cmpt,
-                new surfaceScalarField
+            ladWDir_.set(new PtrList<surfaceScalarField>(3));
+            ladDeltaDir_.set(new PtrList<volScalarField>(3));
+
+            for (direction cmpt = 0; cmpt < 3; cmpt++)
+            {
+                vector e(Zero);
+                e[cmpt] = 1;
+
+                ladWDir_().set
                 (
-                    sqr((mesh.Sf()/mesh.magSf()) & e)
-                )
-            );
-
-            const surfaceScalarField wA(wDir[cmpt]*mesh.magSf());
-
-            DeltaDir.set
-            (
-                cmpt,
-                new volScalarField
-                (
-                    completeField
+                    cmpt,
+                    new surfaceScalarField
                     (
-                        "PEQSI:DeltaDir",
-                        mesh,
-                        fvc::surfaceSum(wA*deltaF)()
-                       /max
+                        sqr((mesh.Sf()/mesh.magSf()) & e)
+                    )
+                );
+
+                const surfaceScalarField wA(ladWDir_()[cmpt]*mesh.magSf());
+
+                ladDeltaDir_().set
+                (
+                    cmpt,
+                    new volScalarField
+                    (
+                        completeField
                         (
-                            fvc::surfaceSum(wA)(),
-                            dimensionedScalar(dimArea, vSmall)
+                            "PEQSI:DeltaDir",
+                            mesh,
+                            fvc::surfaceSum(wA*deltaF)()
+                           /max
+                            (
+                                fvc::surfaceSum(wA)(),
+                                dimensionedScalar(dimArea, vSmall)
+                            )
                         )
                     )
-                )
-            );
+                );
+            }
         }
+        const PtrList<surfaceScalarField>& wDir = ladWDir_();
+        const PtrList<volScalarField>& DeltaDir = ladDeltaDir_();
 
         // TK truncated-Gaussian filter, DIRECTIONAL form:
         //   qBar = q + sum_l (Delta_l^2/24) d2q/dx_l^2.

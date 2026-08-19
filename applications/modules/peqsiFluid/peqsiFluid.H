@@ -150,6 +150,11 @@ protected:
         //- Guard so the acoustic substep runs once per time step
         label acousticTimeIndex_;
 
+        //- Cached LAD directional geometry (static mesh): direction
+        //  face weights (n.e_l)^2 and per-cell directional spacings
+        mutable autoPtr<PtrList<surfaceScalarField>> ladWDir_;
+        mutable autoPtr<PtrList<volScalarField>> ladDeltaDir_;
+
         //- Per-phase cumulative CPU-time accounting (peqsiTimers switch):
         //  setup, sgs, lad, rk3, helmAsm, helmSolve, updates, newton,
         //  coeffs

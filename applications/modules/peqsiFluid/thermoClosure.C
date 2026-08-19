@@ -133,22 +133,59 @@ void Foam::solvers::peqsiFluid::invertTemperature()
         const auto tCp = thermo_.Cp();
         const scalarField& cpf = tCp().primitiveField();
 
+        scalarField& Tf = Tw.primitiveFieldRef();
+        const scalarField& hf = h_.primitiveField();
+
+        // After the first full-field pass only the cells still moving
+        // (steep-front cells, typically a small fraction) are iterated,
+        // via the thermo's cell-subset he(T, cells) evaluation --
+        // profiling showed the full-field SRK sweep per iteration
+        // dominating the closure cost.
+        labelList active;
+
         for (; iter < 60 && maxRel > tol; ++iter)
         {
-            const volScalarField hk(thermo_.he(p_, Tw));
-
-            scalarField& Tf = Tw.primitiveFieldRef();
-            const scalarField& hf = h_.primitiveField();
-            const scalarField& hkf = hk.primitiveField();
-
             maxRel = 0;
-            forAll(Tf, i)
+
+            if (iter == 0)
             {
-                scalar dT = (hf[i] - hkf[i])/max(cpf[i], small);
-                dT = min(max(dT, -dTmax), dTmax);
-                Tf[i] = min(max(Tf[i] + dT, Tmin), Tmax);
-                maxRel = max(maxRel, mag(dT)/max(Tf[i], small));
+                const volScalarField hk(thermo_.he(p_, Tw));
+                const scalarField& hkf = hk.primitiveField();
+
+                DynamicList<label> nextActive(Tf.size()/8);
+                forAll(Tf, i)
+                {
+                    scalar dT = (hf[i] - hkf[i])/max(cpf[i], small);
+                    dT = min(max(dT, -dTmax), dTmax);
+                    Tf[i] = min(max(Tf[i] + dT, Tmin), Tmax);
+                    const scalar rel = mag(dT)/max(Tf[i], small);
+                    if (rel > tol) nextActive.append(i);
+                    maxRel = max(maxRel, rel);
+                }
+                active.transfer(nextActive);
             }
+            else
+            {
+                scalarField Tsub(active.size());
+                forAll(active, k) Tsub[k] = Tf[active[k]];
+
+                const tmp<scalarField> thk(thermo_.he(Tsub, active));
+                const scalarField& hkf = thk();
+
+                DynamicList<label> nextActive(active.size());
+                forAll(active, k)
+                {
+                    const label i = active[k];
+                    scalar dT = (hf[i] - hkf[k])/max(cpf[i], small);
+                    dT = min(max(dT, -dTmax), dTmax);
+                    Tf[i] = min(max(Tf[i] + dT, Tmin), Tmax);
+                    const scalar rel = mag(dT)/max(Tf[i], small);
+                    if (rel > tol) nextActive.append(i);
+                    maxRel = max(maxRel, rel);
+                }
+                active.transfer(nextActive);
+            }
+
             reduce(maxRel, maxOp<scalar>());
         }
         Tw.correctBoundaryConditions();
