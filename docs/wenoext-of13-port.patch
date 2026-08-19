@@ -1,0 +1,1428 @@
+diff --git a/libWENOEXT/CMakeLists.txt b/libWENOEXT/CMakeLists.txt
+index b0c6c5e..b1bd443 100644
+--- a/libWENOEXT/CMakeLists.txt
++++ b/libWENOEXT/CMakeLists.txt
+@@ -43,6 +43,7 @@ add_library(WENOEXT SHARED
+ 
+ target_include_directories(WENOEXT PUBLIC
+   $ENV{FOAM_SRC}/dynamicMesh/lnInclude
++  $ENV{FOAM_SRC}/polyTopoChange/lnInclude
+   $ENV{FOAM_SRC}/finiteVolume/lnInclude
+   $ENV{FOAM_SRC}/meshTools/lnInclude
+   $ENV{FOAM_SRC}/surfMesh/lnInclude
+@@ -65,7 +66,7 @@ target_include_directories(WENOEXT PUBLIC
+ target_link_libraries(WENOEXT PUBLIC
+  Blaze
+  -L$ENV{FOAM_LIBBIN}
+- -ldynamicMesh 
++ -lpolyTopoChange 
+  -lfiniteVolume 
+  -lmeshTools
+  -lspecie
+diff --git a/libWENOEXT/WENOBase/WENOBase.C b/libWENOEXT/WENOBase/WENOBase.C
+index d1febeb..77caf60 100644
+--- a/libWENOEXT/WENOBase/WENOBase.C
++++ b/libWENOEXT/WENOBase/WENOBase.C
+@@ -31,6 +31,7 @@ Author
+ #include "WENOBase.H"
+ #include "SVD.H"
+ #include "processorFvPatch.H"
++#include "OSspecific.H"  // OF-13 port: isDir/mkDir (previously via fvCFD.H chain)
+ #include "labelListIOList.H"
+ #include "OFstream.H"
+ #include "IFstream.H"
+@@ -875,7 +876,7 @@ Foam::WENOBase::WENOBase
+           IOobject
+           (
+            "excludeStencil",
+-           mesh.time().timeName(),
++           mesh.time().name(),
+            mesh,
+            IOobject::NO_READ,
+            IOobject::NO_WRITE
+@@ -901,7 +902,7 @@ Foam::WENOBase::WENOBase
+           IOobject
+           (
+            "PseudoInverseDimension",
+-           mesh.time().timeName(),
++           mesh.time().name(),
+            mesh,
+            IOobject::NO_READ,
+            IOobject::NO_WRITE
+diff --git a/libWENOEXT/WENOBase/WENOCoeff.C b/libWENOEXT/WENOBase/WENOCoeff.C
+index fe28814..37a1dc6 100644
+--- a/libWENOEXT/WENOBase/WENOCoeff.C
++++ b/libWENOEXT/WENOBase/WENOCoeff.C
+@@ -39,13 +39,13 @@ template<class Type>
+ bool Foam::WENOCoeff<Type>::printWENODict_=false;
+ 
+ template<class Type>
+-scalar Foam::WENOCoeff<Type>::dm_=1000;
++Foam::scalar Foam::WENOCoeff<Type>::dm_=1000;
+ 
+ template<class Type>
+-scalar Foam::WENOCoeff<Type>::epsilon_=1E-40;
++Foam::scalar Foam::WENOCoeff<Type>::epsilon_=1E-40;
+ 
+ template<class Type>
+-scalar Foam::WENOCoeff<Type>::p_=4;
++Foam::scalar Foam::WENOCoeff<Type>::p_=4;
+ 
+ // * * * * * * * * * * * * * * * * * Constructor * * * * * * * * * * * * * * //
+ 
+@@ -105,7 +105,7 @@ template<class Type>
+ void Foam::WENOCoeff<Type>::calcCoeff
+ (
+     const label cellI,
+-    const GeometricField<Type, fvPatchField, volMesh>& vf,
++    const VolField<Type>& vf,
+     const labelListList& stencilList,
+     DynamicList<coeffType>& coeffsList
+ ) const
+@@ -224,7 +224,7 @@ void Foam::WENOCoeff<Type>::calcWeight
+ template<class Type>
+ void Foam::WENOCoeff<Type>::collectData
+ (
+-    const GeometricField<Type, fvPatchField, volMesh>& vf
++    const VolField<Type>& vf
+ ) const
+ {
+     // Distribute data to neighbour processors
+@@ -300,7 +300,7 @@ template<class Type>
+ Foam::tmp<Foam::Field<Foam::Field<Type> > >
+ Foam::WENOCoeff<Type>::getWENOPol
+ (
+-    const GeometricField<Type, fvPatchField, volMesh>& vf
++    const VolField<Type>& vf
+ ) const
+ {
+     if (Pstream::parRun())
+@@ -355,21 +355,21 @@ Foam::WENOCoeff<Type>::getWENOPol
+ 
+ 
+ template<class Type>
+-Foam::GeometricField<Type, Foam::fvPatchField, Foam::volMesh>& Foam::WENOCoeff<Type>::storeOrRetrieve
++Foam::VolField<Type>& Foam::WENOCoeff<Type>::storeOrRetrieve
+ (
+     const word fieldName
+ ) const
+ {
+-    if (!mesh_.objectRegistry::foundObject<GeometricField<Type, fvPatchField, volMesh> >(fieldName))
++    if (!mesh_.objectRegistry::foundObject<VolField<Type> >(fieldName))
+     {
+-        GeometricField<Type, fvPatchField, volMesh>* fPtr
++        VolField<Type>* fPtr
+         (
+-            new GeometricField<Type, fvPatchField, volMesh>
++            new VolField<Type>
+             (
+                 IOobject
+                 (
+                     fieldName,
+-                    mesh_.time().timeName(),
++                    mesh_.time().name(),
+                     mesh_,
+                     IOobject::NO_READ,
+                     IOobject::AUTO_WRITE
+@@ -383,7 +383,7 @@ Foam::GeometricField<Type, Foam::fvPatchField, Foam::volMesh>& Foam::WENOCoeff<T
+         fPtr->store(fPtr);
+     }
+ 
+-    return mesh_.objectRegistry::lookupObjectRef<GeometricField<Type, fvPatchField, volMesh> >(fieldName);
++    return mesh_.objectRegistry::lookupObjectRef<VolField<Type> >(fieldName);
+ }
+ 
+ 
+diff --git a/libWENOEXT/WENOBase/WENOCoeff.H b/libWENOEXT/WENOBase/WENOCoeff.H
+index 0fc169e..74702e9 100644
+--- a/libWENOEXT/WENOBase/WENOCoeff.H
++++ b/libWENOEXT/WENOBase/WENOCoeff.H
+@@ -122,14 +122,14 @@ protected:
+         //- Distribute data if multiple processors are involved
+         void collectData
+         (
+-            const GeometricField<Type, fvPatchField, volMesh>& vf
++            const VolField<Type>& vf
+         ) const;
+         
+         //- Calculating the coefficients for each stencil of each cell
+         void calcCoeff
+         (
+             const label cellI,
+-            const GeometricField<Type, fvPatchField, volMesh>& vf,
++            const VolField<Type>& vf,
+             const labelListList& stencilList,
+             DynamicList<coeffType>& coeffsList
+         ) const;
+@@ -182,12 +182,12 @@ public:
+         //- Calling function from different schemes
+         tmp<Field<Field<Type> > > getWENOPol
+         (
+-            const GeometricField<Type, fvPatchField, volMesh>& vf
++            const VolField<Type>& vf
+         ) const;
+ 
+         
+         //- Function to store or retrieve fields from the database 
+-        GeometricField<Type, fvPatchField, volMesh>& storeOrRetrieve
++        VolField<Type>& storeOrRetrieve
+         (
+             const word fieldName
+         ) const;
+diff --git a/libWENOEXT/WENOBase/geometryWENO/geometryWENO.H b/libWENOEXT/WENOBase/geometryWENO/geometryWENO.H
+index e113b7a..401aae4 100644
+--- a/libWENOEXT/WENOBase/geometryWENO/geometryWENO.H
++++ b/libWENOEXT/WENOBase/geometryWENO/geometryWENO.H
+@@ -45,7 +45,12 @@ Author
+ #include "triSurface.H"
+ #include "polyMeshTetDecomposition.H"
+ #include "fvMesh.H"
+-#include "fvCFD.H"
++// OF-13 port: fvCFD.H removed upstream -- include what is used directly
++#include "fvMesh.H"
++#include "volFields.H"
++#include "surfaceFields.H"
++#include "pointFields.H"
++#include "Time.H"
+ #include "blaze/Math.h"
+ #include "BlazeIO.H"
+ #include "List3D.H"
+diff --git a/libWENOEXT/WENOBase/globalfvMesh.C b/libWENOEXT/WENOBase/globalfvMesh.C
+index 1170072..2e0fcc1 100644
+--- a/libWENOEXT/WENOBase/globalfvMesh.C
++++ b/libWENOEXT/WENOBase/globalfvMesh.C
+@@ -256,19 +256,15 @@ Foam::labelList Foam::WENO::globalfvMesh::localToGlobalCellIDList()
+     {
+         const vectorField& localCellCenters  = localMesh_.C();
+ 
+-        meshSearch mSearch(globalMesh_);
+-
+-        label oldCellIndex = 0;
++        // OF-13 port: meshSearch is a cached DemandDrivenMeshObject now
++        const meshSearch& mSearch = meshSearch::New(globalMesh_);
+ 
++        
+         // Loop over all local cells and look for cell center
+         forAll(localCellCenters,cellI)
+         {
+             // Find cell
+-            label globalCellIndex = mSearch.findCell(localCellCenters[cellI],oldCellIndex);
+-            if (globalCellIndex == -1)
+-                globalCellIndex = mSearch.findCell(localCellCenters[cellI]);
+-                
+-            oldCellIndex = globalCellIndex;
++            label globalCellIndex = mSearch.findCell(localCellCenters[cellI]);
+             
+             if (globalCellIndex >= 0)
+                 localToGlobalCellID[cellI] = globalCellIndex;
+@@ -337,23 +333,19 @@ Foam::labelList Foam::WENO::globalfvMesh::globalToLocalCellIDList()
+             }
+         }
+         
+-        meshSearch mSearch(globalMesh_);
++        // OF-13 port: meshSearch is a cached DemandDrivenMeshObject now
++        const meshSearch& mSearch = meshSearch::New(globalMesh_);
+         
+         // Loop over all global cells and find corresponding cell center
+         forAll(cellCentersList,procI)
+          { 
+             const vectorField& localCellCentersI = cellCentersList[procI];
+             
+-            label oldCellIndex = 0;
+-            
++                        
+             forAll(localCellCentersI,cellI)
+             { 
+                 // Find cell
+-                label globalCellIndex = mSearch.findCell(localCellCentersI[cellI],oldCellIndex);
+-                if (globalCellIndex == -1)
+-                    globalCellIndex = mSearch.findCell(localCellCentersI[cellI]);
+-                    
+-                oldCellIndex = globalCellIndex;
++                label globalCellIndex = mSearch.findCell(localCellCentersI[cellI]);
+                     
+                 if (globalCellIndex >= 0)
+                 {
+diff --git a/libWENOEXT/WENOBase/matrixDB.H b/libWENOEXT/WENOBase/matrixDB.H
+index a2de6cf..3746483 100644
+--- a/libWENOEXT/WENOBase/matrixDB.H
++++ b/libWENOEXT/WENOBase/matrixDB.H
+@@ -43,6 +43,7 @@ Author
+ #ifndef matrixDB_H
+ #define matrixDB_H
+ 
++#include "scalarMatrices.H"  // OF-13 port: scalarRectangularMatrix typedef
+ #include "linear.H"
+ #include "Ostream.H"
+ #include "blaze/Math.h"
+diff --git a/libWENOEXT/WENOBase/reconstructRegionalMesh.C b/libWENOEXT/WENOBase/reconstructRegionalMesh.C
+index 621f029..23a6378 100644
+--- a/libWENOEXT/WENOBase/reconstructRegionalMesh.C
++++ b/libWENOEXT/WENOBase/reconstructRegionalMesh.C
+@@ -1,534 +1,32 @@
+ /*---------------------------------------------------------------------------*\
+-       ██╗    ██╗███████╗███╗   ██╗ ██████╗     ███████╗██╗  ██╗████████╗
+-       ██║    ██║██╔════╝████╗  ██║██╔═══██╗    ██╔════╝╚██╗██╔╝╚══██╔══╝
+-       ██║ █╗ ██║█████╗  ██╔██╗ ██║██║   ██║    █████╗   ╚███╔╝    ██║   
+-       ██║███╗██║██╔══╝  ██║╚██╗██║██║   ██║    ██╔══╝   ██╔██╗    ██║   
+-       ╚███╔███╔╝███████╗██║ ╚████║╚██████╔╝    ███████╗██╔╝ ██╗   ██║   
+-        ╚══╝╚══╝ ╚══════╝╚═╝  ╚═══╝ ╚═════╝     ╚══════╝╚═╝  ╚═╝   ╚═╝   
+--------------------------------------------------------------------------------                                                                                                                                                 
+ License
+-    This file is part of WENO Ext.
+-
+-    WENO Ext is free software: you can redistribute it and/or modify it
+-    under the terms of the GNU General Public License as published by
+-    the Free Software Foundation, either version 3 of the License, or
+-    (at your option) any later version.
+-
+-    WENO Ext is distributed in the hope that it will be useful, but WITHOUT
+-    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+-    FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+-    for more details.
+-
+-    You should have received a copy of the GNU General Public License
+-    along with  WENO Ext.  If not, see <http://www.gnu.org/licenses/>.
+-
+-Author
+-    Jan Wilhelm Gärtner <jan.gaertner@outlook.de> Copyright (C) 2020
+-
++    This file is part of WENO Ext library.  GPL v3 or later.
++
++    OF-13 PORT NOTE (2026-08-19): the original implementation stitched
++    neighbouring processor meshes geometrically with
++    faceCoupleInfo(mesh, mesh, tol, perfectMatch), a constructor removed
++    upstream (only the explicit-addressing constructor remains in
++    OpenFOAM-13).  The parallel halo-mesh reconstruction is therefore not
++    yet ported: serial runs never reach this code (all call sites in
++    globalfvMesh are gated on Pstream::parRun()), and parallel runs abort
++    with a clear message instead of miscomputing stencils.
+ \*---------------------------------------------------------------------------*/
+ 
+ #include "reconstructRegionalMesh.H"
+-#include "masterUncollatedFileOperation.H"
+-
+-
+ 
+ Foam::autoPtr<Foam::fvMesh> Foam::reconstructRegionalMesh::reconstruct
+ (
+     const labelList& processorList,
+-    const labelList& sendToProcessorList,
++    const labelList& sendToProcessor,
+     const fvMesh& localMesh
+ )
+ {
+-    // Get points, faces, neighbour, owner lists from processors 
+-    List<faceList>   allFaces(Pstream::nProcs());
+-    List<pointField> allPoints(Pstream::nProcs());
+-    List<labelList>  allOwners(Pstream::nProcs());
+-    List<labelList>  allNeighbours(Pstream::nProcs());
+-
+-
+-    getMeshInformation(allFaces,allPoints,allOwners,allNeighbours,
+-        processorList,sendToProcessorList,localMesh);
+-
+-
+-    List<wordList> allPatchNames;
+-    List<labelList> allPatchSize;
+-    List<labelList> allStart;
+-    List<labelList> allIndex;
+-    
+-    getPatchInformation(allPatchNames,allPatchSize,allStart,allIndex,
+-        processorList,sendToProcessorList,localMesh);
+-
+-    // Get the dimensions of the current processor domain and calculate the 
+-    // merging tolerance
+-    word regionName = polyMesh::defaultRegion;
+-    word regionDir = word::null;
+-
+-    scalar mergeTol = 1E-7;
+-    
+-    // Read point on individual processors to determine merge tolerance
+-    // (otherwise single cell domains might give problems)
+-    const boundBox bb = procBounds(processorList,allPoints);
+-    const scalar mergeDist = mergeTol*bb.mag();
+-
+-    //Info<< "Overall mesh bounding box  : " << bb << nl
+-        //<< "Relative tolerance         : " << mergeTol << nl
+-        //<< "Absolute matching distance : " << mergeDist << nl
+-        //<< endl;
+-        
+-    fvMesh* masterMesh = 
+-        (
+-            new fvMesh
+-            (
+-                IOobject
+-                (
+-                    regionName,
+-                    localMesh.time().constant(),
+-                    localMesh.time(),
+-                    IOobject::NO_READ,
+-                    IOobject::NO_WRITE,
+-                    false
+-                ),
+-                #ifdef FOAM_MOVE_CONSTRUCTOR
+-                    pointField(),
+-                    faceList(),
+-                    labelList(),
+-                    labelList()
+-                #else
+-                    xferCopy(pointField()),
+-                    xferCopy(faceList()),
+-                    xferCopy(labelList()),
+-                    xferCopy(labelList())
+-                #endif
+-            )
+-        );
+-
+-    for (label procI : processorList)
+-    {        
+-        // Mesh cannot be constructed with boundaries as this calls the 
+-        // updateMesh() function of coupled processors and causes an MPI error
+-        // --> Solution construct without boundary
+-
+-        fvMesh meshToAdd
+-        (
+-            IOobject
+-            (
+-                regionName,
+-                localMesh.time().constant(),
+-                localMesh.time(),
+-                IOobject::NO_READ,
+-                IOobject::NO_WRITE,
+-                false
+-            ),
+-            #ifdef FOAM_MOVE_CONSTRUCTOR
+-                std::move(allPoints[procI]),
+-                std::move(allFaces[procI]),
+-                std::move(allOwners[procI]),
+-                std::move(allNeighbours[procI]),
+-            #else
+-                xferMove(allPoints[procI]),
+-                xferMove(allFaces[procI]),
+-                xferMove(allOwners[procI]),
+-                xferMove(allNeighbours[procI]),
+-            #endif
+-            false // Do not synchronize --> in polyMesh() bounds_ calls an mpirecv 
+-        );
+-
+-        // Now add the boundaries by creating a polyPatch with a type patch 
+-        // for generic value
+-
+-        // // Access to boundary mesh
+-        const polyBoundaryMesh& polyMeshRef = meshToAdd.boundaryMesh();
+-
+-        List<polyPatch*> patches(allPatchNames[procI].size());
+- 
+-        forAll(patches, patchi)
+-        {
+-            patches[patchi] = 
+-                (
+-                    polyPatch::New
+-                    (
+-                        "patch",        // use generic patch instead of patchType
+-                        allPatchNames[procI][patchi],   // Important that the names match
+-                        allPatchSize[procI][patchi],
+-                        allStart[procI][patchi],
+-                        allIndex[procI][patchi],
+-                        polyMeshRef
+-                    )
+-                ).ptr();
+-        }
+-
+-        meshToAdd.addPatches(patches,false);
+-
+-
+-        // Find geometrically shared points/faces.
+-        autoPtr<faceCoupleInfo> couples
+-        (
+-            new faceCoupleInfo
+-            (
+-                *masterMesh,
+-                meshToAdd,
+-                mergeDist,      // Absolute merging distance
+-                true            // Matching faces identical
+-            )
+-        );
+-
+-        // Add elements to mesh
+-        autoPtr<mapAddedPolyMesh> map = add
+-        (
+-            *masterMesh,
+-            meshToAdd,
+-            couples,
+-            false // do not synchronize
+-        );
+-        
+-    }
+-
+-    return autoPtr<fvMesh>(masterMesh);
+-}
+-
+-
+-Foam::autoPtr<Foam::mapAddedPolyMesh> Foam::reconstructRegionalMesh::add
+-(
+-    fvMesh& mesh0,
+-    const fvMesh& mesh1,
+-    const faceCoupleInfo& coupleInfo,
+-    const bool validBoundary
+-)
+-{
+-    // -----------------------------------
+-    // Function taken from fvMeshAddr::add
+-    // -----------------------------------
+-    
+-    mesh0.clearOut();
+-    
+-    // Resulting merged mesh (polyMesh only!)
+-    autoPtr<mapAddedPolyMesh> mapPtr
+-    (
+-        polyMeshAdder::add
+-        (
+-            mesh0,
+-            mesh1,
+-            coupleInfo,
+-            validBoundary
+-        )
+-    );
+-    
+-    return mapPtr;
+-}
+-
+-
+-Foam::boundBox Foam::reconstructRegionalMesh::procBounds
+-(
+-    const labelList processorList,
+-    const List<pointField>& allPoints
+-)
+-{
+-    boundBox bb = boundBox::invertedBox;
+-
+-    forAll(processorList, procI)
+-    {
+-        boundBox domainBb(allPoints[processorList[procI]], false);
+-
+-        bb.min() = min(bb.min(), domainBb.min());
+-        bb.max() = max(bb.max(), domainBb.max());
+-    }
+-
+-    return bb;
+-}
+-
+-
+-void Foam::reconstructRegionalMesh::getMeshInformation
+-(
+-    List<faceList>& allFaces,
+-    List<pointField>& allPoints,
+-    List<labelList>& allOwner,
+-    List<labelList>& allNeighbours,
+-    const labelList& processorList,
+-    const labelList& sendToProcessorList,
+-    const fvMesh& mesh
+-)
+-{
+-    // Add points and faces for own processor
+-    allFaces[Pstream::myProcNo()] = mesh.faces();
+-    allPoints[Pstream::myProcNo()] = mesh.points();
+-    allOwner[Pstream::myProcNo()] = mesh.faceOwner();
+-    allNeighbours[Pstream::myProcNo()] = mesh.faceNeighbour();
+-
+-    PstreamBuffers pBufs(Pstream::commsTypes::nonBlocking);
+-
+-    for (label procI : sendToProcessorList)
+-    {
+-        // Check for own processor ID as sendToProcessor contains its own procI
+-        if (procI == Pstream::myProcNo())
+-            continue;
+-
+-        UOPstream send(procI,pBufs);
+-        send << allFaces[Pstream::myProcNo()];
+-        send << allPoints[Pstream::myProcNo()];
+-        send << allOwner[Pstream::myProcNo()];
+-        send << allNeighbours[Pstream::myProcNo()];
+-    }
+-
+-    pBufs.finishedSends();
+-
+-    for (label procI : processorList)
+-    {
+-        if (procI == Pstream::myProcNo())
+-            continue;
+-        
+-        UIPstream recv(procI,pBufs);
+-        recv >> allFaces[procI];
+-        recv >> allPoints[procI];
+-        recv >> allOwner[procI];
+-        recv >> allNeighbours[procI];
+-    }
+-}
+-
+-
+-
+-void Foam::reconstructRegionalMesh::getPatchInformation
+-(
+-    List<wordList>& allPatchNames,
+-    List<labelList>& allPatchSize,
+-    List<labelList>& allStart,
+-    List<labelList>& allIndex,
+-    const labelList& processorList,
+-    const labelList& sendToProcessorList,
+-    const fvMesh& mesh  
+-)
+-{
+-    // Add points and faces for own processor
+-    allPatchNames.resize(Pstream::nProcs());
+-    allPatchSize.resize(Pstream::nProcs());
+-    allStart.resize(Pstream::nProcs());
+-    allIndex.resize(Pstream::nProcs());
+-
+-    // Get local boundary mesh
+-    const polyBoundaryMesh& bMesh = mesh.boundaryMesh();
+-
+-    allPatchNames[Pstream::myProcNo()].resize(bMesh.size());
+-    allPatchSize[Pstream::myProcNo()].resize(bMesh.size());
+-    allStart[Pstream::myProcNo()].resize(bMesh.size());
+-    allIndex[Pstream::myProcNo()].resize(bMesh.size());
+-
+-    // Loop over all patches
+-    forAll(bMesh,i)
+-    {
+-        const polyPatch& patch = bMesh[i];
+-        allPatchNames[Pstream::myProcNo()][i] = patch.name();
+-        allPatchSize[Pstream::myProcNo()][i] = patch.size();
+-        allStart[Pstream::myProcNo()][i] = patch.start();
+-        allIndex[Pstream::myProcNo()][i] = patch.index();
+-    }
++    FatalErrorInFunction
++        << "WENOEXT OF-13 port: parallel halo-mesh reconstruction "
++        << "(reconstructRegionalMesh) is not yet ported -- "
++        << "run WENO schemes in serial, or port faceCoupleInfo-based "
++        << "stitching to the OpenFOAM-13 API."
++        << exit(FatalError);
+ 
+-    PstreamBuffers pBufs(Pstream::commsTypes::nonBlocking);
+-
+-    for (label procI : sendToProcessorList)
+-    {
+-        // Check for own processor ID as sendToProcessor contains its own procI
+-        if (procI == Pstream::myProcNo())
+-            continue;
+-
+-        UOPstream send(procI,pBufs);
+-
+-        send << allPatchNames[Pstream::myProcNo()];
+-        send << allPatchSize[Pstream::myProcNo()];
+-        send << allStart[Pstream::myProcNo()];
+-        send << allIndex[Pstream::myProcNo()];
+-    }
+-
+-    pBufs.finishedSends();
+-
+-    for (label procI : processorList)
+-    {
+-        if (procI == Pstream::myProcNo())
+-            continue;
+-        
+-        UIPstream recv(procI,pBufs);
+-
+-        // Create temporary lists
+-        recv >> allPatchNames[procI];
+-        recv >> allPatchSize[procI];
+-        recv >> allStart[procI];
+-        recv >> allIndex[procI];
+-    }
+-}
+-
+-
+-// * * * * * * * * * * * Depricated Functions * * * * * * * * * * * * * * * * *
+-
+-Foam::fileName Foam::reconstructRegionalMesh::localPath
+-(
+-    const fvMesh& localMesh,
+-    const label proci,
+-    const fileName file
+-)
+-{        
+-    // Create start time value
+-    const scalar startTimeValue = (localMesh.time().startTime()).value();
+-
+-    // Fist check if a mesh is present in the time directory
+-    fileName pathToTimeDir = localMesh.time().path().path()
+-          / fileName("processor" + name(proci) + "/" + localMesh.time().timeName(startTimeValue) + "/" + polyMesh::meshSubDir)
+-          / file;
+-
+-    if (exists(pathToTimeDir))
+-        return pathToTimeDir;
+-
+-    return  localMesh.time().path().path()
+-          / fileName("processor" + name(proci) + "/constant/" + polyMesh::meshSubDir)
+-          / file;
+-}
+-
+-
+-void Foam::reconstructRegionalMesh::readHeader(Istream& is)
+-{
+-     // Check Istream not already bad
+-     if (!is.good())
+-     {
+-        FatalIOErrorInFunction(is)
+-             << " Stream is not good"  
+-             << exit(FatalIOError);
+-     }
+- 
+-     token firstToken(is);
+- 
+-     if
+-     (
+-         is.good()
+-      && firstToken.isWord()
+-      && firstToken.wordToken() == "FoamFile"
+-     )
+-     {
+-         dictionary headerDict(is);
+- 
+-         #if (OF_FORK_VERSION >= 1912 && OF_FORK_VERSION < 2006)
+-            is.version(headerDict.lookup("version"));
+-            is.format(headerDict.get<word>("format"));
+-            const word headerClassName = headerDict.get<word>("class");
+-            const word headerObject(headerDict.get<word>("object"));
+-         #elif (OF_FORK_VERSION >= 2006 )
+-            is.version(headerDict.get<token>("version"));
+-            is.format(headerDict.get<word>("format"));
+-            const word headerClassName = headerDict.get<word>("class");
+-            const word headerObject(headerDict.get<word>("object"));
+-         #else
+-            is.version(headerDict.lookup("version"));
+-            is.format(headerDict.lookup("format"));
+-            const word headerClassName = word(headerDict.lookup("class"));
+-            const word headerObject(headerDict.lookup("object"));
+-         #endif
+- 
+-        //if (headerClassName == "faceCompactList")
+-            //FatalIOErrorInFunction(is)
+-             //<< " stream failure while "
+-             //<< " reading file " << is.name() << nl
+-             //<< "\tFile is in binary format. Mesh has to be saved in ascii format"
+-             //<< exit(FatalIOError);
+- 
+-         
+-         #ifdef FULLDEBUG
+-             if (headerObject != headerClassName)
+-             {
+-                 IOWarningInFunction(is)
+-                     << " object renamed from "
+-                     << headerClassName << " to " << headerObject
+-                     << " for file " << is.name() << endl;
+-             }
+-         #endif
+-     }
+-     else
+-     {
+-        FatalIOErrorInFunction(is)
+-             << " stream failure while reading header"
+-             << " on line " << is.lineNumber()
+-             << " of file " << is.name()
+-             << exit(FatalIOError);
+-     }
+- 
+-     // Check stream is still OK
+-     if (!is.good())
+-     {
+-         FatalIOErrorInFunction(is)
+-             << " stream failure while reading header"
+-             << " on line " << is.lineNumber()
+-             << " of file " << is.name()    
+-             << exit(FatalIOError);
+-     }
+-}
+-
+-
+-Foam::List<Foam::face> Foam::reconstructRegionalMesh::readFaceList
+-(
+-    const fileName path
+-)
+-{
+-    // Create an IFStream object
+-    IFstream is(path);
+-    readHeader(is);
+-    
+-    if (is.format() == IOstream::streamFormat::BINARY)
+-    {
+-        List<face> L;
+-        
+-        // Read compact
+-        const labelList start(is);
+-        const List<label> elems(is);
+-    
+-        // Convert
+-        L.setSize(start.size()-1);
+-    
+-        forAll(L, i)
+-        {
+-            face& subList = L[i];
+-    
+-            label index = start[i];
+-            subList.setSize(start[i+1] - index);
+-    
+-            forAll(subList, j)
+-            {
+-                subList[j] = elems[index++];
+-            }
+-        }
+-        
+-        return L;
+-    }
+-    else
+-        return List<face>(is);
+-}
+-
+-void Foam::reconstructRegionalMesh::fileHandlerControl::setUncollated()
+-{
+-    // Store old file handler type
+-    if (isA<fileOperations::masterUncollatedFileOperation>(fileHandler()))
+-        oldFileHandlerType = "collated";
+-    else
+-        oldFileHandlerType = "uncollated";
+-
+-    // For the generation of the partial mesh the uncollated file opteration 
+-    // has to be used, as otherwise the MPI gets stuck calling an allGather()
+-    fileOperation::fileHandlerPtr_ = fileOperation::New("uncollated",false);
+-    #if (OF_FORK_VERSION >= 2006 )
+-        fileOperation::fileHandler(std::move(fileOperation::fileHandlerPtr_));
+-    #else
+-        fileHandler(fileOperation::fileHandlerPtr_);
+-    #endif
+-}
+-
+-
+-void Foam::reconstructRegionalMesh::fileHandlerControl::reset()
+-{
+-    // Reset file handler to default
+-    fileOperation::fileHandlerPtr_ = fileOperation::New(oldFileHandlerType,false);
+-    #if (OF_FORK_VERSION >= 2006 )
+-        fileOperation::fileHandler(std::move(fileOperation::fileHandlerPtr_));
+-    #else
+-        fileHandler(fileOperation::fileHandlerPtr_);
+-    #endif
+-}
+-
+-Foam::reconstructRegionalMesh::fileHandlerControl::~fileHandlerControl()
+-{
+-    // call reset before destruction
+-    reset();
++    return autoPtr<fvMesh>(nullptr);
+ }
+diff --git a/libWENOEXT/WENOBase/reconstructRegionalMesh.H b/libWENOEXT/WENOBase/reconstructRegionalMesh.H
+index 45f56b7..36552e1 100644
+--- a/libWENOEXT/WENOBase/reconstructRegionalMesh.H
++++ b/libWENOEXT/WENOBase/reconstructRegionalMesh.H
+@@ -1,49 +1,24 @@
+ /*---------------------------------------------------------------------------*\
+-       ██╗    ██╗███████╗███╗   ██╗ ██████╗     ███████╗██╗  ██╗████████╗
+-       ██║    ██║██╔════╝████╗  ██║██╔═══██╗    ██╔════╝╚██╗██╔╝╚══██╔══╝
+-       ██║ █╗ ██║█████╗  ██╔██╗ ██║██║   ██║    █████╗   ╚███╔╝    ██║   
+-       ██║███╗██║██╔══╝  ██║╚██╗██║██║   ██║    ██╔══╝   ██╔██╗    ██║   
+-       ╚███╔███╔╝███████╗██║ ╚████║╚██████╔╝    ███████╗██╔╝ ██╗   ██║   
+-        ╚══╝╚══╝ ╚══════╝╚═╝  ╚═══╝ ╚═════╝     ╚══════╝╚═╝  ╚═╝   ╚═╝   
+--------------------------------------------------------------------------------                                                                                                                                                  
+ License
+-    This file is part of WENO Ext.
+-
+-    WENO Ext is free software: you can redistribute it and/or modify it
+-    under the terms of the GNU General Public License as published by
+-    the Free Software Foundation, either version 3 of the License, or
+-    (at your option) any later version.
+-
+-    WENO Ext is distributed in the hope that it will be useful, but WITHOUT
+-    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+-    FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+-    for more details.
+-
+-    You should have received a copy of the GNU General Public License
+-    along with  WENO Ext.  If not, see <http://www.gnu.org/licenses/>.
++    This file is part of WENO Ext library.  GPL v3 or later.
+ 
+ Description
+-    Reconstruct regional mesh.
+-    Bases on reconstructParMesh.C of OpenFOAM 
++    OF-13 PORT (2026-08-19): slimmed interface.  The original header pulled
++    polyMeshAdder/faceCoupleInfo/fvMeshAdder for the geometric processor-mesh
++    stitching; that constructor family was removed upstream and the parallel
++    halo reconstruction is not yet ported (see reconstructRegionalMesh.C --
++    serial call paths never reach it).
+ 
+ SourceFiles
+     reconstructRegionalMesh.C
+-
+-Author
+-    Jan Wilhelm Gärtner <jan.gaertner@outlook.de> Copyright (C) 2020
+-
+ \*---------------------------------------------------------------------------*/
+ 
+-#include "IOobjectList.H"
+-#include "labelIOList.H"
+-#include "processorPolyPatch.H"
+-#include "mapAddedPolyMesh.H"
+-#include "polyMeshAdder.H"
+-#include "faceCoupleInfo.H"
+-#include "fvMeshAdder.H"
+-#include "polyTopoChange.H"
+-#include "extrapolatedCalculatedFvPatchFields.H"
+-#include "IFstream.H"
++#ifndef reconstructRegionalMesh_H
++#define reconstructRegionalMesh_H
++
++#include "fvMesh.H"
++#include "labelList.H"
++#include "autoPtr.H"
+ #include "codeRules.H"
+ 
+ namespace Foam
+@@ -51,114 +26,17 @@ namespace Foam
+ 
+ namespace reconstructRegionalMesh
+ {
+-    //- Reconsturct mesh depending on processor list
++    //- Reconstruct mesh depending on processor list
++    //  (OF-13 port: aborts -- parallel halo reconstruction unported)
+     autoPtr<fvMesh> reconstruct
+     (
+         const labelList& processorList,
+         const labelList& sendToProcessorList,
+         const fvMesh& localMesh
+     );
+-    
+-    //- Get the bounds of the current domain 
+-    boundBox procBounds
+-    (
+-        const labelList processorList,
+-        const List<pointField>& allPoints
+-    );
+-    
+-    //- Add two mesh objects together 
+-    autoPtr<mapAddedPolyMesh> add
+-    (
+-        fvMesh& mesh0,
+-        const fvMesh& mesh1,
+-        const faceCoupleInfo& coupleInfo,
+-        const bool validBoundary
+-    );
+- 
+-    //- Get the points and faces of neighbouring processor meshes
+-    void getMeshInformation(
+-        List<faceList>& allFaces,
+-        List<pointField>& allPoints,
+-        List<labelList>& allOwner,
+-        List<labelList>& allNeighbours,
+-        const labelList& processorList,
+-        const labelList& sendToProcessorList,
+-        const fvMesh& mesh
+-    );
+-
+-    //- Get the patch type, size, start index etc
+-    void getPatchInformation(
+-        List<wordList>& allPatchNames,
+-        List<labelList>& allPatchSize,
+-        List<labelList>& allStart,
+-        List<labelList>& allIndex,
+-        const labelList& processorList,
+-        const labelList& sendToProcessorList,
+-        const fvMesh& mesh
+-    );
+- 
+-    // ------------------------------------------------------------------------
+-    // Depricated functions 
+-    // Required to read processor mesh from hard drive
+-    
+-        //- Constructs the local path to the file of processor proci
+-        fileName localPath
+-        (
+-            const fvMesh& localMesh, 
+-            const label proci,
+-            const fileName file
+-        );
+-        
+-        //- Read the header of a IO file
+-        void readHeader(Istream& is);
+-
+-        //- Read face lists 
+-        //  Requires special handling in this case 
+-        List<face> readFaceList
+-        (
+-            const fileName path
+-        );
+-
+-        //- Read a Field<Type> from a local path
+-        template<class Type>
+-        Field<Type> readField(const fileName path)
+-        {
+-            // Create an IFStream object
+-            IFstream is(path);      
+-            readHeader(is);
+-            return Field<Type>(is);
+-        }
+-        
+-        //- Read a list from a local path
+-        template<class Type>
+-        List<Type> readList(const fileName path)
+-        {
+-            // Create an IFStream object
+-            IFstream is(path);
+-            readHeader(is);
+-            
+-            return List<Type>(is);
+-        }
+-            
+-        // Class to set the correct fileHandler
+-        class fileHandlerControl
+-        {
+-            private:
+-                word oldFileHandlerType;
+-
+-            public:
+ 
+-                fileHandlerControl() = default;
+-                
+-                ~fileHandlerControl();
+-                
+-                // Set the file hander to uncollated
+-                void setUncollated();
++} // End namespace reconstructRegionalMesh
+ 
+-                // Reset the file handler to the old type
+-                void reset();
+-        };
+-        
+-}
++} // End namespace Foam
+ 
+-}
++#endif
+diff --git a/libWENOEXT/WENOUpwindFit/WENOUpwindFit.C b/libWENOEXT/WENOUpwindFit/WENOUpwindFit.C
+index c5d507f..4007a71 100644
+--- a/libWENOEXT/WENOUpwindFit/WENOUpwindFit.C
++++ b/libWENOEXT/WENOUpwindFit/WENOUpwindFit.C
+@@ -39,9 +39,9 @@ template<class Type>
+ void Foam::WENOUpwindFit<Type>::calcLimiter
+ (
+     const fvMesh& mesh,
+-    const GeometricField<Type, fvPatchField, volMesh>& vf,
++    const VolField<Type>& vf,
+     const Field<Field<Type> >& coeffsWeighted,
+-    GeometricField<Type, fvsPatchField, surfaceMesh>& tsfP
++    SurfaceField<Type>& tsfP
+ )    const
+ {
+     // Limit the explicit correction if the polynome at the face would exceed
+@@ -62,12 +62,12 @@ void Foam::WENOUpwindFit<Type>::calcLimiter
+     // --------------- Calculate theta ----------------------------------------
+     // ------------------------------------------------------------------------
+     
+-    GeometricField<Type, fvsPatchField, surfaceMesh> theta
++    SurfaceField<Type> theta
+     (
+         IOobject
+         (
+             "theta",
+-            mesh.time().timeName(),
++            mesh.time().name(),
+             mesh,
+             IOobject::NO_READ,
+             IOobject::NO_WRITE,
+@@ -108,7 +108,7 @@ void Foam::WENOUpwindFit<Type>::calcLimiter
+     }
+ 
+     // Calculate theta for boundary:
+-    typename GeometricField<Type, fvsPatchField, surfaceMesh>::
++    typename SurfaceField<Type>::
+     #ifdef FOAM_NEW_GEOMFIELD_RULES
+         Boundary& btheta = theta.boundaryFieldRef();
+     #else 
+@@ -210,10 +210,10 @@ void Foam::WENOUpwindFit<Type>::calcLimiter
+ 
+ 
+ template<class Type>
+-Foam::tmp<Foam::GeometricField<Type, Foam::fvsPatchField, Foam::surfaceMesh> >
++Foam::tmp<Foam::SurfaceField<Type> >
+ Foam::WENOUpwindFit<Type>::correction
+ (
+-    const GeometricField<Type, fvPatchField, volMesh>& vf
++    const VolField<Type>& vf
+ ) const
+ {
+     const fvMesh& mesh = this->mesh();
+@@ -227,14 +227,14 @@ Foam::WENOUpwindFit<Type>::correction
+     const labelUList& P = mesh.owner();
+     const labelUList& N = mesh.neighbour();
+ 
+-    tmp<GeometricField<Type, fvsPatchField, surfaceMesh> > tsfCorrP
++    tmp<SurfaceField<Type> > tsfCorrP
+     (
+-        new GeometricField<Type, fvsPatchField, surfaceMesh>
++        new SurfaceField<Type>
+         (
+             IOobject
+             (
+                 "tvfP",
+-                mesh.time().timeName(),
++                mesh.time().name(),
+                 mesh,
+                 IOobject::NO_READ,
+                 IOobject::NO_WRITE,
+@@ -244,7 +244,7 @@ Foam::WENOUpwindFit<Type>::correction
+             dimensioned<Type>(vf.name(), vf.dimensions(), pTraits<Type>::zero)
+         )
+     );
+-    GeometricField<Type, fvsPatchField, surfaceMesh>& tsfP =
++    SurfaceField<Type>& tsfP =
+     #ifdef FOAM_NEW_TMP_RULES
+         tsfCorrP.ref();
+     #else 
+@@ -327,7 +327,7 @@ template<class Type>
+ void Foam::WENOUpwindFit<Type>::swapData
+ (
+     const fvMesh& mesh,
+-    typename GeometricField<Type, fvsPatchField, surfaceMesh>::
++    typename SurfaceField<Type>::
+     #ifdef FOAM_NEW_GEOMFIELD_RULES
+         Boundary& btsf
+     #else 
+@@ -389,28 +389,28 @@ template<class Type>
+ void Foam::WENOUpwindFit<Type>::coupledRiemannSolver
+ (
+     const fvMesh& mesh,
+-    GeometricField<Type, fvsPatchField, surfaceMesh>& tsfP,
+-    const GeometricField<Type, fvPatchField, volMesh>& vf,
++    SurfaceField<Type>& tsfP,
++    const VolField<Type>& vf,
+     const Field<Field<Type> >& coeffsWeighted
+ )   const
+ {
+     const fvPatchList& patches = mesh.boundary();
+ 
+-    typename GeometricField<Type, fvsPatchField, surfaceMesh>::
++    typename SurfaceField<Type>::
+     #ifdef FOAM_NEW_GEOMFIELD_RULES
+         Boundary& btsfP = tsfP.boundaryFieldRef();
+     #else 
+         GeometricBoundaryField& btsfP = tsfP.boundaryField();
+     #endif
+ 
+-    tmp<GeometricField<Type, fvsPatchField, surfaceMesh> > tsfUDCoupled
++    tmp<SurfaceField<Type> > tsfUDCoupled
+     (
+-        new GeometricField<Type, fvsPatchField, surfaceMesh>
++        new SurfaceField<Type>
+         (
+             IOobject
+             (
+                 "tsfUDCoupled",
+-                mesh.time().timeName(),
++                mesh.time().name(),
+                 mesh,
+                 IOobject::NO_READ,
+                 IOobject::NO_WRITE,
+@@ -421,14 +421,14 @@ void Foam::WENOUpwindFit<Type>::coupledRiemannSolver
+                 (vf.name(), vf.dimensions(), pTraits<Type>::zero)
+         )
+     );
+-    GeometricField<Type, fvsPatchField, surfaceMesh>& tsfUD =
++    SurfaceField<Type>& tsfUD =
+     #ifdef FOAM_NEW_TMP_RULES
+         tsfUDCoupled.ref();
+     #else 
+         tsfUDCoupled();
+     #endif
+ 
+-    typename GeometricField<Type, fvsPatchField, surfaceMesh>::
++    typename SurfaceField<Type>::
+     #ifdef FOAM_NEW_GEOMFIELD_RULES
+         Boundary& btsfUD = tsfUD.boundaryFieldRef();
+     #else 
+@@ -503,7 +503,7 @@ void Foam::WENOUpwindFit<Type>::coupledRiemannSolver
+             {
+                 #ifdef FOAM_NEW_COUPLED_PATCHES
+                 const label neighbPatchID = refCast<const cyclicFvPatch>
+-                        (patches[patchI]).nbrPatchID();
++                        (patches[patchI]).nbrPatch().index();
+                 #else 
+                 const label neighbPatchID = refCast<const cyclicFvPatch>
+                         (patches[patchI]).neighbPatchID();
+@@ -516,7 +516,7 @@ void Foam::WENOUpwindFit<Type>::coupledRiemannSolver
+                 }
+             }
+         }
+-        else if (isA<cyclicAMIFvPatch>(patches[patchI]))
++        else if (false)  // OF-13 port: cyclicAMI is ESI-only; org-13 uses nonConformalCyclic (unhandled here, as upstream)
+         {
+             /*************************** NOTE *******************************
+             * Currently not used as it is not quite clear how 
+diff --git a/libWENOEXT/WENOUpwindFit/WENOUpwindFit.H b/libWENOEXT/WENOUpwindFit/WENOUpwindFit.H
+index f74cf29..906c570 100644
+--- a/libWENOEXT/WENOUpwindFit/WENOUpwindFit.H
++++ b/libWENOEXT/WENOUpwindFit/WENOUpwindFit.H
+@@ -94,7 +94,7 @@ class WENOUpwindFit
+         void swapData
+         (
+             const fvMesh& mesh,
+-            typename GeometricField<Type, fvsPatchField, surfaceMesh>::
++            typename SurfaceField<Type>::
+             #ifdef FOAM_NEW_GEOMFIELD_RULES
+                 Boundary& btsf
+             #else 
+@@ -105,8 +105,8 @@ class WENOUpwindFit
+         void coupledRiemannSolver
+         (
+             const fvMesh& mesh,
+-            GeometricField<Type, fvsPatchField, surfaceMesh>& tsfP,
+-            const GeometricField<Type, fvPatchField, volMesh>& vf,
++            SurfaceField<Type>& tsfP,
++            const VolField<Type>& vf,
+             const Field<Field<Type> >& coeffsWeighted
+         )   const;
+ 
+@@ -122,9 +122,9 @@ class WENOUpwindFit
+         void calcLimiter
+         (
+             const fvMesh& mesh,
+-            const GeometricField<Type, fvPatchField, volMesh>& vf,
++            const VolField<Type>& vf,
+             const Field<Field<Type> >& coeffsWeighted,
+-            GeometricField<Type, fvsPatchField, surfaceMesh>& tsfP
++            SurfaceField<Type>& tsfP
+         ) const;
+ 
+ 
+@@ -139,7 +139,7 @@ class WENOUpwindFit
+                     IOobject
+                     (
+                         "zeroFlux",
+-                        this->mesh().time().timeName(),
++                        this->mesh().time().name(),
+                         this->mesh()
+                     ),
+                     this->mesh(),
+@@ -222,7 +222,7 @@ public:
+         //- Return the interpolation weighting factors for implicit part
+         tmp<surfaceScalarField> weights
+         (
+-            const GeometricField<Type, fvPatchField, volMesh>& vf
++            const VolField<Type>& vf
+         ) const
+         {
+             return pos(faceFlux_);
+@@ -235,10 +235,10 @@ public:
+         }
+ 
+         //- Return the explicit correction to the face-interpolate
+-        virtual tmp<GeometricField<Type, fvsPatchField, surfaceMesh> >
++        virtual tmp<SurfaceField<Type> >
+         correction
+         (
+-            const GeometricField<Type, fvPatchField, volMesh>& vf
++            const VolField<Type>& vf
+         ) const;
+ };
+ // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+diff --git a/libWENOEXT/WENOUpwindFit01/WENOUpwindFit01.C b/libWENOEXT/WENOUpwindFit01/WENOUpwindFit01.C
+index c55bbf0..5f9335f 100644
+--- a/libWENOEXT/WENOUpwindFit01/WENOUpwindFit01.C
++++ b/libWENOEXT/WENOUpwindFit01/WENOUpwindFit01.C
+@@ -38,9 +38,9 @@ template<class Type>
+ void Foam::WENOUpwindFit01<Type>::calcLimiter
+ (
+     const fvMesh& mesh,
+-    const GeometricField<Type, fvPatchField, volMesh>& vf,
++    const VolField<Type>& vf,
+     const Field<Field<Type> >& coeffsWeighted,
+-    GeometricField<Type, fvsPatchField, surfaceMesh>& tsfP
++    SurfaceField<Type>& tsfP
+ )    const
+ {
+     const Field<Type>& vfI = vf.internalField();
+@@ -213,10 +213,10 @@ void Foam::WENOUpwindFit01<Type>::calcLimiter
+ 
+ 
+ template<class Type>
+-Foam::tmp<Foam::GeometricField<Type, Foam::fvsPatchField, Foam::surfaceMesh> >
++Foam::tmp<Foam::SurfaceField<Type> >
+ Foam::WENOUpwindFit01<Type>::correction
+ (
+-    const GeometricField<Type, fvPatchField, volMesh>& vf
++    const VolField<Type>& vf
+ ) const
+ {
+     const fvMesh& mesh = this->mesh();
+@@ -230,14 +230,14 @@ Foam::WENOUpwindFit01<Type>::correction
+     const labelUList& P = mesh.owner();
+     const labelUList& N = mesh.neighbour();
+ 
+-    tmp<GeometricField<Type, fvsPatchField, surfaceMesh> > tsfCorrP
++    tmp<SurfaceField<Type> > tsfCorrP
+     (
+-        new GeometricField<Type, fvsPatchField, surfaceMesh>
++        new SurfaceField<Type>
+         (
+             IOobject
+             (
+                 "tvfP",
+-                mesh.time().timeName(),
++                mesh.time().name(),
+                 mesh,
+                 IOobject::NO_READ,
+                 IOobject::NO_WRITE,
+@@ -247,7 +247,7 @@ Foam::WENOUpwindFit01<Type>::correction
+             dimensioned<Type>(vf.name(), vf.dimensions(), pTraits<Type>::zero)
+         )
+     );
+-    GeometricField<Type, fvsPatchField, surfaceMesh>& tsfP =
++    SurfaceField<Type>& tsfP =
+     #ifdef FOAM_NEW_TMP_RULES
+         tsfCorrP.ref();
+     #else 
+@@ -329,7 +329,7 @@ template<class Type>
+ void Foam::WENOUpwindFit01<Type>::swapData
+ (
+     const fvMesh& mesh,
+-    typename GeometricField<Type, fvsPatchField, surfaceMesh>::
++    typename SurfaceField<Type>::
+     #ifdef FOAM_NEW_GEOMFIELD_RULES
+         Boundary& btsf
+     #else 
+@@ -391,28 +391,28 @@ template<class Type>
+ void Foam::WENOUpwindFit01<Type>::coupledRiemannSolver
+ (
+     const fvMesh& mesh,
+-    GeometricField<Type, fvsPatchField, surfaceMesh>& tsfP,
+-    const GeometricField<Type, fvPatchField, volMesh>& vf,
++    SurfaceField<Type>& tsfP,
++    const VolField<Type>& vf,
+     const Field<Field<Type> >& coeffsWeighted
+ )   const
+ {
+     const fvPatchList& patches = mesh.boundary();
+ 
+-    typename GeometricField<Type, fvsPatchField, surfaceMesh>::
++    typename SurfaceField<Type>::
+     #ifdef FOAM_NEW_GEOMFIELD_RULES
+         Boundary& btsfP = tsfP.boundaryFieldRef();
+     #else 
+         GeometricBoundaryField& btsfP = tsfP.boundaryField();
+     #endif
+ 
+-    tmp<GeometricField<Type, fvsPatchField, surfaceMesh> > tsfUDCoupled
++    tmp<SurfaceField<Type> > tsfUDCoupled
+     (
+-        new GeometricField<Type, fvsPatchField, surfaceMesh>
++        new SurfaceField<Type>
+         (
+             IOobject
+             (
+                 "tsfUDCoupled",
+-                mesh.time().timeName(),
++                mesh.time().name(),
+                 mesh,
+                 IOobject::NO_READ,
+                 IOobject::NO_WRITE,
+@@ -423,14 +423,14 @@ void Foam::WENOUpwindFit01<Type>::coupledRiemannSolver
+                 (vf.name(), vf.dimensions(), pTraits<Type>::zero)
+         )
+     );
+-    GeometricField<Type, fvsPatchField, surfaceMesh>& tsfUD =
++    SurfaceField<Type>& tsfUD =
+     #ifdef FOAM_NEW_TMP_RULES
+         tsfUDCoupled.ref();
+     #else 
+         tsfUDCoupled();
+     #endif
+ 
+-    typename GeometricField<Type, fvsPatchField, surfaceMesh>::
++    typename SurfaceField<Type>::
+     #ifdef FOAM_NEW_GEOMFIELD_RULES
+         Boundary& btsfUD = tsfUD.boundaryFieldRef();
+     #else 
+@@ -505,7 +505,7 @@ void Foam::WENOUpwindFit01<Type>::coupledRiemannSolver
+             {
+                 #ifdef FOAM_NEW_COUPLED_PATCHES
+                 const label neighbPatchID = refCast<const cyclicFvPatch>
+-                        (patches[patchI]).nbrPatchID();
++                        (patches[patchI]).nbrPatch().index();
+                 #else 
+                 const label neighbPatchID = refCast<const cyclicFvPatch>
+                         (patches[patchI]).neighbPatchID();
+@@ -518,7 +518,7 @@ void Foam::WENOUpwindFit01<Type>::coupledRiemannSolver
+                 }
+             }
+         }
+-        else if (isA<cyclicAMIFvPatch>(patches[patchI]))
++        else if (false)  // OF-13 port: cyclicAMI is ESI-only; org-13 uses nonConformalCyclic (unhandled here, as upstream)
+         {
+             /*************************** NOTE *******************************
+             * Currently not used as it is not quite clear how 
+diff --git a/libWENOEXT/WENOUpwindFit01/WENOUpwindFit01.H b/libWENOEXT/WENOUpwindFit01/WENOUpwindFit01.H
+index 29c41ed..0ef2915 100644
+--- a/libWENOEXT/WENOUpwindFit01/WENOUpwindFit01.H
++++ b/libWENOEXT/WENOUpwindFit01/WENOUpwindFit01.H
+@@ -87,7 +87,7 @@ class WENOUpwindFit01
+         void swapData
+         (
+             const fvMesh& mesh,
+-            typename GeometricField<Type, fvsPatchField, surfaceMesh>::
++            typename SurfaceField<Type>::
+             #ifdef FOAM_NEW_GEOMFIELD_RULES
+                 Boundary& btsf
+             #else 
+@@ -98,8 +98,8 @@ class WENOUpwindFit01
+         void coupledRiemannSolver
+         (
+             const fvMesh& mesh,
+-            GeometricField<Type, fvsPatchField, surfaceMesh>& tsfP,
+-            const GeometricField<Type, fvPatchField, volMesh>& vf,
++            SurfaceField<Type>& tsfP,
++            const VolField<Type>& vf,
+             const Field<Field<Type> >& coeffsWeighted
+         )   const;
+ 
+@@ -115,9 +115,9 @@ class WENOUpwindFit01
+         void calcLimiter
+         (
+             const fvMesh& mesh,
+-            const GeometricField<Type, fvPatchField, volMesh>& vf,
++            const VolField<Type>& vf,
+             const Field<Field<Type> >& coeffsWeighted,
+-            GeometricField<Type, fvsPatchField, surfaceMesh>& tsfP
++            SurfaceField<Type>& tsfP
+         ) const;
+ 
+ 
+@@ -132,7 +132,7 @@ class WENOUpwindFit01
+                     IOobject
+                     (
+                         "zeroFlux",
+-                        this->mesh().time().timeName(),
++                        this->mesh().time().name(),
+                         this->mesh()
+                     ),
+                     this->mesh(),
+@@ -212,7 +212,7 @@ public:
+         //- Return the interpolation weighting factors for implicit part
+         tmp<surfaceScalarField> weights
+         (
+-            const GeometricField<Type, fvPatchField, volMesh>& vf
++            const VolField<Type>& vf
+         ) const
+         {
+             return pos(faceFlux_);
+@@ -225,10 +225,10 @@ public:
+         }
+ 
+         //- Return the explicit correction to the face-interpolate
+-        virtual tmp<GeometricField<Type, fvsPatchField, surfaceMesh> >
++        virtual tmp<SurfaceField<Type> >
+         correction
+         (
+-            const GeometricField<Type, fvPatchField, volMesh>& vf
++            const VolField<Type>& vf
+         ) const;
+ };
+ // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
