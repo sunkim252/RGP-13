@@ -287,6 +287,26 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
                 );
             }
         }
+        if (!ladDeltaMin_.valid())
+        {
+            // smallest INTERNAL-face centre-to-centre spacing per cell
+            // (empty/boundary-only directions excluded)
+            ladDeltaMin_.set(new scalarField(mesh.nCells(), great));
+            scalarField& dm = ladDeltaMin_();
+
+            const labelUList& own = mesh.owner();
+            const labelUList& nei = mesh.neighbour();
+            const surfaceScalarField deltaFI(mag(mesh.delta()));
+            const scalarField& df = deltaFI.primitiveField();
+
+            forAll(own, facei)
+            {
+                dm[own[facei]] = min(dm[own[facei]], df[facei]);
+                dm[nei[facei]] = min(dm[nei[facei]], df[facei]);
+            }
+        }
+        const scalarField& deltaMin = ladDeltaMin_();
+
         const PtrList<surfaceScalarField>& wDir = ladWDir_();
         const PtrList<volScalarField>& DeltaDir = ladDeltaDir_();
 
@@ -371,6 +391,22 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
                 tDart.ref().boundaryFieldRef()[patchi] == 0.0;
             }
 
+            // Explicit-stability cap on the ARTIFICIAL diffusivity
+            // (numerics hygiene on an artificial device): at clamp-
+            // saturated front cells the TK formula can spiral (measured
+            // rho_art 8e9 m^2/s in the 2-D vortex blow-up).  The cap
+            // (diffusion number 0.45 on the smallest internal spacing)
+            // sits ABOVE normal LAD operation (~0.3 measured) and binds
+            // only at pathological cells.
+            {
+                scalarField& D = tDart.ref().primitiveFieldRef();
+                const scalar rdt = 0.45/dt.value();
+                forAll(D, i)
+                {
+                    D[i] = min(D[i], rdt*sqr(deltaMin[i]));
+                }
+            }
+
             Info<< "PEQSI LAD: rho_art max = "
                 << gMax(tDart().primitiveField()) << " m^2/s" << endl;
         }
@@ -394,6 +430,21 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
             forAll(tKappaArt.ref().boundaryFieldRef(), patchi)
             {
                 tKappaArt.ref().boundaryFieldRef()[patchi] == 0.0;
+            }
+
+            // Same explicit-stability cap on kappa_art/(rho cp)
+            // (cp from the previous step's coefficient evaluation;
+            // measured kappa_art 1e47 W/(m K) in the blow-up)
+            if (cpPrev_.size() == mesh.nCells())
+            {
+                scalarField& K = tKappaArt.ref().primitiveFieldRef();
+                const scalarField& rhoNi = rhoN_().primitiveField();
+                const scalar rdt = 0.45/dt.value();
+                forAll(K, i)
+                {
+                    K[i] =
+                        min(K[i], rdt*sqr(deltaMin[i])*rhoNi[i]*cpPrev_[i]);
+                }
             }
 
             Info<< "PEQSI LAD: kappa_art max = "

@@ -150,6 +150,10 @@ protected:
         //- Guard so the acoustic substep runs once per time step
         label acousticTimeIndex_;
 
+        //- Previous-step cp (saved by updateCoefficients; used by the
+        //  LAD explicit-stability cap)
+        mutable scalarField cpPrev_;
+
         //- Cached SGS-active flag (simulationType != laminar),
         //  resolved once
         mutable label sgsActive_ = -1;
@@ -158,6 +162,11 @@ protected:
         //  face weights (n.e_l)^2 and per-cell directional spacings
         mutable autoPtr<PtrList<surfaceScalarField>> ladWDir_;
         mutable autoPtr<PtrList<volScalarField>> ladDeltaDir_;
+
+        //- Per-cell smallest INTERNAL-face spacing (great where a
+        //  direction has no internal faces, e.g. the empty direction):
+        //  sets the LAD explicit-stability cap
+        mutable autoPtr<scalarField> ladDeltaMin_;
 
         //- Per-phase cumulative CPU-time accounting (peqsiTimers switch):
         //  setup, sgs, lad, rk3, helmAsm, helmSolve, updates, newton,

@@ -52,6 +52,7 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
     const auto tCv = thermo_.Cv();
 
     const scalarField& cp = tCp().primitiveField();
+    cpPrev_ = cp;   // reused by the LAD stability cap next step
     const scalarField& cv = tCv().primitiveField();
     const scalarField& psi = thermo_.psi().primitiveField();
     const scalarField& T = thermo_.T().primitiveField();
@@ -142,6 +143,7 @@ void Foam::solvers::peqsiFluid::invertTemperature()
         // profiling showed the full-field SRK sweep per iteration
         // dominating the closure cost.
         labelList active;
+        label nSaturated_ = 0;
 
         for (; iter < 60 && maxRel > tol; ++iter)
         {
@@ -157,7 +159,21 @@ void Foam::solvers::peqsiFluid::invertTemperature()
                 {
                     scalar dT = (hf[i] - hkf[i])/max(cpf[i], small);
                     dT = min(max(dT, -dTmax), dTmax);
-                    Tf[i] = min(max(Tf[i] + dT, Tmin), Tmax);
+                    const scalar Tnew = Tf[i] + dT;
+
+                    // Saturated at a clamp: the transported h lies
+                    // outside the EOS window (front undershoot) -- pin
+                    // and treat as converged instead of oscillating for
+                    // 60 iterations (measured 934 warnings before the
+                    // 2-D vortex blow-up)
+                    if ((Tnew <= Tmin && dT < 0) || (Tnew >= Tmax && dT > 0))
+                    {
+                        Tf[i] = Tnew <= Tmin ? Tmin : Tmax;
+                        nSaturated_++;
+                        continue;
+                    }
+
+                    Tf[i] = min(max(Tnew, Tmin), Tmax);
                     const scalar rel = mag(dT)/max(Tf[i], small);
                     if (rel > tol) nextActive.append(i);
                     maxRel = max(maxRel, rel);
@@ -178,7 +194,16 @@ void Foam::solvers::peqsiFluid::invertTemperature()
                     const label i = active[k];
                     scalar dT = (hf[i] - hkf[k])/max(cpf[i], small);
                     dT = min(max(dT, -dTmax), dTmax);
-                    Tf[i] = min(max(Tf[i] + dT, Tmin), Tmax);
+                    const scalar Tnew = Tf[i] + dT;
+
+                    if ((Tnew <= Tmin && dT < 0) || (Tnew >= Tmax && dT > 0))
+                    {
+                        Tf[i] = Tnew <= Tmin ? Tmin : Tmax;
+                        nSaturated_++;
+                        continue;
+                    }
+
+                    Tf[i] = min(max(Tnew, Tmin), Tmax);
                     const scalar rel = mag(dT)/max(Tf[i], small);
                     if (rel > tol) nextActive.append(i);
                     maxRel = max(maxRel, rel);
@@ -189,6 +214,13 @@ void Foam::solvers::peqsiFluid::invertTemperature()
             reduce(maxRel, maxOp<scalar>());
         }
         Tw.correctBoundaryConditions();
+
+        if (nSaturated_ > 0)
+        {
+            reduce(nSaturated_, sumOp<label>());
+            Info<< "PEQSI thermo closure: " << nSaturated_
+                << " clamp-saturated Newton cell-iterations" << endl;
+        }
 
         if (maxRel > tol)
         {
