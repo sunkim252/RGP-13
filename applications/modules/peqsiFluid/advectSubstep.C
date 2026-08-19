@@ -136,6 +136,13 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
     // Prandtl number 0.7 for the subgrid heat flux).  The base class's
     // momentumTransport is corrected at the n-state; with
     // simulationType laminar nut == 0 and this is a no-op.
+    if (sgsActive_ < 0)
+    {
+        sgsActive_ =
+            word(momentumTransport->lookup("simulationType")) != "laminar";
+    }
+
+    if (sgsActive_)
     {
         momentumTransport->correct();
 
@@ -324,11 +331,15 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
             return tSum;
         };
 
-        // sound speed c = sqrt(gamma/psi)
+        // sound speed from the coefficient fields already in hand:
+        // c^2 = -beta/((1-alpha) rho)  (WKK App. D identity, verified to
+        // 5e-16 at every step) -- thermo.gamma() would re-run BOTH the
+        // Cp and Cv SRK sweeps every step just for this
         const volScalarField c
         (
             "PEQSI:c",
-            sqrt(thermo_.gamma()()/thermo_.psi())
+            sqrt(max(-beta_/((1.0 - alpha_)*rhoN_()),
+                     dimensionedScalar(sqr(dimVelocity), 0)))
         );
 
         if (ladCoeff > 0)
@@ -482,7 +493,13 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
         Q.correctBoundaryConditions();
     };
 
-    // One SSP-RK3 stage: q <- cOld*qn + cNew*(q + dt*L(q))
+    // One SSP-RK3 stage: q <- cOld*qn + cNew*(q + dt*L(q)).
+    // The updates are FUSED into primitive loops (internal + physical
+    // boundaries): the field-expression form allocated ~25 full-field
+    // temporaries per stage, ~30% of the non-WENO substep cost.  The
+    // per-element arithmetic and its order are identical.
+    const scalar dtv = dt.value();
+
     auto stage = [&](const scalar cOld, const scalar cNew)
     {
         packQ();
@@ -491,66 +508,118 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
             -uGrad(phiv, divPhiv, Q, "div(phiv,rho)")
         );
 
-        // restore the per-component dimensions lost to the carrier
-        volScalarField Lr
-        (
-            LQ.component(symmTensor::XX)
-           *dimensionedScalar(rho_.dimensions(), 1)
-        );
-        const volScalarField Lp
-        (
-            LQ.component(symmTensor::XY)
-           *dimensionedScalar(p_.dimensions(), 1)
-          + aL*Lh
-        );
-        volScalarField Lrh
-        (
-            LQ.component(symmTensor::XZ)
-           *dimensionedScalar(rho_.dimensions()*h_.dimensions(), 1)
-          + iL*Lh
-        );
-
-        // Lru = advective components (dimension-restored) + divTau
-        volVectorField Lru(divTau);
-        for (direction c = 0; c < 3; c++)
-        {
-            static const direction qc[3] =
-                {symmTensor::YY, symmTensor::YZ, symmTensor::ZZ};
-            Lru.replace
-            (
-                c,
-                (
-                    LQ.component(qc[c])
-                   *dimensionedScalar(rho_.dimensions()*dimVelocity, 1)
-                  + Lru.component(c)
-                )()
-            );
-        }
-
+        // LAD mass/energy diffusion increments (TK Eqs. 22, 24, 31 --
+        // see the comment block above)
+        tmp<volScalarField> tMassArt, tRhArt;
         if (tDart.valid())
         {
-            // TK Eq. (22): mass numerical diffusion
-            const volScalarField massArt(fvc::laplacian(tDart(), r));
-            Lr += massArt;
-            // TK Eq. (24): consistent momentum term, discretised as
-            // u^n * (mass increment) -- exact under velocity equilibrium
-            Lru += UN_()*massArt;
-            // TK Eq. (31) logic extended to the transported rho*h:
-            // diffuse the CONSERVED quantity with the same coefficient
-            // ("first derivative of rho*Yi, and NOT of Yi, because of
-            // the consistency with Eq. (22)").  At uniform h this is
-            // exactly h x (mass diffusion), so h is not diluted.
-            // Without it the mass LAD pours density into front cells
-            // with no matching enthalpy (TK never see this: their
-            // system transports NO energy -- T comes from EOS(rho, p)),
-            // measured as the T undershoot to 73.6 K at the jet front.
-            Lrh += fvc::laplacian(tDart(), rh);
+            tMassArt = fvc::laplacian(tDart(), r);
+            tRhArt = fvc::laplacian(tDart(), rh);
         }
 
-        r == cOld*rhoN_() + cNew*(r + dt*Lr);
-        ru == cOld*(rhoN_()*UN_()) + cNew*(ru + dt*Lru);
-        pw == cOld*pN_() + cNew*(pw + dt*Lp);
-        rh == cOld*(rhoN_()*hN_()) + cNew*(rh + dt*Lrh);
+        // ---- internal cells ----
+        {
+            const symmTensorField& LQi = LQ.primitiveField();
+            const scalarField& Lhi = Lh.primitiveField();
+            const scalarField& aLi = aL.primitiveField();
+            const scalarField& iLi = iL.primitiveField();
+            const vectorField& dTi = divTau.primitiveField();
+            const scalarField& rhoNi = rhoN_().primitiveField();
+            const vectorField& UNi = UN_().primitiveField();
+            const scalarField& pNi = pN_().primitiveField();
+            const scalarField& hNi = hN_().primitiveField();
+            const scalarField* mAi =
+                tMassArt.valid() ? &tMassArt().primitiveField() : nullptr;
+            const scalarField* rAi =
+                tRhArt.valid() ? &tRhArt().primitiveField() : nullptr;
+
+            scalarField& ri = r.primitiveFieldRef();
+            vectorField& rui = ru.primitiveFieldRef();
+            scalarField& pwi = pw.primitiveFieldRef();
+            scalarField& rhi = rh.primitiveFieldRef();
+
+            forAll(ri, i)
+            {
+                const symmTensor& l = LQi[i];
+
+                scalar Lr = l.xx();
+                const scalar Lp = l.xy() + aLi[i]*Lhi[i];
+                scalar Lrh = l.xz() + iLi[i]*Lhi[i];
+                vector Lru
+                (
+                    l.yy() + dTi[i].x(),
+                    l.yz() + dTi[i].y(),
+                    l.zz() + dTi[i].z()
+                );
+
+                if (mAi)
+                {
+                    Lr += (*mAi)[i];
+                    Lru += UNi[i]*(*mAi)[i];
+                    Lrh += (*rAi)[i];
+                }
+
+                ri[i] = cOld*rhoNi[i] + cNew*(ri[i] + dtv*Lr);
+                rui[i] = cOld*(rhoNi[i]*UNi[i]) + cNew*(rui[i] + dtv*Lru);
+                pwi[i] = cOld*pNi[i] + cNew*(pwi[i] + dtv*Lp);
+                rhi[i] = cOld*(rhoNi[i]*hNi[i]) + cNew*(rhi[i] + dtv*Lrh);
+            }
+        }
+
+        // ---- physical boundary values (read back by packQ and by the
+        //      boundary contributions of div/laplacian next stage) ----
+        forAll(r.boundaryFieldRef(), patchi)
+        {
+            if (r.boundaryField()[patchi].coupled()) continue;
+
+            const symmTensorField& LQb = LQ.boundaryField()[patchi];
+            const scalarField& Lhb = Lh.boundaryField()[patchi];
+            const scalarField& aLb = aL.boundaryField()[patchi];
+            const scalarField& iLb = iL.boundaryField()[patchi];
+            const vectorField& dTb = divTau.boundaryField()[patchi];
+            const scalarField& rhoNb = rhoN_().boundaryField()[patchi];
+            const vectorField& UNb = UN_().boundaryField()[patchi];
+            const scalarField& pNb = pN_().boundaryField()[patchi];
+            const scalarField& hNb = hN_().boundaryField()[patchi];
+            const scalarField* mAb =
+                tMassArt.valid()
+              ? &tMassArt().boundaryField()[patchi] : nullptr;
+            const scalarField* rAb =
+                tRhArt.valid()
+              ? &tRhArt().boundaryField()[patchi] : nullptr;
+
+            fvPatchScalarField& rb = r.boundaryFieldRef()[patchi];
+            fvPatchVectorField& rub = ru.boundaryFieldRef()[patchi];
+            fvPatchScalarField& pwb = pw.boundaryFieldRef()[patchi];
+            fvPatchScalarField& rhb = rh.boundaryFieldRef()[patchi];
+
+            forAll(rb, i)
+            {
+                const symmTensor& l = LQb[i];
+
+                scalar Lr = l.xx();
+                const scalar Lp = l.xy() + aLb[i]*Lhb[i];
+                scalar Lrh = l.xz() + iLb[i]*Lhb[i];
+                vector Lru
+                (
+                    l.yy() + dTb[i].x(),
+                    l.yz() + dTb[i].y(),
+                    l.zz() + dTb[i].z()
+                );
+
+                if (mAb)
+                {
+                    Lr += (*mAb)[i];
+                    Lru += UNb[i]*(*mAb)[i];
+                    Lrh += (*rAb)[i];
+                }
+
+                rb[i] = cOld*rhoNb[i] + cNew*(rb[i] + dtv*Lr);
+                rub[i] = cOld*(rhoNb[i]*UNb[i]) + cNew*(rub[i] + dtv*Lru);
+                pwb[i] = cOld*pNb[i] + cNew*(pwb[i] + dtv*Lp);
+                rhb[i] = cOld*(rhoNb[i]*hNb[i]) + cNew*(rhb[i] + dtv*Lrh);
+            }
+        }
 
         r.correctBoundaryConditions();
         ru.correctBoundaryConditions();
@@ -591,10 +660,6 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
 
     h_ = rh/r;
     h_.correctBoundaryConditions();
-
-    // Intermediate mass flux (diagnostics; rebuilt after the acoustic
-    // substep from the end-of-step state)
-    phi_ = fvc::flux(rho_*U_);
 
     mark(tPhase_[3]);
 }

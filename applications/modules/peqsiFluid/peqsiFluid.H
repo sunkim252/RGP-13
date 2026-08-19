@@ -150,6 +150,10 @@ protected:
         //- Guard so the acoustic substep runs once per time step
         label acousticTimeIndex_;
 
+        //- Cached SGS-active flag (simulationType != laminar),
+        //  resolved once
+        mutable label sgsActive_ = -1;
+
         //- Cached LAD directional geometry (static mesh): direction
         //  face weights (n.e_l)^2 and per-cell directional spacings
         mutable autoPtr<PtrList<surfaceScalarField>> ladWDir_;
