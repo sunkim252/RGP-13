@@ -114,11 +114,8 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
         completeField("PEQSI:mu", mesh, thermo_.mu())
     );
 
-    const volScalarField Lh
-    (
-        "PEQSI:Lh",
-        fvc::laplacian(kappa, thermo_.T())
-    );
+    // (L_h is assembled after the LAD block: TK Eq. 33 augments the
+    // conductivity with kappa_art)
 
     // Viscous stress divergence for the momentum substep (WKK Eq. 16),
     // explicit at the n-state.  Molecular part only for now; the LES
@@ -135,47 +132,128 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
     const volScalarField aL("PEQSI:aL", alpha_/(1.0 - alpha_));
     const volScalarField iL("PEQSI:iL", 1.0/(1.0 - alpha_));
 
-    // Localized artificial diffusivity, PAPER-FAITHFUL for the 2-D jet:
-    // PEQSI Sec. III B 2 uses the Terashima-Koshi LAD with a user
-    // coefficient of 0.002 ("to prevent the unphysical solutions because
-    // of the nonlinearity of the EoS").  Density-gradient-sensed form as
-    // in this project's fgmFluid implementation (Cook & Cabot 2004;
-    // Kawai et al. 2015):
-    //     D_art = C V^(2/3) |U| |grad rho| / rho     [m2/s]
-    // applied to rho and rho h, and as mu_art = rho D_art to rho u.
-    // Default 0 (the 1-D validation runs without it, as in the paper).
+    // Terashima-Koshi LAD, TAKEN VERBATIM from TK JCP 231 (2012) 6907,
+    // Sec. 2.5 (the method PEQSI Sec. III B runs at C_rho = 0.002 -- the
+    // smallest value of TK's own 1-D sweep {0.002, 0.01, 0.05}; TK's 2-D
+    // jet uses 0.02, minimum-required 0.005):
+    //
+    //   mass     (Eq. 22-23):  + div( rho_art grad(rho) ),
+    //       rho_art = C_rho (c/rho) sum_l |d^4 rho_bar/dx_l^4| Dl^5
+    //   momentum (Eq. 24)   :  + div( rho_art (u (x) g) grad(rho) )
+    //   energy   (Eq. 33)   :  kappa += kappa_art,
+    //       kappa_art = C_kappa (rho c^3/T^2) sum_l |d^4 T_bar/dx_l^4| Dl^5
+    //       with C_kappa = 0.01 (TK's standard)
+    //   pressure (Eq. 30)   :  NO artificial term (pressure-equilibrium
+    //                          preservation) -- p* stays untouched.
+    //
+    // FV translation (documented deviations, isotropic on hex meshes):
+    //   - directional 4th derivatives -> |lap(lap(q_bar))| * Delta^5,
+    //     Delta = V^(1/3)
+    //   - TK's truncated Gaussian filter -> 2nd-order equivalent
+    //     q_bar = q + (Delta^2/24) lap(q)
+    //   - Eq. 24 discretised as u^n * [mass-diffusion increment]: exact
+    //     under velocity equilibrium, which is the property Eq. 24 exists
+    //     to preserve.
+    //
+    // NOTE: heap-allocate INTO the tmp -- assigning a stack-local field
+    // to a tmp creates a non-owning reference that dangles out of scope
+    // (measured: freed name() read -> std::length_error in fvc name
+    // concatenation).
     const scalar ladCoeff
     (
         pimple.dict().lookupOrDefault<scalar>("peqsiLADCoeff", scalar(0))
     );
-    // NOTE: the field must be heap-allocated INTO the tmp -- assigning a
-    // stack-local field to a tmp creates a non-owning reference that
-    // dangles when the local goes out of scope (measured: freed-memory
-    // name() read -> std::length_error in fvc::laplacian's name concat).
-    tmp<volScalarField> tDart;
-    if (ladCoeff > 0)
-    {
-        tDart = tmp<volScalarField>
+    const scalar ladKappaCoeff
+    (
+        pimple.dict().lookupOrDefault<scalar>
         (
-            new volScalarField
-            (
-                IOobject("PEQSI:Dart", runTime.name(), mesh),
-                mesh,
-                dimensionedScalar(sqr(dimLength)/dimTime, 0),
-                zeroGradientFvPatchScalarField::typeName
-            )
+            "peqsiLADKappaCoeff",
+            ladCoeff > 0 ? scalar(0.01) : scalar(0)
+        )
+    );
+
+    tmp<volScalarField> tDart;      // rho_art [m2/s]
+    tmp<volScalarField> tKappaArt;  // kappa_art [W/(m K)]
+
+    if (ladCoeff > 0 || ladKappaCoeff > 0)
+    {
+        const volScalarField Delta
+        (
+            IOobject("PEQSI:Delta", runTime.name(), mesh),
+            mesh,
+            dimensionedScalar(dimLength, 0),
+            zeroGradientFvPatchScalarField::typeName
         );
-        volScalarField& Dart = tDart.ref();
-        const scalarField V23(pow(scalarField(mesh.V()), 2.0/3.0));
-        Dart.primitiveFieldRef() =
-            ladCoeff*V23
-           *mag(UN_())().primitiveField()
-           *mag(fvc::grad(rhoN_()))().primitiveField()
-           /rhoN_().primitiveField();
-        Dart.correctBoundaryConditions();
-        Info<< "PEQSI LAD: Dart max = "
-            << gMax(Dart.primitiveField()) << " m^2/s" << endl;
+        volScalarField& DeltaRef = const_cast<volScalarField&>(Delta);
+        DeltaRef.primitiveFieldRef() =
+            pow(scalarField(mesh.V()), 1.0/3.0);
+        DeltaRef.correctBoundaryConditions();
+
+        // sound speed c = sqrt(gamma/psi)
+        const volScalarField c
+        (
+            "PEQSI:c",
+            sqrt(thermo_.gamma()()/thermo_.psi())
+        );
+
+        if (ladCoeff > 0)
+        {
+            // filtered density and its biharmonic magnitude
+            const volScalarField rhoBar
+            (
+                rhoN_() + sqr(Delta)/24.0*fvc::laplacian(rhoN_())
+            );
+            const volScalarField biLapRho
+            (
+                mag(fvc::laplacian(fvc::laplacian(rhoBar)()))
+            );
+
+            tDart = tmp<volScalarField>
+            (
+                new volScalarField
+                (
+                    "PEQSI:Dart",
+                    ladCoeff*(c/rhoN_())*biLapRho*pow(Delta, 5)
+                )
+            );
+            Info<< "PEQSI LAD: rho_art max = "
+                << gMax(tDart().primitiveField()) << " m^2/s" << endl;
+        }
+
+        if (ladKappaCoeff > 0)
+        {
+            const volScalarField& T = thermo_.T();
+            const volScalarField TBar
+            (
+                T + sqr(Delta)/24.0*fvc::laplacian(T)
+            );
+            const volScalarField biLapT
+            (
+                mag(fvc::laplacian(fvc::laplacian(TBar)()))
+            );
+
+            tKappaArt = tmp<volScalarField>
+            (
+                new volScalarField
+                (
+                    "PEQSI:kappaArt",
+                    ladKappaCoeff*rhoN_()*pow3(c)/sqr(T)*biLapT*pow(Delta, 5)
+                )
+            );
+            Info<< "PEQSI LAD: kappa_art max = "
+                << gMax(tKappaArt().primitiveField()) << " W/(m K)" << endl;
+        }
     }
+
+    // L_h: enthalpy-equation RHS without Dp/Dt (WKK Eq. 3) -- conduction
+    // with the TK Eq. (33) artificial conductivity when active.
+    const volScalarField Lh
+    (
+        "PEQSI:Lh",
+        tKappaArt.valid()
+      ? fvc::laplacian((kappa + tKappaArt())(), thermo_.T())()
+      : fvc::laplacian(kappa, thermo_.T())()
+    );
 
     // RK working fields (rho h transported as a product)
     volScalarField r("PEQSI:rkRho", rhoN_());
@@ -202,9 +280,12 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
 
         if (tDart.valid())
         {
-            Lr += fvc::laplacian(tDart(), r);
-            Lru += fvc::laplacian(rhoN_()*tDart(), UN_())();
-            Lrh += fvc::laplacian(tDart(), rh);
+            // TK Eq. (22): mass numerical diffusion
+            const volScalarField massArt(fvc::laplacian(tDart(), r));
+            Lr += massArt;
+            // TK Eq. (24): consistent momentum term, discretised as
+            // u^n * (mass increment) -- exact under velocity equilibrium
+            Lru += UN_()*massArt;
         }
 
         r == cOld*rhoN_() + cNew*(r + dt*Lr);
