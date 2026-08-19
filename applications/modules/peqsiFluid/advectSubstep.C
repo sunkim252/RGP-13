@@ -194,20 +194,6 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
         // applied twice for |d4_l q|, each weighted by the per-cell
         // spacing Delta_l^5 (face-normal spacing averaged per cell).
 
-        // Gaussian filter correction (benign percent-level term):
-        // isotropic V^(1/3) length retained
-        const volScalarField Delta
-        (
-            IOobject("PEQSI:Delta", runTime.name(), mesh),
-            mesh,
-            dimensionedScalar(dimLength, 0),
-            zeroGradientFvPatchScalarField::typeName
-        );
-        volScalarField& DeltaRef = const_cast<volScalarField&>(Delta);
-        DeltaRef.primitiveFieldRef() =
-            pow(scalarField(mesh.V()), 1.0/3.0);
-        DeltaRef.correctBoundaryConditions();
-
         const surfaceScalarField deltaF(mag(mesh.delta()));
 
         // Per-direction face weights and per-cell spacings
@@ -249,6 +235,26 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
             );
         }
 
+        // TK truncated-Gaussian filter, DIRECTIONAL form:
+        //   qBar = q + sum_l (Delta_l^2/24) d2q/dx_l^2.
+        // The isotropic V^(1/3) filter length re-introduces the
+        // anisotropy bug through the back door: on the paper grid its
+        // (V^(1/3)/dy)^2 = 8.8x overestimated correction plants a fake
+        // wiggle at the 3-cell erf inlet band whose 4th derivative then
+        // dominates kappa_art (measured 1.4 W/mK where the physical
+        // scale is ~5e-6) -> p* spike -> dp -8.7e7 Pa in ONE step.
+        auto dirFilter = [&](const volScalarField& q) -> tmp<volScalarField>
+        {
+            tmp<volScalarField> tq(new volScalarField(q));
+            for (direction cmpt = 0; cmpt < 3; cmpt++)
+            {
+                tq.ref() +=
+                    sqr(DeltaDir[cmpt])/24.0
+                   *fvc::laplacian(wDir[cmpt], q);
+            }
+            return tq;
+        };
+
         // Directional |d4 q/dx_l^4| Delta_l^5 sum for a filtered field
         auto d4Sum = [&](const volScalarField& qBar) -> tmp<volScalarField>
         {
@@ -279,11 +285,8 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
 
         if (ladCoeff > 0)
         {
-            // filtered density (TK truncated Gaussian, 2nd-order form)
-            const volScalarField rhoBar
-            (
-                rhoN_() + sqr(Delta)/24.0*fvc::laplacian(rhoN_())
-            );
+            // filtered density (TK truncated Gaussian, directional)
+            const volScalarField rhoBar(dirFilter(rhoN_()));
 
             tDart = tmp<volScalarField>
             (
@@ -316,10 +319,7 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
         if (ladKappaCoeff > 0)
         {
             const volScalarField& T = thermo_.T();
-            const volScalarField TBar
-            (
-                T + sqr(Delta)/24.0*fvc::laplacian(T)
-            );
+            const volScalarField TBar(dirFilter(T));
 
             tKappaArt = tmp<volScalarField>
             (
@@ -383,6 +383,16 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
             // TK Eq. (24): consistent momentum term, discretised as
             // u^n * (mass increment) -- exact under velocity equilibrium
             Lru += UN_()*massArt;
+            // TK Eq. (31) logic extended to the transported rho*h:
+            // diffuse the CONSERVED quantity with the same coefficient
+            // ("first derivative of rho*Yi, and NOT of Yi, because of
+            // the consistency with Eq. (22)").  At uniform h this is
+            // exactly h x (mass diffusion), so h is not diluted.
+            // Without it the mass LAD pours density into front cells
+            // with no matching enthalpy (TK never see this: their
+            // system transports NO energy -- T comes from EOS(rho, p)),
+            // measured as the T undershoot to 73.6 K at the jet front.
+            Lrh += fvc::laplacian(tDart(), rh);
         }
 
         r == cOld*rhoN_() + cNew*(r + dt*Lr);

@@ -1,0 +1,6 @@
+# dynamicCode:
+# SHA1 = ac1b37fca016c2cfe83880ec0e6fe064d68f1e5f
+
+codedFixedValueFvPatchFieldTemplate.C
+
+LIB = $(PWD)/../platforms/$(WM_OPTIONS)/lib/librampErfInlet_ac1b37fca016c2cfe83880ec0e6fe064d68f1e5f

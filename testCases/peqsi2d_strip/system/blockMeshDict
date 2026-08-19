@@ -1,0 +1,42 @@
+FoamFile { format ascii; class dictionary; object blockMeshDict; }
+
+convertToMeters 1;
+
+// PEQSI (Wada et al. PoF 36:116104, 2024) 2-D planar N2 jet, Sec. III B:
+// domain 400D x 100D (D = 2.2 mm), 1280 x 1080 non-uniform Cartesian,
+// min dx 17.5 um (at inlet), min dy 8.2 um (at the shear layers |y| = r).
+// y-blocks: 440 outer / 100 inner per half (geometric, solved so the
+// stated minima land where the paper puts them).
+
+vertices
+(
+    (0    -0.002625    0) (0.011749 -0.002625    0)
+    (0    -0.0011  0) (0.011749 -0.0011  0)
+    (0     0       0) (0.011749  0       0)
+    (0     0.0011  0) (0.011749  0.0011  0)
+    (0     0.002625    0) (0.011749  0.002625    0)
+    (0    -0.002625    1e-4) (0.011749 -0.002625    1e-4)
+    (0    -0.0011  1e-4) (0.011749 -0.0011  1e-4)
+    (0     0       1e-4) (0.011749  0       1e-4)
+    (0     0.0011  1e-4) (0.011749  0.0011  1e-4)
+    (0     0.002625    1e-4) (0.011749  0.002625    1e-4)
+);
+
+blocks
+(
+    hex (0 1 3 2 10 11 13 12) (320 100 1) simpleGrading (3.7991 0.32201 1)
+    hex (2 3 5 4 12 13 15 14) (320 100 1) simpleGrading (3.7991 1.7522 1)
+    hex (4 5 7 6 14 15 17 16) (320 100 1) simpleGrading (3.7991 0.5707 1)
+    hex (6 7 9 8 16 17 19 18) (320 100 1) simpleGrading (3.7991 3.1055 1)
+);
+
+boundary
+(
+    inlet      { type patch; faces ((2 4 14 12) (4 6 16 14)); }
+    leftWall   { type wall;  faces ((0 2 12 10) (6 8 18 16)); }
+    outlet     { type patch; faces ((1 3 13 11) (3 5 15 13) (5 7 17 15) (7 9 19 17)); }
+    bottomWall { type wall;  faces ((0 1 11 10)); }
+    topWall    { type wall;  faces ((8 9 19 18)); }
+    frontBack  { type empty; faces ((0 1 3 2) (2 3 5 4) (4 5 7 6) (6 7 9 8)
+                                    (10 11 13 12) (12 13 15 14) (14 15 17 16) (16 17 19 18)); }
+);
