@@ -75,9 +75,9 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
         a[i] = dpdT/(rho[i]*xi);
         b[i] = (dpdv - dpdT*dhdv/xi)/rho[i];
 
-        // App. D identity: beta/(1-alpha) == -rho c^2 = -gamma/psi
+        // App. D identity: beta/(1-alpha) == -rho c^2, c^2 = gamma/psi
         const scalar lhs = b[i]/(1.0 - a[i]);
-        const scalar rhs = -gam[i]/psi[i]/rho[i]*rho[i];  // -gamma/psi
+        const scalar rhs = -rho[i]*gam[i]/psi[i];
         maxDev = max(maxDev, mag(lhs - rhs)/max(mag(rhs), small));
     }
 
@@ -110,10 +110,57 @@ void Foam::solvers::peqsiFluid::invertTemperature()
     // report the drift as the standing audit metric.
     // ------------------------------------------------------------------
 
+    // The RGP-13 custom RhoFluidThermo::correct() evaluates properties AT
+    // THE GIVEN T (fgmFluid contract: T comes from the manifold, not from
+    // he inversion) -- seeding he and calling correct() therefore does NOT
+    // invert temperature.  Do the Newton inversion here, field-wise, with
+    // the pure evaluation he(p, T), then hand the converged T to the
+    // thermo and let correct() refresh psi/mu/kappa at (p, T).
+    {
+        volScalarField& Tw = const_cast<volScalarField&>(thermo_.T());
+
+        const scalar tol = 1e-6;    // relative, WKK Fig. 3 threshold
+        const scalar dTmax = 25;    // per-pass step clamp [K]: keeps the
+                                    // iterate inside the SRK validity range
+                                    // across the interface cells
+        const scalar Tmin = 50, Tmax = 4000;
+        label iter = 0;
+        scalar maxRel = great;
+
+        // cp slope refreshed once per Newton pass (adequate: cp varies
+        // slowly over the per-step temperature increments)
+        for (; iter < 60 && maxRel > tol; ++iter)
+        {
+            const volScalarField hk(thermo_.he(p_, Tw));
+            const auto tCp = thermo_.Cp();
+            const scalarField& cpf = tCp().primitiveField();
+
+            scalarField& Tf = Tw.primitiveFieldRef();
+            const scalarField& hf = h_.primitiveField();
+            const scalarField& hkf = hk.primitiveField();
+
+            maxRel = 0;
+            forAll(Tf, i)
+            {
+                scalar dT = (hf[i] - hkf[i])/max(cpf[i], small);
+                dT = min(max(dT, -dTmax), dTmax);
+                Tf[i] = min(max(Tf[i] + dT, Tmin), Tmax);
+                maxRel = max(maxRel, mag(dT)/max(Tf[i], small));
+            }
+            reduce(maxRel, maxOp<scalar>());
+        }
+        Tw.correctBoundaryConditions();
+
+        if (maxRel > tol)
+        {
+            WarningInFunction
+                << "T Newton inversion not converged: maxRel = "
+                << maxRel << " after " << iter << " iterations" << endl;
+        }
+    }
+
     const volScalarField rhoTrans("PEQSI:rhoTrans", rho_);
 
-    thermo_.he() = h_;
-    thermo_.he().correctBoundaryConditions();
     thermo_.correct();
 
     // rho_ now holds the EOS density: measure the drift, then restore

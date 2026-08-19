@@ -59,10 +59,16 @@ Foam::solvers::peqsiFluid::peqsiFluid(fvMesh& mesh)
             "h",
             runTime.name(),
             mesh,
-            IOobject::MUST_READ,
+            IOobject::READ_IF_PRESENT,
             IOobject::AUTO_WRITE
         ),
-        mesh
+        // Fallback for fresh starts: seed from the thermo enthalpy at the
+        // initial (p, T) state; restarts read the transported field.
+        volScalarField
+        (
+            IOobject("hInit", runTime.name(), mesh),
+            isothermalFluid::thermo_.he()
+        )
     ),
 
     alpha_
@@ -77,7 +83,9 @@ Foam::solvers::peqsiFluid::peqsiFluid(fvMesh& mesh)
     (
         IOobject("PEQSI:beta", runTime.name(), mesh),
         mesh,
-        dimensionedScalar(sqr(dimVelocity), -1),
+        // beta = (1/rho)(dp/dv)_T + ... : pressure dimensions;
+        // beta/(1-alpha) == -rho c^2 [Pa]
+        dimensionedScalar(dimPressure, -1),
         zeroGradientFvPatchScalarField::typeName
     ),
 
@@ -119,6 +127,15 @@ void Foam::solvers::peqsiFluid::preSolve()
 }
 
 
+void Foam::solvers::peqsiFluid::prePredictor()
+{
+    // No-op: the base isothermalFluid::prePredictor() solves a continuity
+    // predictor for rho ("rhoFinal" solve), which must NOT run -- density
+    // is advanced exclusively by the fractional step (advective substep +
+    // dp increment), which is what makes the scheme mass conservative.
+}
+
+
 void Foam::solvers::peqsiFluid::thermophysicalPredictor()
 {
     // No-op: the thermodynamic closure runs after the acoustic substep
@@ -129,6 +146,14 @@ void Foam::solvers::peqsiFluid::thermophysicalPredictor()
 void Foam::solvers::peqsiFluid::motionCorrector()
 {
     // Static-mesh no-op: mesh motion is not supported.
+}
+
+
+void Foam::solvers::peqsiFluid::postCorrector()
+{
+    // No-op: the acoustic substep finalised the state; the base
+    // implementation must not re-sync density or transport here.
+    // TODO(V3): momentumTransport correct() for LES.
 }
 
 

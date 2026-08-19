@@ -32,6 +32,8 @@ License
 #include "fvcFlux.H"
 #include "fvcLaplacian.H"
 #include "fvcDdt.H"
+#include "fvcSnGrad.H"
+#include "fvcReconstruct.H"
 #include "zeroGradientFvPatchFields.H"
 
 // * * * * * * * * * * * * * * * Member Functions  * * * * * * * * * * * * * //
@@ -133,12 +135,24 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
     // Eq. (23): (rho u)^{n+1} =
     //   rho^* u^* - rho^n u^n (1-alpha)/beta dp
     //   - dt grad( (p^{n+1} + p^n)/2 )
+    // Face-consistent pressure gradient: reconstruct from the face-normal
+    // snGrad so the momentum update sees the SAME compact stencil as the
+    // dp Laplacian.  The plain cell-centred fvc::grad decouples odd/even
+    // cells on this colocated arrangement (the reference is a staggered-
+    // type FD code) and was observed to drive a checkerboard blow-up of
+    // dp at the advected interface (peqsi1d_A, ~step 60).
+    const volVectorField gradPmid
+    (
+        "PEQSI:gradPmid",
+        fvc::reconstruct(fvc::snGrad(0.5*(p_ + pN_()))*mesh.magSf())
+    );
+
     const volVectorField rhoUNew
     (
         "PEQSI:rhoUNew",
         rhoStar*UStar
       - coef*UN_()*dp
-      - dt*fvc::grad(0.5*(p_ + pN_()))
+      - dt*gradPmid
     );
 
     U_ = rhoUNew/rho_;

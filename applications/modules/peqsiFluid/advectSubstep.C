@@ -169,6 +169,16 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
         rh.correctBoundaryConditions();
     };
 
+    // DIAG (temporary): advective increment scale on the density
+    {
+        const volScalarField Lr0(-uGrad(phiv, divPhiv, r, "div(phiv,rho)"));
+        Info<< "PEQSI advect DIAG: max|dt*Lrho| = "
+            << dt.value()*gMax(mag(Lr0)().primitiveField())
+            << ", max|phiv| = " << gMax(mag(phiv.primitiveField()))
+            << ", max|divPhiv| = " << gMax(mag(divPhiv.primitiveField()))
+            << endl;
+    }
+
     stage(0.0, 1.0);            // q1 = qn + dt L(qn)
     stage(0.75, 0.25);          // q2 = 3/4 qn + 1/4 (q1 + dt L(q1))
     stage(1.0/3.0, 2.0/3.0);    // q* = 1/3 qn + 2/3 (q2 + dt L(q2))

@@ -180,6 +180,11 @@ public:
         //- Called at the start of the time-step, before the PIMPLE loop
         virtual void preSolve();
 
+        //- No-op override: the base class solves a continuity predictor
+        //  for rho here, which would advance the density outside the
+        //  fractional step and corrupt the scheme's mass bookkeeping
+        virtual void prePredictor();
+
         //- Advective substep: SSP-RK3 explicit update of rho*, (rho u)*,
         //  p*, h* with the frozen n-state velocity (characteristic split)
         virtual void momentumPredictor();
@@ -194,6 +199,11 @@ public:
 
         //- Static-mesh no-op (mesh motion is not supported)
         virtual void motionCorrector();
+
+        //- No-op override: the base post-corrector re-syncs state the
+        //  fractional step already finalised.  TODO(V3): call the
+        //  momentum transport correct() here when LES is enabled.
+        virtual void postCorrector();
 
 
     // Member Operators
