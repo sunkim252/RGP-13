@@ -281,6 +281,19 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
     h_ = (rhoStar*hStar - (coef*hN_() - 1.0)*dp)/rho_;
     h_.correctBoundaryConditions();
 
+    // Explicit selective filter on p and U (TK Sec. 2.7 family):
+    // kills the 2-cell dp/velocity noise whose Eq. (23) kick otherwise
+    // exceeds the local CFL in mature vortex fields (measured: dp 1e6
+    // -> 117 m/s/step at dy = 8.2 um).  sigma = 0 disables.
+    const scalar filterSigma
+    (
+        pimple.dict().lookupOrDefault<scalar>("peqsiFilterSigma", 0.0)
+    );
+    if (filterSigma > 0)
+    {
+        applyFilter(filterSigma);
+    }
+
     // End-of-step mass flux
     phi_ = fvc::flux(rho_*U_);
 
@@ -355,3 +368,128 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
 
 
 // ************************************************************************* //
+
+
+void Foam::solvers::peqsiFluid::ensureDirGeometry() const
+{
+    // Direction weights/spacings depend only on the (static) mesh:
+    // built once, cached as members
+    if (!ladWDir_.valid())
+    {
+        const surfaceScalarField deltaF(mag(mesh.delta()));
+
+        ladWDir_.set(new PtrList<surfaceScalarField>(3));
+        ladDeltaDir_.set(new PtrList<volScalarField>(3));
+
+        for (direction cmpt = 0; cmpt < 3; cmpt++)
+        {
+            vector e(Zero);
+            e[cmpt] = 1;
+
+            ladWDir_().set
+            (
+                cmpt,
+                new surfaceScalarField
+                (
+                sqr((mesh.Sf()/mesh.magSf()) & e)
+                )
+            );
+
+            const surfaceScalarField wA(ladWDir_()[cmpt]*mesh.magSf());
+
+            ladDeltaDir_().set
+            (
+                cmpt,
+                new volScalarField
+                (
+                [&]() -> volScalarField
+                {
+                    // internal-only quotient lifted to a zero-gradient
+                    // boundary-complete field
+                    const volScalarField::Internal q
+                    (
+                        fvc::surfaceSum(wA*deltaF)()
+                       /max
+                        (
+                            fvc::surfaceSum(wA)(),
+                            dimensionedScalar(dimArea, vSmall)
+                        )
+                    );
+                    volScalarField f
+                    (
+                        IOobject("PEQSI:DeltaDir", mesh.time().name(), mesh),
+                        mesh,
+                        dimensionedScalar(q.dimensions(), 0),
+                        zeroGradientFvPatchScalarField::typeName
+                    );
+                    f.primitiveFieldRef() = q;
+                    f.correctBoundaryConditions();
+                    return f;
+                }()
+                )
+            );
+        }
+    }
+    if (!ladDeltaMin_.valid())
+    {
+        // smallest INTERNAL-face centre-to-centre spacing per cell
+        // (empty/boundary-only directions excluded)
+        ladDeltaMin_.set(new scalarField(mesh.nCells(), great));
+        scalarField& dm = ladDeltaMin_();
+
+        const labelUList& own = mesh.owner();
+        const labelUList& nei = mesh.neighbour();
+        const surfaceScalarField deltaFI(mag(mesh.delta()));
+        const scalarField& df = deltaFI.primitiveField();
+
+        forAll(own, facei)
+        {
+            dm[own[facei]] = min(dm[own[facei]], df[facei]);
+            dm[nei[facei]] = min(dm[nei[facei]], df[facei]);
+        }
+    }
+
+}
+
+
+void Foam::solvers::peqsiFluid::applyFilter(const scalar sigma)
+{
+    // Explicit 8th-order selective low-pass filter (see peqsiFluid.H):
+    // per direction l, q -= sigma/256 * (Delta_l^2 lap_l)^4 q, applied
+    // sequentially in each direction (TK 2012 Sec. 2.7 practice) to p
+    // and U.  All operators are standard coupled FV ops -- processor-
+    // boundary consistent by construction.
+    ensureDirGeometry();
+
+    const PtrList<surfaceScalarField>& wDir = ladWDir_();
+    const PtrList<volScalarField>& DeltaDir = ladDeltaDir_();
+
+    for (direction cmpt = 0; cmpt < 3; cmpt++)
+    {
+        const surfaceScalarField& w = wDir[cmpt];
+        const volScalarField d2l(sqr(DeltaDir[cmpt]));
+
+        // p
+        {
+            volScalarField d(p_);
+            for (label pass = 0; pass < 4; pass++)
+            {
+                d = d2l*fvc::laplacian(w, d);
+            }
+            p_ -= (sigma/256.0)*d;
+        }
+
+        // U
+        {
+            volVectorField d(U_);
+            for (label pass = 0; pass < 4; pass++)
+            {
+                d = d2l*fvc::laplacian(w, d);
+            }
+            U_ -= (sigma/256.0)*d;
+        }
+
+        p_.correctBoundaryConditions();
+        U_.correctBoundaryConditions();
+    }
+}

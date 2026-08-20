@@ -185,6 +185,21 @@ protected:
 
     // Protected Member Functions
 
+        //- Build (once) the cached directional geometry shared by the
+        //  LAD and the explicit filter: face weights (n.e_l)^2 and
+        //  per-cell directional spacings
+        void ensureDirGeometry() const;
+
+        //- Explicit 8th-order selective low-pass filter (TK 2012
+        //  Sec. 2.7 family; Visbal-Gaitonde explicit variant) applied
+        //  once per direction to p and U after the acoustic update:
+        //  q -= sigma/256 (delta_l^2 d2/dx_l^2)^4 q.  Nyquist gain
+        //  1-sigma, smooth modes ~k^8 untouched; exact identity on a
+        //  uniform field (pressure equilibrium preserved).  rho and
+        //  rho*h are NOT filtered: the mass and energy ledgers stay
+        //  untouched (documented deviation from TK's variable set).
+        void applyFilter(const scalar sigma);
+
         //- Evaluate alpha_, beta_ from the current (T, v, Y) state and
         //  verify beta/(1-alpha) against -rho c^2
         void updateCoefficients();

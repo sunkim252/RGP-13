@@ -242,71 +242,9 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
         // applied twice for |d4_l q|, each weighted by the per-cell
         // spacing Delta_l^5 (face-normal spacing averaged per cell).
 
-        // Direction weights/spacings depend only on the (static) mesh:
-        // built once, cached as members
-        if (!ladWDir_.valid())
-        {
-            const surfaceScalarField deltaF(mag(mesh.delta()));
+        ensureDirGeometry();
 
-            ladWDir_.set(new PtrList<surfaceScalarField>(3));
-            ladDeltaDir_.set(new PtrList<volScalarField>(3));
-
-            for (direction cmpt = 0; cmpt < 3; cmpt++)
-            {
-                vector e(Zero);
-                e[cmpt] = 1;
-
-                ladWDir_().set
-                (
-                    cmpt,
-                    new surfaceScalarField
-                    (
-                        sqr((mesh.Sf()/mesh.magSf()) & e)
-                    )
-                );
-
-                const surfaceScalarField wA(ladWDir_()[cmpt]*mesh.magSf());
-
-                ladDeltaDir_().set
-                (
-                    cmpt,
-                    new volScalarField
-                    (
-                        completeField
-                        (
-                            "PEQSI:DeltaDir",
-                            mesh,
-                            fvc::surfaceSum(wA*deltaF)()
-                           /max
-                            (
-                                fvc::surfaceSum(wA)(),
-                                dimensionedScalar(dimArea, vSmall)
-                            )
-                        )
-                    )
-                );
-            }
-        }
-        if (!ladDeltaMin_.valid())
-        {
-            // smallest INTERNAL-face centre-to-centre spacing per cell
-            // (empty/boundary-only directions excluded)
-            ladDeltaMin_.set(new scalarField(mesh.nCells(), great));
-            scalarField& dm = ladDeltaMin_();
-
-            const labelUList& own = mesh.owner();
-            const labelUList& nei = mesh.neighbour();
-            const surfaceScalarField deltaFI(mag(mesh.delta()));
-            const scalarField& df = deltaFI.primitiveField();
-
-            forAll(own, facei)
-            {
-                dm[own[facei]] = min(dm[own[facei]], df[facei]);
-                dm[nei[facei]] = min(dm[nei[facei]], df[facei]);
-            }
-        }
         const scalarField& deltaMin = ladDeltaMin_();
-
         const PtrList<surfaceScalarField>& wDir = ladWDir_();
         const PtrList<volScalarField>& DeltaDir = ladDeltaDir_();
 
