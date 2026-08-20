@@ -289,6 +289,29 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
     (
         pimple.dict().lookupOrDefault<scalar>("peqsiFilterSigma", 0.0)
     );
+
+    // Sensor-gated shock-capturing filter (Bogey, de Cacqueray &
+    // Bailly, JCP 228 (2009) 1447): a CONSERVATIVE 2nd-order filter
+    // whose local strength follows a high-pass pressure sensor, so it
+    // acts only on grid-scale oscillations (the dp-kick rho/p spike)
+    // and is the identity on monotone transcritical fronts -- the
+    // failure mode of the un-gated variants.  sigmaSC = 0 disables.
+    const scalar filterSC
+    (
+        pimple.dict().lookupOrDefault<scalar>("peqsiFilterSC", 0.0)
+    );
+    if (filterSC > 0)
+    {
+        applySCFilter
+        (
+            filterSC,
+            pimple.dict().lookupOrDefault<scalar>
+            (
+                "peqsiFilterSCThreshold", 1e-5
+            )
+        );
+    }
+
     if (filterSigma > 0)
     {
         // rho in the filter set is EXPERIMENTAL (off by default): the
@@ -495,60 +518,8 @@ void Foam::solvers::peqsiFluid::applyFilter
     const PtrList<surfaceScalarField>& wDir = ladWDir_();
     const PtrList<volScalarField>& DeltaDir = ladDeltaDir_();
 
-    // Face mask: 0 on every face of a boundary-adjacent cell, 1
-    // elsewhere.  The indicator is exchanged across coupled patches so
-    // both ranks zero a shared processor face identically.
-    volScalarField bInd
-    (
-        IOobject("peqsiFilterBInd", mesh.time().name(), mesh),
-        mesh,
-        dimensionedScalar(dimless, 0)
-    );
-    forAll(mesh.boundary(), patchi)
-    {
-        if (!mesh.boundary()[patchi].coupled())
-        {
-            const labelUList& fc = mesh.boundary()[patchi].faceCells();
-            forAll(fc, i) bInd[fc[i]] = 1;
-        }
-    }
-    bInd.correctBoundaryConditions();
-
-    surfaceScalarField maskF
-    (
-        IOobject("peqsiFilterMask", mesh.time().name(), mesh),
-        mesh,
-        dimensionedScalar(dimless, 0)
-    );
-    {
-        scalarField& mIn = maskF.primitiveFieldRef();
-        const labelUList& own = mesh.owner();
-        const labelUList& nei = mesh.neighbour();
-        forAll(mIn, facei)
-        {
-            mIn[facei] = 1 - max(bInd[own[facei]], bInd[nei[facei]]);
-        }
-        forAll(maskF.boundaryFieldRef(), patchi)
-        {
-            scalarField& mp = maskF.boundaryFieldRef()[patchi];
-            if (maskF.boundaryField()[patchi].coupled())
-            {
-                const labelUList& fc = mesh.boundary()[patchi].faceCells();
-                const scalarField bNei
-                (
-                    bInd.boundaryField()[patchi].patchNeighbourField()
-                );
-                forAll(fc, i)
-                {
-                    mp[i] = 1 - max(bInd[fc[i]], bNei[i]);
-                }
-            }
-            else
-            {
-                mp = 0;
-            }
-        }
-    }
+    const tmp<surfaceScalarField> tmaskF(filterBoundaryMask());
+    const surfaceScalarField& maskF = tmaskF();
 
     // Variable set: the PRIMITIVES p, rho, U.  Filtering the
     // conservative pair rho*u / rho*h and recovering u, h by division
@@ -621,5 +592,154 @@ void Foam::solvers::peqsiFluid::applyFilter
         p_.correctBoundaryConditions();
         rho_.correctBoundaryConditions();
         U_.correctBoundaryConditions();
+    }
+}
+
+
+Foam::tmp<Foam::surfaceScalarField>
+Foam::solvers::peqsiFluid::filterBoundaryMask() const
+{
+    // 0 on every face of a boundary-adjacent cell, 1 elsewhere.  The
+    // indicator is exchanged across coupled patches so both ranks zero
+    // a shared processor face identically.
+    volScalarField bInd
+    (
+        IOobject("peqsiFilterBInd", mesh.time().name(), mesh),
+        mesh,
+        dimensionedScalar(dimless, 0)
+    );
+    forAll(mesh.boundary(), patchi)
+    {
+        if (!mesh.boundary()[patchi].coupled())
+        {
+            const labelUList& fc = mesh.boundary()[patchi].faceCells();
+            forAll(fc, i) bInd[fc[i]] = 1;
+        }
+    }
+    bInd.correctBoundaryConditions();
+
+    tmp<surfaceScalarField> tmaskF
+    (
+        new surfaceScalarField
+        (
+            IOobject("peqsiFilterMask", mesh.time().name(), mesh),
+            mesh,
+            dimensionedScalar(dimless, 0)
+        )
+    );
+    surfaceScalarField& maskF = tmaskF.ref();
+
+    scalarField& mIn = maskF.primitiveFieldRef();
+    const labelUList& own = mesh.owner();
+    const labelUList& nei = mesh.neighbour();
+    forAll(mIn, facei)
+    {
+        mIn[facei] = 1 - max(bInd[own[facei]], bInd[nei[facei]]);
+    }
+    forAll(maskF.boundaryFieldRef(), patchi)
+    {
+        scalarField& mp = maskF.boundaryFieldRef()[patchi];
+        if (maskF.boundaryField()[patchi].coupled())
+        {
+            const labelUList& fc = mesh.boundary()[patchi].faceCells();
+            const scalarField bNei
+            (
+                bInd.boundaryField()[patchi].patchNeighbourField()
+            );
+            forAll(fc, i)
+            {
+                mp[i] = 1 - max(bInd[fc[i]], bNei[i]);
+            }
+        }
+        else
+        {
+            mp = 0;
+        }
+    }
+
+    return tmaskF;
+}
+
+
+void Foam::solvers::peqsiFluid::applySCFilter
+(
+    const scalar sigmaMax,
+    const scalar rTh
+)
+{
+    // Sensor-gated conservative shock-capturing filter after Bogey,
+    // de Cacqueray & Bailly, JCP 228 (2009) 1447 ("adaptative spatial
+    // filtering"), FV translation:
+    //
+    //   per direction l:
+    //     Dp      = -1/4 lap_l(p)                  (high-pass pressure)
+    //     r       = (Dp/p)^2                       (dimensionless sensor)
+    //     sig_i   = max(0, 1 - rTh/r)              (their Eq. for sigma)
+    //     q      += sigmaMax/4 div(sig_f w_l D_l^2 grad q),  q in {p, rho, U}
+    //
+    // Every coefficient (directional weight, boundary mask, Delta^2,
+    // face sensor) is folded INTO the flux, so each pass is a pure
+    // flux divergence: rho's global integral is invariant to machine
+    // precision on arbitrarily graded meshes.  The 2nd-order kernel is
+    // positivity-safe (increment moves a cell toward its neighbours,
+    // bounded by sigmaMax/4 * sum w <= 1/2 of the local difference).
+    // Distinct from the background selective filter: this one is the
+    // IDENTITY wherever the sensor is quiet, so monotone transcritical
+    // fronts (the failure mode of un-gated rho filtering) are never
+    // touched, while the grid-scale dp-kick rho/p spike -- which
+    // regenerates dp through sComp every step -- is removed at a
+    // strength no CFL-limited artificial diffusivity can reach.
+    ensureDirGeometry();
+
+    const PtrList<surfaceScalarField>& wDir = ladWDir_();
+    const PtrList<volScalarField>& DeltaDir = ladDeltaDir_();
+
+    const tmp<surfaceScalarField> tmaskF(filterBoundaryMask());
+    const surfaceScalarField& maskF = tmaskF();
+
+    const dimensionedScalar rThD(dimless, rTh);
+    const dimensionedScalar rFloor(dimless, vSmall);
+
+    scalar sigMaxAll = 0;   // diagnostic: strongest sensor this step
+
+    for (direction cmpt = 0; cmpt < 3; cmpt++)
+    {
+        const surfaceScalarField wd2
+        (
+            wDir[cmpt]*maskF
+           *fvc::interpolate(sqr(DeltaDir[cmpt]))
+        );
+
+        const volScalarField Dp(-0.25*fvc::laplacian(wd2, p_));
+        const volScalarField r(sqr(Dp/p_));
+
+        const volScalarField sigSC
+        (
+            max
+            (
+                dimensionedScalar(dimless, 0),
+                1 - rThD/max(r, rFloor)
+            )
+        );
+        sigMaxAll = max(sigMaxAll, gMax(sigSC.primitiveField()));
+
+        const surfaceScalarField coeff
+        (
+            (sigmaMax/4.0)*fvc::interpolate(sigSC)*wd2
+        );
+
+        p_ += fvc::laplacian(coeff, p_);
+        rho_ += fvc::laplacian(coeff, rho_);
+        U_ += fvc::laplacian(coeff, U_);
+
+        p_.correctBoundaryConditions();
+        rho_.correctBoundaryConditions();
+        U_.correctBoundaryConditions();
+    }
+
+    if (sigMaxAll > small)
+    {
+        Info<< "PEQSI SC filter: max sensor strength = "
+            << sigMaxAll << endl;
     }
 }

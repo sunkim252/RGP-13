@@ -200,6 +200,15 @@ protected:
         //  untouched (documented deviation from TK's variable set).
         void applyFilter(const scalar sigma, const bool filterRho);
 
+        //- Sensor-gated conservative 2nd-order shock-capturing filter
+        //  (Bogey, de Cacqueray & Bailly, JCP 228 (2009) 1447)
+        void applySCFilter(const scalar sigmaMax, const scalar rTh);
+
+        //- Face mask: 0 on every face of a boundary-adjacent cell
+        //  (filter identity in the boundary cell layer), exchanged
+        //  across coupled patches
+        tmp<surfaceScalarField> filterBoundaryMask() const;
+
         //- Evaluate alpha_, beta_ from the current (T, v, Y) state and
         //  verify beta/(1-alpha) against -rho c^2
         void updateCoefficients();
