@@ -741,10 +741,18 @@ void Foam::solvers::peqsiFluid::applySCFilter
         p_ += fvc::laplacian(coeff, p_);
         rho_ += fvc::laplacian(coeff, rho_);
         U_ += fvc::laplacian(coeff, U_);
+        // h is in the SC set (BCB apply their shock-capturing filter to
+        // the full conservative set including energy): the 141455
+        // runaway at t=9.30 ms rode on h/T (rho stable at 84 while
+        // T 239 -> 1864 K) -- untouchable by a p,rho,U-only set.  The
+        // sensor gating keeps monotone transcritical fronts untouched
+        // (the failure mode of un-gated enthalpy filtering).
+        h_ += fvc::laplacian(coeff, h_);
 
         p_.correctBoundaryConditions();
         rho_.correctBoundaryConditions();
         U_.correctBoundaryConditions();
+        h_.correctBoundaryConditions();
     }
 
     if (sigMaxAll > small)
