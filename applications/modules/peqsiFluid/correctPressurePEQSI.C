@@ -221,8 +221,18 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
         {
             if (mag(dpi[i]) > vMax) { vMax = mag(dpi[i]); iMax = i; }
         }
-        if (iMax >= 0 && vMax > 1e6)
+        // Per-rank print budget: both cirius MPI_ERR_TRUNCATE deaths
+        // followed dpExtreme Pout bursts -- unbounded per-step Pout from
+        // many ranks stresses the collated-output communicators.  The
+        // forensics value is in the FIRST events; cap the rest.
+        static label nDpExtremePrints = 0;
+        if (iMax >= 0 && vMax > 1e6 && nDpExtremePrints < 20)
         {
+            if (++nDpExtremePrints == 20)
+            {
+                Pout<< "PEQSI dpExtreme: print budget reached,"
+                    << " further events suppressed on this rank" << endl;
+            }
             Pout<< "PEQSI dpExtreme: |dp|=" << dpi[iMax]
                 << " at " << mesh.C()[iMax]
                 << " T=" << thermo_.T()[iMax]
