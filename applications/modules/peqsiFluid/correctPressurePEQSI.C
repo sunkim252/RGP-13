@@ -291,7 +291,16 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
     );
     if (filterSigma > 0)
     {
-        applyFilter(filterSigma);
+        // rho in the filter set is EXPERIMENTAL (off by default): the
+        // flat mid-band response of the explicit 8th-order filter
+        // damages legitimate 87:1 transcritical fronts (measured strip
+        // mass leak 8e-5/0.1s through the positivity cap); the
+        // production-proven set is p and U.
+        applyFilter
+        (
+            filterSigma,
+            pimple.dict().lookupOrDefault<Switch>("peqsiFilterRho", false)
+        );
     }
 
     // End-of-step mass flux
@@ -452,21 +461,112 @@ void Foam::solvers::peqsiFluid::ensureDirGeometry() const
 }
 
 
-void Foam::solvers::peqsiFluid::applyFilter(const scalar sigma)
+void Foam::solvers::peqsiFluid::applyFilter
+(
+    const scalar sigma,
+    const bool filterRho
+)
 {
     // Explicit 8th-order selective low-pass filter (see peqsiFluid.H):
     // per direction l, q -= sigma/256 * (Delta_l^2 lap_l)^4 q, applied
-    // sequentially in each direction (TK 2012 Sec. 2.7 practice) to p
-    // and U.  All operators are standard coupled FV ops -- processor-
-    // boundary consistent by construction.
+    // sequentially in each direction to the TK 2012 Sec. 2.7 variable
+    // set: the conservative rho and rho*u plus the pressure p (their
+    // pressure-evolution form filters p, not E).  The p,U-only variant
+    // failed to contain the mature-vortex dp-kick spiral at the jet-lip
+    // shear layer (141449/141450, x=9.2 cm): the unfiltered density
+    // spike (rho -> 4614) kept re-seeding the pressure kick.
+    //
+    // Conservation and boundary treatment: the face weights are zeroed
+    // on all physical boundaries AND on every face of a cell that
+    // touches one, so each fvc::laplacian pass telescopes to exactly
+    // zero over the domain (global mass and momentum invariant to
+    // machine precision) and the filter is the IDENTITY in the whole
+    // boundary-adjacent cell layer.  The one-sided asymmetric stencil
+    // the plain boundary-zeroing left at the inlet lip drove a
+    // conservative-recovery feedback there (141451: lip cell T
+    // 603 -> 1356 K, rho -> 6558 within ~500 steps); TK handle the
+    // same problem with dedicated one-sided boundary filter formulas
+    // -- degrading to the identity is the conservative substitute.
+    // All operators are standard coupled FV ops -- processor-boundary
+    // consistent by construction (coupled patches keep their exchange
+    // values).
     ensureDirGeometry();
 
     const PtrList<surfaceScalarField>& wDir = ladWDir_();
     const PtrList<volScalarField>& DeltaDir = ladDeltaDir_();
 
+    // Face mask: 0 on every face of a boundary-adjacent cell, 1
+    // elsewhere.  The indicator is exchanged across coupled patches so
+    // both ranks zero a shared processor face identically.
+    volScalarField bInd
+    (
+        IOobject("peqsiFilterBInd", mesh.time().name(), mesh),
+        mesh,
+        dimensionedScalar(dimless, 0)
+    );
+    forAll(mesh.boundary(), patchi)
+    {
+        if (!mesh.boundary()[patchi].coupled())
+        {
+            const labelUList& fc = mesh.boundary()[patchi].faceCells();
+            forAll(fc, i) bInd[fc[i]] = 1;
+        }
+    }
+    bInd.correctBoundaryConditions();
+
+    surfaceScalarField maskF
+    (
+        IOobject("peqsiFilterMask", mesh.time().name(), mesh),
+        mesh,
+        dimensionedScalar(dimless, 0)
+    );
+    {
+        scalarField& mIn = maskF.primitiveFieldRef();
+        const labelUList& own = mesh.owner();
+        const labelUList& nei = mesh.neighbour();
+        forAll(mIn, facei)
+        {
+            mIn[facei] = 1 - max(bInd[own[facei]], bInd[nei[facei]]);
+        }
+        forAll(maskF.boundaryFieldRef(), patchi)
+        {
+            scalarField& mp = maskF.boundaryFieldRef()[patchi];
+            if (maskF.boundaryField()[patchi].coupled())
+            {
+                const labelUList& fc = mesh.boundary()[patchi].faceCells();
+                const scalarField bNei
+                (
+                    bInd.boundaryField()[patchi].patchNeighbourField()
+                );
+                forAll(fc, i)
+                {
+                    mp[i] = 1 - max(bInd[fc[i]], bNei[i]);
+                }
+            }
+            else
+            {
+                mp = 0;
+            }
+        }
+    }
+
+    // Variable set: the PRIMITIVES p, rho, U.  Filtering the
+    // conservative pair rho*u / rho*h and recovering u, h by division
+    // blows up at sharp fronts (measured: strip lip T 603 -> 1356 K in
+    // 141451, interior front T -> 2161 K in the strip reproducer) --
+    // the transcritical density ratio makes the ratio recovery
+    // ill-conditioned exactly where the filter acts.  rho must be in
+    // the set: the mature-vortex dp-kick spike lives in rho (141450:
+    // rho -> 4614 at x = 9.2 cm) and regenerates the pressure spike
+    // through sComp every step if only p and U are filtered.  rho is
+    // filtered in flux form, so global mass is preserved to machine
+    // precision; h is untouched (T inversion stays on the transported
+    // (h, p) state).  Primitive-variable selective filtering is
+    // standard published practice (Visbal & Gaitonde).
     for (direction cmpt = 0; cmpt < 3; cmpt++)
     {
-        const surfaceScalarField& w = wDir[cmpt];
+        const surfaceScalarField w(wDir[cmpt]*maskF);
+
         const volScalarField d2l(sqr(DeltaDir[cmpt]));
 
         // p
@@ -477,6 +577,35 @@ void Foam::solvers::peqsiFluid::applyFilter(const scalar sigma)
                 d = d2l*fvc::laplacian(w, d);
             }
             p_ -= (sigma/256.0)*d;
+        }
+
+        // rho (flux form: global mass preserved -- exactly while the
+        // cap below is inactive; a capped cell breaks the pairing by
+        // its excess, which the mass ledger audit makes visible).
+        // Positivity guard:
+        if (filterRho)
+        // at an 87:1 transcritical front the 8th-order increment can
+        // undershoot the gas-side cell below zero (measured: strip
+        // rho -> ~0, drift 3e18, SIGFPE).  Cap the per-cell decrement
+        // at 20% of the local density -- inactive in normal operation
+        // (increments are O(1e-6 rho)), it only disarms the
+        // pathological cell.
+        {
+            volScalarField d(rho_);
+            for (label pass = 0; pass < 4; pass++)
+            {
+                d = d2l*fvc::laplacian(w, d);
+            }
+
+            scalarField& rf = rho_.primitiveFieldRef();
+            const scalarField& df = d.primitiveField();
+            const scalar s256 = sigma/256.0;
+            forAll(rf, i)
+            {
+                const scalar incr = s256*df[i];
+                const scalar cap = 0.2*rf[i];
+                rf[i] -= min(max(incr, -cap), cap);
+            }
         }
 
         // U
@@ -490,6 +619,7 @@ void Foam::solvers::peqsiFluid::applyFilter(const scalar sigma)
         }
 
         p_.correctBoundaryConditions();
+        rho_.correctBoundaryConditions();
         U_.correctBoundaryConditions();
     }
 }

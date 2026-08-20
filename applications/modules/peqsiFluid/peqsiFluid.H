@@ -198,7 +198,7 @@ protected:
         //  uniform field (pressure equilibrium preserved).  rho and
         //  rho*h are NOT filtered: the mass and energy ledgers stay
         //  untouched (documented deviation from TK's variable set).
-        void applyFilter(const scalar sigma);
+        void applyFilter(const scalar sigma, const bool filterRho);
 
         //- Evaluate alpha_, beta_ from the current (T, v, Y) state and
         //  verify beta/(1-alpha) against -rho c^2
