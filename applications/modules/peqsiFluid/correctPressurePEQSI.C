@@ -349,6 +349,19 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
     // while the mass actually grew +5.6%/period with the consistency RHS).
     // ------------------------------------------------------------------
     {
+        // The audit is a diagnostic, not a control: its two gSum
+        // reductions (and the closure's drift reductions) are global
+        // synchronisation points, and at 256 ranks those are where the
+        // imbalance wait surfaces.  Reporting every step bought nothing
+        // the last report of an interval does not.
+        const label diagN =
+            pimple.dict().lookupOrDefault<label>("peqsiDiagInterval", 10);
+
+        const bool report =
+            initialMass_ < 0 || (runTime.timeIndex() % max(diagN, 1) == 0);
+
+        if (report)
+        {
         const scalar M =
             gSum(rho_.primitiveField()*mesh.V().primitiveField());
         const scalar E =
@@ -369,6 +382,7 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
             << ", rho*h rel = "
             << (E - initialRhoH_)/max(mag(initialRhoH_), small)
             << endl;
+        }
     }
 
     // ------------------------------------------------------------------
@@ -785,7 +799,21 @@ void Foam::solvers::peqsiFluid::applySCFilter
           : volScalarField(sqr(Dp/p_))
         );
 
-        rMaxAll = max(rMaxAll, gMax(r.primitiveField()));
+        const scalar rMaxDir = gMax(r.primitiveField());
+        rMaxAll = max(rMaxAll, rMaxDir);
+
+        // Quiet direction: sigma = max(0, 1 - rTh/r) is identically zero
+        // wherever r <= rTh, so when even the maximum is below threshold
+        // every apply-laplacian below would add exactly zero -- at the
+        // cost of four laplacian sweeps, two full-field products and
+        // twelve boundary corrections.  Profiled on the 3-D 256-rank
+        // run: the updates phase carried 41% of the step with the
+        // sensor quiet at rMax 3.5e-7 against rTh 1e-5.  Skipping is
+        // the identity, not an approximation.
+        if (rMaxDir <= rTh)
+        {
+            continue;
+        }
 
         const volScalarField sigSC
         (
