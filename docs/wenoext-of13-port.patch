@@ -116,10 +116,10 @@ index b0c6c5e..b1bd443 100644
   -lmeshTools
   -lspecie
 diff --git a/libWENOEXT/WENOBase/WENOBase.C b/libWENOEXT/WENOBase/WENOBase.C
-index d1febeb..6fc18db 100644
+index d1febeb..3582949 100644
 --- a/libWENOEXT/WENOBase/WENOBase.C
 +++ b/libWENOEXT/WENOBase/WENOBase.C
-@@ -29,8 +29,22 @@ Author
+@@ -29,13 +29,35 @@ Author
  
  #include "codeRules.H"
  #include "WENOBase.H"
@@ -142,7 +142,20 @@ index d1febeb..6fc18db 100644
  #include "labelListIOList.H"
  #include "OFstream.H"
  #include "IFstream.H"
-@@ -292,7 +306,20 @@ void Foam::WENOBase::sortStencil
+ 
+ #include <iostream>
++#include <malloc.h>
++
++// * * * * * * * * * * * * * * Static Data  * * * * * * * * * * * * * * * //
++
++namespace Foam
++{
++    defineTypeNameAndDebug(WENOBase, 0);
++}
+ 
+ // * * * * * * * * * * * * * * * Member Functions  * * * * * * * * * * * * * //
+ 
+@@ -292,7 +314,20 @@ void Foam::WENOBase::sortStencil
      }
  
      auto itStart = indices.begin();
@@ -164,7 +177,94 @@ index d1febeb..6fc18db 100644
  
  
      std::stable_sort
-@@ -748,11 +775,11 @@ Foam::WENOBase::WENOBase
+@@ -676,6 +711,18 @@ Foam::WENOBase::WENOBase
+     const fvMesh& mesh,
+     const label polOrder
+ )
++:
++    DemandDrivenMeshObject<fvMesh, TopoChangeableMeshObject, WENOBase>(mesh)
++{
++    build(mesh, polOrder);
++}
++
++
++void Foam::WENOBase::build
++(
++    const fvMesh& mesh,
++    const label polOrder
++)
+ {
+     /**************************** General Note ********************************\
+     Collecting Stencils:
+@@ -695,7 +742,42 @@ Foam::WENOBase::WENOBase
+ 
+     polOrder_ = polOrder;
+ 
+-    Dir_ = mesh.time().path()/"constant"/"WENOBase" + Foam::name(polOrder_);
++    // "_f32" tag: the on-disk bank format changed to float32 -- a stale
++    // double-format cache directory must never be deserialised as float.
++    //
++    // extendRatio, haloLayers and the cell count are in the name too:
++    // every one of them changes what the bank contains, and the cache
++    // is keyed by directory name alone.  Without them, editing
++    // extendRatio and rerunning silently reloads the bank built with
++    // the OLD value -- the dictionary is only consulted on the build
++    // path, which a successful read skips entirely.
++    {
++        IOdictionary keyDict
++        (
++            IOobject
++            (
++                "WENODict",
++                mesh.time().system(),
++                mesh.time(),
++                IOobject::READ_IF_PRESENT,
++                IOobject::NO_WRITE
++            )
++        );
++
++        Dir_ = mesh.time().path()/"constant"/"WENOBase" + Foam::name(polOrder_)
++             + "_f32"
++             + "_er" + Foam::name
++               (
++                   keyDict.lookupOrDefault<scalar>("extendRatio", 2.5)
++               )
++             + "_h" + Foam::name
++               (
++                   keyDict.lookupOrDefault<label>("haloLayers", 8)
++               )
++             + "_n" + Foam::name(mesh.nCells())
++             + (keyDict.lookupOrDefault<bool>("bestConditioned", false)
++                ? "_bc" : "");
++    }
+ 
+     // Calculate the degrees of freedom and sets the dimensions 
+     setDegreeOfFreedom(mesh);
+@@ -713,13 +795,21 @@ Foam::WENOBase::WENOBase
+         
+         
+         // Read expert factor
++        // WENODict lives in the CASE system directory.  Read it with
++        // the Time registry and the plain system() instance: that is
++        // the path OpenFOAM's own case dictionaries take, and the file
++        // handler resolves processorN/system -> case/system for a
++        // processor case.  (Using caseSystem() with the mesh registry
++        // silently found nothing in parallel -- measured: extendRatio
++        // and haloLayers stayed at their defaults on every parallel
++        // run while serial runs honoured the file.)
+         IOdictionary WENODict
+         (
+             IOobject
+             (
+                 "WENODict",
+-                localMesh.time().caseSystem(),
+-                localMesh,
++                localMesh.time().system(),
++                localMesh.time(),
+                 IOobject::READ_IF_PRESENT,
+                 IOobject::NO_WRITE
+             )
+@@ -748,11 +838,11 @@ Foam::WENOBase::WENOBase
  
          // ------------------ Start Processing ---------------------------------
        
@@ -178,7 +278,7 @@ index d1febeb..6fc18db 100644
          createStencilID(globalMesh,globalfvMesh.localToGlobalCellID(),nStencils,extendRatio);
          
          // Copy globalStencilID list to stencilID 
-@@ -767,7 +794,7 @@ Foam::WENOBase::WENOBase
+@@ -767,7 +857,7 @@ Foam::WENOBase::WENOBase
          }
          
  
@@ -187,7 +287,7 @@ index d1febeb..6fc18db 100644
          // Split the stencil in several sectorial stencils
          const labelList& localToGlobalCellID = globalfvMesh.localToGlobalCellID();
          for
-@@ -780,7 +807,7 @@ Foam::WENOBase::WENOBase
+@@ -780,7 +870,7 @@ Foam::WENOBase::WENOBase
              splitStencil(globalMesh, localMesh, localCellI, globalCellI, extendRatio, nStencils[localCellI]);
          }
  
@@ -196,7 +296,39 @@ index d1febeb..6fc18db 100644
          // Get the least squares matrices and their pseudoinverses
          LSmatrix_.resize(localMesh.nCells());
      
-@@ -817,7 +844,7 @@ Foam::WENOBase::WENOBase
+@@ -790,7 +880,10 @@ Foam::WENOBase::WENOBase
+         {
+             // display progress 
+             if ((1000*cellI/nLocalCells)%50 == 0)
+-                Info << "\t\tProgress: "<<(100*cellI/nLocalCells)<<"%\r"<<flush;
++                Info << "\t\tProgress: "<<(100*cellI/nLocalCells)
++                     << "% [stored " << LSmatrix_.nStored()
++                     << " / refs " << LSmatrix_.nRefs()
++                     << ", RSS " << rssGB() << " GB]\r" << flush;
+             
+             LSmatrix_.resizeSubList(cellI,stencilsID_[cellI].size());
+ 
+@@ -811,13 +904,26 @@ Foam::WENOBase::WENOBase
+                 }
+             }
+ 
++            // Global-ID scratch for this cell is finished with (only
++            // splitStencil and calcMatrix read it; the runtime lists,
++            // writeList and readList never touch it).  Releasing it
++            // per-cell offsets the matrix bank growing in this same
++            // loop, shaving the stage-4 RSS peak -- the build-time
++            // memory wall of the 3-D cases.
++            stencilsGlobalID_[cellI].clear();
+         }
+-        
++
++        // Release the outer skeleton too: without this the global-ID
++        // list survived into the RUNTIME (readList never clears or
++        // reloads it) -- measured as one third of the resident
++        // stencil-list memory doing nothing.
++        stencilsGlobalID_.clear();
++
+         if (checkCondition_)
              LSMatrixCheck();
          
          
@@ -205,7 +337,7 @@ index d1febeb..6fc18db 100644
          // Get the smoothness indicator matrices
          B_.setSize(localMesh.nCells());
  
-@@ -855,13 +882,26 @@ Foam::WENOBase::WENOBase
+@@ -855,17 +961,58 @@ Foam::WENOBase::WENOBase
  
  
          bool writeOutData = WENODict.lookupOrAddDefault<bool>("writeData",true);
@@ -230,15 +362,47 @@ index d1febeb..6fc18db 100644
 +            FatalErrorInFunction
 +                << "reload of the just-written WENO lists failed"
 +                << exit(FatalError);
-+        }
+         }
 +
 +        if (!writeOutData)
 +        {
 +            rmDir(Dir_);
-         }
++        }
++
      }
++
      
-@@ -875,7 +915,7 @@ Foam::WENOBase::WENOBase
+ 
++    // Runtime-kernel form of the surface basis integrals.  Built here,
++    // outside the build/read gate, so a run that restores the bank from
++    // the cache gets the flat array too.
++    buildIntBasFlat(mesh);
++    buildStencilFlat();
++    buildBpack();
++
++    // Every runtime consumer now reads the compacted form: release the
++    // 27-entry List3D originals (432 B/face vs 72 B/face kept -- the
++    // largest single remaining block, 131 MB/rank on the 3-D case).
++    intBasTrans_.clear();
++
++    // Return the freed arenas to the OS: the build-only structures are
++    // many small blocks, and glibc keeps them in the allocator arena
++    // otherwise -- RSS stays at the build peak even though the memory
++    // is dead (measured: releasing 131 MB/rank of intBasTrans_ moved
++    // node RSS by only 0.1 GB without this).
++    malloc_trim(0);
++
++    // The runtime reads only the CSR form now: release the nested
++    // lists (one heap allocation per (cell, stencil), 34 M of them on
++    // the 4.8 M-cell 3-D case).
++    stencilsID_.clear();
++    cellToProcMap_.clear();
++    B_.clear();
++
+     // Print information about LSmatrix databank
+     LSmatrix_.info();
+ 
+@@ -875,7 +1022,7 @@ Foam::WENOBase::WENOBase
            IOobject
            (
             "excludeStencil",
@@ -247,7 +411,7 @@ index d1febeb..6fc18db 100644
             mesh,
             IOobject::NO_READ,
             IOobject::NO_WRITE
-@@ -901,7 +941,7 @@ Foam::WENOBase::WENOBase
+@@ -901,7 +1048,7 @@ Foam::WENOBase::WENOBase
            IOobject
            (
             "PseudoInverseDimension",
@@ -256,14 +420,465 @@ index d1febeb..6fc18db 100644
             mesh,
             IOobject::NO_READ,
             IOobject::NO_WRITE
+@@ -938,6 +1085,72 @@ Foam::WENOBase::WENOBase
+ }
+ 
+ 
++void Foam::WENOBase::clearState()
++{
++    // Order does not matter; nothing here owns anything else.
++    dimList_.clear();
++    stencilsID_.clear();
++    stencilsGlobalID_.clear();
++    sendHaloCellIDList_.clear();
++    receiveHaloSize_.clear();
++    cellToProcMap_.clear();
++    sendProcList_.clear();
++    receiveProcList_.clear();
++    volIntegralsList_.clear();
++
++    Bpack_.clear();
++
++    stencilFlat_.clear();
++    procFlat_.clear();
++    stencilStart_.clear();
++    cellStart_.clear();
++
++    intBasFlat_.clear();
++    intBasTrans_.clear();
++    refFacAr_.clear();
++
++    JInv_.clear();
++    JInv_.shrink_to_fit();
++    refDet_.clear();
++    refPoint_.clear();
++
++    B_.clear();
++
++    LSmatrix_.resize(0);
++}
++
++
++void Foam::WENOBase::topoChange(const polyTopoChangeMap&)
++{
++    Info<< "WENOBase: topology changed -- rebuilding the WENO base" << endl;
++    clearState();
++    build(mesh(), polOrder_);
++}
++
++
++void Foam::WENOBase::mapMesh(const polyMeshMap&)
++{
++    Info<< "WENOBase: mesh replaced -- rebuilding the WENO base" << endl;
++    clearState();
++    build(mesh(), polOrder_);
++}
++
++
++void Foam::WENOBase::distribute(const polyDistributionMap&)
++{
++    // Every cached quantity is indexed by local cell or face number, and
++    // redistribution renumbers both.  The map argument is deliberately
++    // unused: remapping the stencils would still leave every halo, every
++    // pseudo inverse and the on-disk bank to be rebuilt, so we discard and
++    // re-derive.  The bank directory name carries mesh.nCells(), so the
++    // rebuild lands on a fresh entry instead of reading the old one back.
++    Info<< "WENOBase: mesh redistributed -- rebuilding the WENO base" << endl;
++
++    clearState();
++    build(mesh(), polOrder_);
++}
++
++
+ void Foam::WENOBase::createStencilID
+ (
+     const fvMesh& globalMesh,         // here the global mesh
+@@ -1134,10 +1347,21 @@ void Foam::WENOBase::setDegreeOfFreedom(const fvMesh& localMesh)
+     {
+         nDvt_ = (polOrder_ + 1.0)*(polOrder_ + 2.0)*(polOrder_ + 3.0)/6.0 - 1.0;
+     }
+-    else // 2D version (always only one cell in z-direction)
++    else if (localMesh.nSolutionD() == 2)
+     {
+         nDvt_ = (polOrder_ + 1.0)*(polOrder_ + 2.0)/2.0 - 1.0;
+     }
++    else // 1D: dimList is (polOrder,0,0), so addCoeffs populates only the
++         // polOrder terms along the single solved direction.  Sizing nDvt
++         // with the 2-D formula leaves (nDvt - polOrder) structurally zero
++         // columns; the least-squares matrix is then rank deficient,
++         // checkCondition marks every central stencil Cell::empty, and
++         // calcCoeffs skips those cells entirely -- the correction is zero
++         // and WENOUpwindFit degrades to plain upwind.  necSize inflates by
++         // the same factor, widening every surviving stencil ~3x.
++    {
++        nDvt_ = polOrder_;
++    }
+ 
+     // Set the dimList
+     labelList dummyList(3);
+@@ -1312,6 +1536,122 @@ void Foam::WENOBase::writeList
+ }
+ 
+ 
++
++
++
++void Foam::WENOBase::buildBpack()
++{
++    // Upper-triangle packing of the symmetric smoothness matrices.
++    const label nTri = nDvt_*(nDvt_ + 1)/2;
++    Bpack_.setSize(B_.size()*nTri, 0.0f);
++
++    forAll(B_, celli)
++    {
++        const auto& Bc = B_[celli];
++        float* dst = Bpack_.data() + celli*nTri;
++        label idx = 0;
++        for (label i = 0; i < nDvt_; i++)
++        {
++            for (label j = i; j < nDvt_; j++)
++            {
++                dst[idx++] =
++                    (
++                        label(Bc.rows()) > i && label(Bc.columns()) > j
++                      ? float(Bc(i, j))
++                      : 0.0f
++                    );
++            }
++        }
++    }
++}
++
++
++void Foam::WENOBase::buildStencilFlat()
++{
++    // CSR form of stencilsID_/cellToProcMap_ for the runtime kernel.
++    const label nCells = stencilsID_.size();
++    cellStart_.setSize(nCells + 1);
++
++    label nStencilTot = 0, nEntryTot = 0;
++    forAll(stencilsID_, celli)
++    {
++        cellStart_[celli] = nStencilTot;
++        nStencilTot += stencilsID_[celli].size();
++        forAll(stencilsID_[celli], si)
++        {
++            nEntryTot += stencilsID_[celli][si].size();
++        }
++    }
++    cellStart_[nCells] = nStencilTot;
++
++    stencilStart_.setSize(nStencilTot + 1);
++    stencilFlat_.setSize(nEntryTot);
++    procFlat_.setSize(nEntryTot);
++
++    label s = 0, e = 0;
++    forAll(stencilsID_, celli)
++    {
++        forAll(stencilsID_[celli], si)
++        {
++            stencilStart_[s++] = e;
++            const labelList& ids = stencilsID_[celli][si];
++            const labelList& pm = cellToProcMap_[celli][si];
++            forAll(ids, k)
++            {
++                stencilFlat_[e] = ids[k];
++                procFlat_[e] = short(k < pm.size() ? pm[k] : int(Cell::deleted));
++                e++;
++            }
++        }
++    }
++    stencilStart_[nStencilTot] = e;
++}
++
++
++void Foam::WENOBase::buildIntBasFlat(const fvMesh& localMesh)
++{
++    // Compact intBasTrans_ into the flat float array the runtime kernel
++    // reads (see intBasFlat_ in the header).  The compaction order must
++    // match sumFlux's (n,m,l) walk, which uses the dimList of the CELL
++    // on that side of the face, so build each side from its own cell.
++    const label nF = localMesh.nFaces();
++    intBasFlat_.setSize(2*nF*nDvt_, 0.0f);
++
++    const labelUList& own = localMesh.faceOwner();
++    const labelUList& nei = localMesh.faceNeighbour();
++
++    for (label facei = 0; facei < nF; facei++)
++    {
++        for (label side = 0; side < 2; side++)
++        {
++            const bool internal = (facei < localMesh.nInternalFaces());
++            if (side == 1 && !internal) continue;
++
++            const label celli = (side == 0) ? own[facei] : nei[facei];
++            const labelList& dim = dimList_[celli];
++            const volIntegralType& I = intBasTrans_[facei][side];
++
++            label k = 0;
++            float* dst = intBasFlat_.data() + (2*facei + side)*nDvt_;
++            for (label n = 0; n <= dim[0]; n++)
++            {
++                for (label m = 0; m <= dim[1]; m++)
++                {
++                    for (label l = 0; l <= dim[2]; l++)
++                    {
++                        if ((n + m + l) <= polOrder_ && (n + m + l) > 0)
++                        {
++                            if (k < nDvt_) dst[k] = float(I(n, m, l));
++                            k++;
++                        }
++                    }
++                }
++            }
++        }
++    }
++}
++
++
+ void Foam::WENOBase::deleteStencil(const label cellI, const label stencilI)
+ {
+     stencilsID_[cellI][stencilI].resize(1);
+diff --git a/libWENOEXT/WENOBase/WENOBase.H b/libWENOEXT/WENOBase/WENOBase.H
+index 2e12d9b..3d5bcf7 100644
+--- a/libWENOEXT/WENOBase/WENOBase.H
++++ b/libWENOEXT/WENOBase/WENOBase.H
+@@ -41,6 +41,12 @@ Author
+ #define WENOBase_H
+ 
+ #include "linear.H"
++#include "fvMesh.H"
++#include "DemandDrivenMeshObject.H"
++#include "MeshObjects.H"
++#include "polyDistributionMap.H"
++#include "polyTopoChangeMap.H"
++#include "polyMeshMap.H"
+ #include "globalfvMesh.H"
+ #include "matrixDB.H"
+ #include "geometryWENO.H"
+@@ -55,8 +61,33 @@ namespace Foam
+ \*---------------------------------------------------------------------------*/
+ 
+ class WENOBase
++:
++    public DemandDrivenMeshObject<fvMesh, TopoChangeableMeshObject, WENOBase>
+ {
++    // The demand-driven registry constructs us; the constructor stays
++    // out of reach so nobody can make a second, unregistered copy that
++    // would miss the distribute() callback.
++    // fvMesh::clearAddressing(isMeshUpdate=true) runs
++    //     meshObjects::clearUpto<fvMesh, Deletable, TopoChangeable>
++    // BEFORE fvMesh::distribute() hands out the distribute() callbacks, and
++    // that sweep deletes everything below TopoChangeableMeshObject.  A plain
++    // DistributeableMeshObject is therefore destroyed before it is ever
++    // told about the redistribution -- the rebuild still happened, but only
++    // because the next WENOCoeff constructed a fresh base, leaving any
++    // WENOCoeff already holding our reference dangling.  Registering one
++    // level up keeps the object alive across the update.
++    friend class DemandDrivenMeshObject
++    <
++        fvMesh,
++        TopoChangeableMeshObject,
++        WENOBase
++    >;
++
+     public:
++
++        //- Runtime type information
++        TypeName("WENOBase");
++
+         //- Enumerator for halo cells
+         //  halo cells have positive IDs that correspond with their cellID
+         enum class Cell
+@@ -142,6 +173,42 @@ class WENOBase
+         // TODO: Make this an autoPtr so memory can be released
+         List<volIntegralType> volIntegralsList_;
+ 
++        //- Smoothness-indicator matrices, PACKED upper triangle in
++        //  float, [cell*nTri + idx] with idx running i=0..nDvt-1,
++        //  j=i..nDvt-1.  B is symmetric by construction (the kernel K
++        //  in geometryWENO::getB is invariant under exchanging the two
++        //  derivative multi-indices), so half the entries are
++        //  redundant; calcWeight then evaluates the quadratic form
++        //  c^T B c directly instead of a full GEMM plus a dot product,
++        //  which also halves the flops.
++        List<float> Bpack_;
++
++        //- Stencil lists FLATTENED for the runtime kernel (CSR):
++        //    stencilFlat_   all stencil entries, concatenated
++        //    procFlat_      matching cellToProcMap entries as int16
++        //    stencilStart_  [stencil s] -> first entry in stencilFlat_
++        //    cellStart_     [cell c]    -> first stencil index of c
++        //  The nested List<labelListList> costs one heap allocation and
++        //  one pointer chase per (cell, stencil) -- 34 M of them on a
++        //  4.8 M-cell 3-D case -- and the hot loop reads both lists for
++        //  every stencil entry.  Flat CSR removes the per-list header
++        //  bytes AND the chase; int16 suffices for the proc map (rank
++        //  ids, plus the local/deleted sentinels).
++        labelList stencilFlat_;
++        List<short> procFlat_;
++        labelList stencilStart_;
++        labelList cellStart_;
++
++        //- Surface basis integrals COMPACTED for the runtime kernel:
++        //  float, flat, in nCoeff order, indexed
++        //  [(faceI*2 + side)*nDvt + k].  sumFlux walked a 27-entry
++        //  List3D with an (n+m+l) branch per entry while only nDvt (9
++        //  for polOrder 2) of them are ever used, so the flat form cuts
++        //  both the bytes touched per face (432 B -> 72 B) and the
++        //  branchy indexing.  Values are the same integrals cast to
++        //  float, matching the float reconstruction coefficients.
++        List<float> intBasFlat_;
++
+         //- Lists of surface integrals of basis functions
+         //  Calculated in the reference space stored for the owner and neighbour
+         //  side. Owner side is the first entry and neighbour side the second
+@@ -162,8 +229,11 @@ class WENOBase
+         //- Lists of pseudoinverses for each stencil of each cell
+         matrixDB LSmatrix_;
+ 
+-        //- Lists of oscillation matrices for each stencil of each cell
+-        List<geometryWENO::DynamicMatrix> B_;
++        //- Lists of oscillation matrices for each stencil of each cell.
++        //  Built in double (geometryWENO::getB), stored in float to keep
++        //  the smoothness-indicator product B*coeffs a homogeneous float
++        //  blaze kernel (mixed element types fall back to scalar code).
++        List<blaze::DynamicMatrix<float>> B_;
+ 
+         //- Switch to check the condition of the first stencil of the 
+         //  pseudo inverse matrices. 
+@@ -193,6 +263,15 @@ class WENOBase
+             label& minStencilSize
+         );
+ 
++        //- Pack the symmetric smoothness matrices
++        void buildBpack();
++
++        //- Build the flattened stencil CSR
++        void buildStencilFlat();
++
++        //- Build the compacted surface basis integrals
++        void buildIntBasFlat(const fvMesh& localMesh);
++
+         //- Sort list of stencil cells from nearest to farest
+         //- and cut to necessary size
+         void sortStencil
+@@ -274,23 +353,64 @@ class WENOBase
+         //- Check pseudo inverse matrix list
+         void LSMatrixCheck();
+ 
++        //- Assemble every cached quantity for the CURRENT decomposition.
++        //  Called by the constructor and again after each redistribution.
++        void build(const fvMesh& mesh, const label polOrder);
++
++        //- Drop everything build() produced.  Redistribution renumbers the
++        //  cells, and every cached item here -- stencil lists, pseudo
++        //  inverses, smoothness matrices, halo maps, the face integrals --
++        //  is keyed by the OLD local cell or face index.  Remapping them
++        //  would need the cell AND face distribution maps plus a rebuild of
++        //  every halo anyway, so the cheaper and safer move is to discard
++        //  and re-derive from the new mesh.
++        void clearState();
++
+ public:
+ 
+     // Member Functions
+ 
++        //- The registered instance for this mesh.  Registry-owned rather
++        //  than a function-local static: the old static outlived the mesh
++        //  and, being invisible to meshObjects, never saw distribute().
+         static WENOBase& instance
+         (
+             const fvMesh& mesh,
+             const label polOrder
+         )
+         {
+-            static WENOBase instance_
+-            (
+-                mesh,
+-                polOrder
+-            );
++            return
++                DemandDrivenMeshObject
++                <
++                    fvMesh,
++                    TopoChangeableMeshObject,
++                    WENOBase
++                >::New(mesh, polOrder);
++        }
+ 
+-            return instance_;
++        //- Rebuild for the redistributed mesh
++        virtual void distribute(const polyDistributionMap& map);
++
++        //- Rebuild after a topology change
++        virtual void topoChange(const polyTopoChangeMap& map);
++
++        //- Rebuild after the mesh is replaced
++        virtual void mapMesh(const polyMeshMap& map);
++
++        //- Update for mesh motion.  The geometry the base is built from --
++        //  cell volumes, face centres, the reference frames -- moves with
++        //  the points, so a moving mesh needs the same rebuild.  This case
++        //  family has static points; return true to signal "handled".
++        virtual bool movePoints()
++        {
++            return true;
++        }
++
++        //- The base is a runtime cache with its own on-disk bank; it is not
++        //  part of the case state that gets written with the time directory.
++        virtual bool writeData(Ostream&) const
++        {
++            return true;
+         }
+         
+         // Get a non static instance
+@@ -364,8 +484,29 @@ public:
+             return LSmatrix_;
+         }
+         
++        //- Packed symmetric smoothness matrices (see Bpack_)
++        inline const List<float>& Bpack() const { return Bpack_; }
++
++        //- Flattened stencil CSR accessors (see stencilFlat_)
++        inline const labelList& stencilFlat() const { return stencilFlat_; }
++        inline const List<short>& procFlat() const { return procFlat_; }
++        inline const labelList& stencilStart() const { return stencilStart_; }
++        inline const labelList& cellStart() const { return cellStart_; }
++
++        //- Compacted surface basis integrals (see intBasFlat_)
++        inline const List<float>& intBasFlat() const
++        {
++            return intBasFlat_;
++        }
++
++        //- Number of degrees of freedom per stencil
++        inline label nDvt() const
++        {
++            return nDvt_;
++        }
++
+         //- List of smoothing matrices
+-        inline const List<geometryWENO::DynamicMatrix>& B() const 
++        inline const List<blaze::DynamicMatrix<float>>& B() const
+         {
+             return B_;
+         }
 diff --git a/libWENOEXT/WENOBase/WENOCoeff.C b/libWENOEXT/WENOBase/WENOCoeff.C
-index fe28814..a145987 100644
+index fe28814..86fa166 100644
 --- a/libWENOEXT/WENOBase/WENOCoeff.C
 +++ b/libWENOEXT/WENOBase/WENOCoeff.C
-@@ -31,6 +31,19 @@ Author
+@@ -28,9 +28,25 @@ Author
+ 
+ \*---------------------------------------------------------------------------*/
+ 
++#define WENO_KERNEL_PROF 1
  #include "codeRules.H"
  #include "version.h"
  #include "WENOCoeff.H"
++#include "cpuLoad.H"
++#include "cpuTime.H"
 +#include <chrono>
 +
 +// Fine-grained kernel profiling (printed every 300 getWENOPol calls)
@@ -280,50 +895,247 @@ index fe28814..a145987 100644
  #include "DynamicField.H"
  #include "processorFvPatch.H"
  
-@@ -39,13 +52,13 @@ template<class Type>
+@@ -39,13 +55,19 @@ template<class Type>
  bool Foam::WENOCoeff<Type>::printWENODict_=false;
  
  template<class Type>
 -scalar Foam::WENOCoeff<Type>::dm_=1000;
 +Foam::scalar Foam::WENOCoeff<Type>::dm_=1000;
- 
- template<class Type>
--scalar Foam::WENOCoeff<Type>::epsilon_=1E-40;
++
++template<class Type>
 +Foam::scalar Foam::WENOCoeff<Type>::epsilon_=1E-40;
  
  template<class Type>
+-scalar Foam::WENOCoeff<Type>::epsilon_=1E-40;
++Foam::scalar Foam::WENOCoeff<Type>::smoothTol_ = 0.0;
+ 
+ template<class Type>
 -scalar Foam::WENOCoeff<Type>::p_=4;
++Foam::Switch Foam::WENOCoeff<Type>::loadBalancing_ = false;
++
++template<class Type>
 +Foam::scalar Foam::WENOCoeff<Type>::p_=4;
  
  // * * * * * * * * * * * * * * * * * Constructor * * * * * * * * * * * * * * //
  
-@@ -105,7 +118,7 @@ template<class Type>
+@@ -76,8 +98,8 @@ Foam::WENOCoeff<Type>::WENOCoeff
+             IOobject
+             (
+                 "WENODict",
+-                mesh.time().caseSystem(),
+-                mesh,
++                mesh.time().system(),
++                mesh.time(),
+                 IOobject::READ_IF_PRESENT,
+                 IOobject::NO_WRITE
+             )
+@@ -87,6 +109,12 @@ Foam::WENOCoeff<Type>::WENOCoeff
+         p_ = WENODict.lookupOrAddDefault<scalar>("p", 4.0);
+         dm_ = WENODict.lookupOrAddDefault<scalar>("dm", 1000.0);
+         epsilon_ = WENODict.lookupOrAddDefault<scalar>("epsilon",1E-40);
++
++        // Hybrid gate threshold on the central stencil's relative
++        // variation; 0 disables the gate and every cell pays for all
++        // seven stencils.
++        smoothTol_ = WENODict.lookupOrAddDefault<scalar>("smoothTol", 0.0);
++        loadBalancing_ = WENODict.lookupOrAddDefault<Switch>("loadBalancing", false);
+         
+         // Add pol order for printing 
+         WENODict.add<label>("polOrder",polOrder_);
+@@ -105,27 +133,38 @@ template<class Type>
  void Foam::WENOCoeff<Type>::calcCoeff
  (
      const label cellI,
 -    const GeometricField<Type, fvPatchField, volMesh>& vf,
+-    const labelListList& stencilList,
 +    const VolField<Type>& vf,
-     const labelListList& stencilList,
++    const label nStencil,
      DynamicList<coeffType>& coeffsList
  ) const
-@@ -187,12 +200,14 @@ void Foam::WENOCoeff<Type>::calcWeight
-         
-         // First multiply B with coefficients
-         // See Eq. (6.37)  in [1]
+ {
+     // Set coefficient size to number of stencils
+-    coeffsList.setSize(stencilList.size());
++    coeffsList.setSize(nStencil);
+     
+     label coeffIndex = 0;
+     
+ 
+-    forAll(stencilList,stencilI)
++    // Flat CSR views (see WENOBase::stencilFlat_): one contiguous read
++    // instead of a heap-allocated list per (cell, stencil).
++    const label* const sFlat = WENOBase_.stencilFlat().begin();
++    const short* const pFlat = WENOBase_.procFlat().begin();
++    const label* const sStart = WENOBase_.stencilStart().begin();
++    const label  cStart = WENOBase_.cellStart()[cellI];
++
++    for (label stencilI = 0; stencilI < nStencil; stencilI++)
+     {
+-        if (stencilList[stencilI][0] != int(WENOBase::Cell::deleted))
++        if
++        (
++            sFlat[sStart[cStart + stencilI]] != int(WENOBase::Cell::deleted)
++        )
+         {
+-            const List<label>& stencilsIDI =
+-                WENOBase_.stencilsID()[cellI][stencilI];
++            const label e0 = sStart[cStart + stencilI];
++            const label e1 = sStart[cStart + stencilI + 1];
++            const label* const stencilsIDI = sFlat + e0;
++            const short* const cellToProcMapI = pFlat + e0;
++            const label nEnt = e1 - e0;
+             const auto& A =
+                 WENOBase_.LSmatrix()[cellI][stencilI]();
+-            const List<label>& cellToProcMapI =
+-                WENOBase_.cellToProcMap()[cellI][stencilI];
+ 
+             // Storage for bJ matrix needed in calcCoeff
+             // Note: resize also pre reserves the space by default, see blaze wiki
+@@ -135,29 +174,75 @@ void Foam::WENOCoeff<Type>::calcCoeff
+             // Calculate degrees of freedom of stencil as a matrix vector product
+             // First line is always constraint line
+ 
+-            for (label j = 1; j < stencilsIDI.size(); j++)
++            // Own-cell components are the same for every stencil entry
++            // and every component pass: hoist them out of the j loop
++            // (they were re-read nCells x nComp times per stencil).
++            float ownC[pTraits<Type>::nComponents];
++            for (label compI = 0; compI < nComp; compI++)
++                ownC[compI] = float(component(vf[cellI], compI));
++
++            for (label j = 1; j < nEnt; j++)
+             {
+                 // Distinguish between local and halo cells
+                 if (cellToProcMapI[j] == int(WENOBase::Cell::local))
+                 {
+-                    // Loop over the components
++                    const Type& q = vf[stencilsIDI[j]];
+                     for (label compI = 0; compI < nComp; compI++)
+-                        bJ_(j-1,compI) = component(vf[stencilsIDI[j]],compI) 
+-                                        - component(vf[cellI],compI);
++                        bJ_(j-1,compI) = float(component(q, compI)) - ownC[compI];
+                 }
+                 else if(cellToProcMapI[j] != int(WENOBase::Cell::deleted))
+                 {
+-                    // Loop over the components
++                    const Type& q =
++                        receiveHaloData_[cellToProcMapI[j]][stencilsIDI[j]];
+                     for (label compI = 0; compI < nComp; compI++)
+-                        bJ_(j-1,compI) =
+-                            component(receiveHaloData_[cellToProcMapI[j]][stencilsIDI[j]],compI)
+-                          - component(vf[cellI],compI);
++                        bJ_(j-1,compI) = float(component(q, compI)) - ownC[compI];
+                 }
+             }
+             
+             // calculate coefficients
+             coeffsList[coeffIndex] = A*bJ_;
+             coeffIndex++;
++
++            // Hybrid gate: the six directional stencils exist only to
++            // feed the nonlinear weighting.  Where the field is smooth
++            // over the central stencil the right reconstruction is the
++            // central one with its optimal linear weight -- which is
++            // both 1/7 of the work and MORE accurate, since the
++            // nonlinear weights cost order at smooth extrema.
++            //
++            // The indicator is the stencil's own right-hand side, which
++            // has just been gathered: bJ_ holds neighbour-minus-own
++            // differences, halo values included, so the decision is
++            // cell-local and cannot disagree across a processor
++            // boundary the way a communicated flag could.
++            //
++            // Bias: over-triggering WENO costs only time, under-
++            // triggering costs oscillations, so the test is on the
++            // SMOOTH side -- skip the directional stencils only when
++            // the variation is far below the threshold.
++            if (smoothTol_ > 0 && stencilI == 0)
++            {
++                scalar maxDiff = 0;
++                for (label j = 0; j < bJ_.rows(); j++)
++                {
++                    for (label c = 0; c < nComp; c++)
++                    {
++                        maxDiff = max(maxDiff, mag(scalar(bJ_(j,c))));
++                    }
++                }
++
++                scalar scale = 0;
++                for (label c = 0; c < nComp; c++)
++                {
++                    scale = max(scale, mag(scalar(ownC[c])));
++                }
++
++                if (maxDiff < smoothTol_*(scale + vSmall))
++                {
++                    coeffsList.setSize(1);
++                    return;
++                }
++            }
+         }
+     }
+     // Correct for deleted stencils
+@@ -175,8 +260,10 @@ void Foam::WENOCoeff<Type>::calcWeight
+ {
+     const label nComp = pTraits<Type>::nComponents;
+ 
+-    // Get smoothness indicator matrix B
+-    const auto& B = WENOBase_.B()[cellI];
++    // Packed upper triangle of the symmetric smoothness matrix
++    const label nDvtL = WENOBase_.nDvt();
++    const label nTri = nDvtL*(nDvtL + 1)/2;
++    const float* const Bp = WENOBase_.Bpack().begin() + cellI*nTri;
+ 
+     scalar gammaSum[nComp] = {0.0};
+     scalar gamma[nComp] = {0.0};
+@@ -184,16 +271,41 @@ void Foam::WENOCoeff<Type>::calcWeight
+     forAll(coeffsList, stencilI)
+     {
+         const auto& coeffs = coeffsList[stencilI];
+-        
+-        // First multiply B with coefficients
+-        // See Eq. (6.37)  in [1]
 -        auto sumB =  B*coeffs;
-+        // Materialise ONCE: a lazy expression would re-evaluate the
-+        // product for every component's column access below
-+        sumB_ = B*coeffs;
++
++        // Smoothness indicators for ALL components in ONE sweep of the
++        // packed matrix (Eq. (6.37) in [1], the off-diagonal terms
++        // carrying the factor 2 that the symmetry folds in).  Walking
++        // the triangle once per component re-read nTri floats nComp
++        // times -- 2.4 kB x 6 per stencil at polOrder 4 -- while the
++        // coefficients themselves are a few hundred bytes and stay hot.
++        scalar sInd[pTraits<Type>::nComponents];
++        for (label c = 0; c < nComp; c++) sInd[c] = 0;
++        {
++            label idx = 0;
++            for (label i = 0; i < nDvtL; i++)
++            {
++                const scalar Bii = Bp[idx++];
++                for (label c = 0; c < nComp; c++)
++                {
++                    const scalar ci = coeffs(i,c);
++                    sInd[c] += Bii*ci*ci;
++                }
++                for (label j = i + 1; j < nDvtL; j++)
++                {
++                    const scalar Bij2 = 2.0*Bp[idx++];
++                    for (label c = 0; c < nComp; c++)
++                    {
++                        sInd[c] += Bij2*coeffs(i,c)*coeffs(j,c);
++                    }
++                }
++            }
++        }
++
          for (label compI=0; compI < nComp; compI++)
          {
              // Get reference to column
              const auto colCoeff = column(coeffs,compI);
 -            const auto colSumB = column(sumB,compI);
-+            const auto colSumB = column(sumB_,compI);
-             const scalar smoothInd = trans(colCoeff)*colSumB;
+-            const scalar smoothInd = trans(colCoeff)*colSumB;
++            const scalar smoothInd = sInd[compI];
              
              if (stencilI == 0)
-@@ -224,7 +239,7 @@ void Foam::WENOCoeff<Type>::calcWeight
+             {
+@@ -224,7 +336,7 @@ void Foam::WENOCoeff<Type>::calcWeight
  template<class Type>
  void Foam::WENOCoeff<Type>::collectData
  (
@@ -332,7 +1144,7 @@ index fe28814..a145987 100644
  ) const
  {
      // Distribute data to neighbour processors
-@@ -300,12 +315,20 @@ template<class Type>
+@@ -300,12 +412,20 @@ template<class Type>
  Foam::tmp<Foam::Field<Foam::Field<Type> > >
  Foam::WENOCoeff<Type>::getWENOPol
  (
@@ -354,8 +1166,56 @@ index fe28814..a145987 100644
      // Runtime operations
      
      tmp<Field<Field<Type> > > coeffsWeightedTmp
-@@ -333,6 +356,9 @@ Foam::WENOCoeff<Type>::getWENOPol
-         if (stencilList[0][0] == int(WENOBase::Cell::empty))
+@@ -318,29 +438,67 @@ Foam::WENOCoeff<Type>::getWENOPol
+     );
+     
+     Field<Field<Type> >& coeffsWeighted = coeffsWeightedTmp.ref();
++
++    // Contiguous mirror of the weighted coefficients for the face loop
++    coeffFlat_.setSize(mesh_.nCells()*nDvt_, pTraits<Type>::zero);
+     
+     // Construct list with default 10 elements
+     DynamicList<coeffType> coeffsI(10);
+ 
++    // Per-cell CPU load for the mesh distributor.
++    //
++    // cpuLoad::cpuTimeIncrement(celli) would time each cell individually,
++    // which is what chemistryModel does -- there a cell costs milliseconds
++    // and the clock read is noise.  Here a cell costs microseconds and the
++    // read would dominate the very thing it measures.  So the loop is timed
++    // ONCE and the total is split across cells in proportion to the work
++    // each actually did: the number of stencils evaluated, which is 1 for a
++    // cell the smoothness gate skipped and nStencil for one it did not.
++    // That is the cost driver the gate creates, and it is free to record.
++    optionalCpuLoad& wenoLoad =
++        optionalCpuLoad::New("WENO", mesh_, loadBalancing_);
++
++    scalarField cellWork(mesh_.nCells(), 0);
++    scalar totalWork = 0;
++    cpuTime loopTime;
+ 
+     for (label cellI = 0; cellI < mesh_.nCells(); cellI++)
+     {
+-        const labelListList& stencilList = WENOBase_.stencilsID()[cellI];
+-        
+-        
+-        // If no valid stencils are given return zero list of weighted 
++        // Stencil layout from the flat CSR (the nested lists are
++        // released once the CSR is built)
++        const label cStart = WENOBase_.cellStart()[cellI];
++        const label nStencil = WENOBase_.cellStart()[cellI+1] - cStart;
++
++        // If no valid stencils are given return zero list of weighted
+         // coefficients
+-        if (stencilList[0][0] == int(WENOBase::Cell::empty))
++        if
++        (
++            nStencil == 0
++         || WENOBase_.stencilFlat()
++            [
++                WENOBase_.stencilStart()[cStart]
++            ] == int(WENOBase::Cell::empty)
++        )
              continue;
          
 +#ifdef WENO_KERNEL_PROF
@@ -364,8 +1224,9 @@ index fe28814..a145987 100644
          calcCoeff
          (
              cellI,
-@@ -340,7 +366,11 @@ Foam::WENOCoeff<Type>::getWENOPol
-             stencilList,
+             vf,
+-            stencilList,
++            nStencil,
              coeffsI
          );
 -        
@@ -374,16 +1235,44 @@ index fe28814..a145987 100644
 +        wenoProf::tCoeff += pc1 - pc0;
 +#endif
 +
++        cellWork[cellI] = coeffsI.size();
++        totalWork += coeffsI.size();
++
          // Get weighted combination
          calcWeight
          (
-@@ -348,28 +378,41 @@ Foam::WENOCoeff<Type>::getWENOPol
+@@ -348,28 +506,66 @@ Foam::WENOCoeff<Type>::getWENOPol
              cellI,
              coeffsI
          );
++
++        // Mirror into the contiguous buffer (sequential write; the face
++        // loop reads it instead of chasing the per-cell allocation)
++        {
++            Type* dst = coeffFlat_.data() + cellI*nDvt_;
++            const Field<Type>& src = coeffsWeighted[cellI];
++            for (label k = 0; k < nDvt_; k++) dst[k] = src[k];
++        }
 +#ifdef WENO_KERNEL_PROF
 +        wenoProf::tWeight += wenoProf::now() - pc1;
 +#endif
++    }
++
++    // Spread the measured loop time over the cells by the work each did.
++    // The distributor reads this field as CPU seconds and compares it with
++    // the process CPU time for the step, so the units have to be seconds --
++    // a raw stencil count here would be silently mis-scaled against the
++    // "basic CFD" time the balancer infers for everything else.
++    if (loadBalancing_ && totalWork > 0)
++    {
++        const scalar loopCpuTime = loopTime.cpuTimeIncrement();
++        const scalar perWork = loopCpuTime/totalWork;
++
++        scalarField& loadField = dynamic_cast<scalarField&>(wenoLoad);
++        forAll(loadField, cellI)
++        {
++            loadField[cellI] += perWork*cellWork[cellI];
++        }
 +    }
 +
 +#ifdef WENO_KERNEL_PROF
@@ -424,7 +1313,7 @@ index fe28814..a145987 100644
                      mesh_,
                      IOobject::NO_READ,
                      IOobject::AUTO_WRITE
-@@ -383,7 +426,7 @@ Foam::GeometricField<Type, Foam::fvPatchField, Foam::volMesh>& Foam::WENOCoeff<T
+@@ -383,7 +579,7 @@ Foam::GeometricField<Type, Foam::fvPatchField, Foam::volMesh>& Foam::WENOCoeff<T
          fPtr->store(fPtr);
      }
  
@@ -434,23 +1323,73 @@ index fe28814..a145987 100644
  
  
 diff --git a/libWENOEXT/WENOBase/WENOCoeff.H b/libWENOEXT/WENOBase/WENOCoeff.H
-index 0fc169e..c8d5693 100644
+index 0fc169e..4240f77 100644
 --- a/libWENOEXT/WENOBase/WENOCoeff.H
 +++ b/libWENOEXT/WENOBase/WENOCoeff.H
-@@ -108,6 +108,12 @@ protected:
-         //- Storage for bJ matrix needed in calcCoeff
-         mutable blaze::DynamicMatrix<scalar,blaze::columnMajor> bJ_;
+@@ -69,8 +69,14 @@ protected:
+         //  This is used for Jacobian matrix
+         using scalarSquareMatrix = SquareMatrix<scalar>;
+         
+-        //- Typedef for coefficient type with blaze object
+-        using coeffType = blaze::DynamicMatrix<scalar,blaze::columnMajor>;
++        //- Typedef for coefficient type with blaze object.
++        //  float32 end-to-end with the float matrix bank and float B:
++        //  keeping every blaze operand the SAME element type is what
++        //  buys the vectorised kernels -- a mixed double/float product
++        //  falls back to scalar code (measured 30x slower).  The
++        //  reconstruction coefficients are O(dq) correction terms, so
++        //  1e-7 relative error is far below the scheme error.
++        using coeffType = blaze::DynamicMatrix<float,blaze::columnMajor>;
  
+ 
+     // Private Data
+@@ -95,6 +101,15 @@ protected:
+         static scalar dm_;
+         static scalar epsilon_;
+ 
++        //- Relative-variation threshold below which only the central
++        //  stencil is evaluated (0 = gate off).  See the gate in
++        //  calcCoeff: the directional stencils only feed the nonlinear
++        //  weighting, so a smooth cell does not need them.
++        static scalar smoothTol_;
++
++        //- Record a per-cell CPU load for the mesh distributor
++        static Switch loadBalancing_;
++
+     // Allocate storage for dynamic variables
+ 
+         //- Lists of field values of halo cells
+@@ -105,8 +120,27 @@ protected:
+         //  Has to be mutable so getWENOPol is const 
+         mutable List<List<Type> > sendHaloData_;
+ 
+-        //- Storage for bJ matrix needed in calcCoeff
+-        mutable blaze::DynamicMatrix<scalar,blaze::columnMajor> bJ_;
++        //- Weighted coefficients in ONE contiguous buffer, laid out
++        //  [cell*nDvt + k].  getWENOPol also returns the historic
++        //  Field<Field<Type>>, whose inner Fields are a separate heap
++        //  allocation per cell: the face loop then chases ~432 B from a
++        //  random address twice per face, which profiling showed to be
++        //  the dominant cost of the face evaluation (1.8 us per face
++        //  for a 9-term dot product).  Reading the contiguous buffer
++        //  instead keeps the same values -- only the layout changes.
++        mutable Field<Type> coeffFlat_;
++
++        //- Storage for bJ matrix needed in calcCoeff.
++        //  float, matching the matrix bank: the field DIFFERENCES are
++        //  still formed in double (cancellation before rounding) and
++        //  only stored in float.
++        mutable blaze::DynamicMatrix<float,blaze::columnMajor> bJ_;
++
 +        //- Storage for B*coeffs in calcWeight: materialised ONCE per
 +        //  stencil.  (A lazy blaze expression re-evaluates the product
 +        //  for every component's column access -- measured 6x redundant
 +        //  GEMM with the 6-component transport carrier.)
-+        mutable blaze::DynamicMatrix<scalar,blaze::columnMajor> sumB_;
-+
++        mutable blaze::DynamicMatrix<float,blaze::columnMajor> sumB_;
+ 
          //- Outstanding request
          mutable labelList outstandingRecvRequest_;
- 
-@@ -122,14 +128,14 @@ protected:
+@@ -122,15 +156,15 @@ protected:
          //- Distribute data if multiple processors are involved
          void collectData
          (
@@ -463,11 +1402,22 @@ index 0fc169e..c8d5693 100644
          (
              const label cellI,
 -            const GeometricField<Type, fvPatchField, volMesh>& vf,
+-            const labelListList& stencilList,
 +            const VolField<Type>& vf,
-             const labelListList& stencilList,
++            const label nStencil,
              DynamicList<coeffType>& coeffsList
          ) const;
-@@ -182,12 +188,12 @@ public:
+ 
+@@ -179,15 +213,21 @@ public:
+ 
+     // Member Functions
+ 
++        //- Contiguous weighted coefficients, [cell*nDvt + k]
++        const Field<Type>& coeffFlat() const
++        {
++            return coeffFlat_;
++        }
++
          //- Calling function from different schemes
          tmp<Field<Field<Type> > > getWENOPol
          (
@@ -482,6 +1432,47 @@ index 0fc169e..c8d5693 100644
          (
              const word fieldName
          ) const;
+diff --git a/libWENOEXT/WENOBase/geometryWENO/geometryWENO.C b/libWENOEXT/WENOBase/geometryWENO/geometryWENO.C
+index 86688f4..46d3efe 100644
+--- a/libWENOEXT/WENOBase/geometryWENO/geometryWENO.C
++++ b/libWENOEXT/WENOBase/geometryWENO/geometryWENO.C
+@@ -778,6 +778,19 @@ void Foam::geometryWENO::surfIntTrans
+ 
+             scalar area = 0;
+ 
++            // Total face area, accumulated over the triangles below.
++            // The volume-integral subtraction after the loop needs the
++            // WHOLE face area: it removes A_face * (basis mean over the
++            // own cell) so that the reconstruction reproduces the cell
++            // average.  Using the loop variable `area` there takes only
++            // the LAST triangle, which under-subtracts by the rest of
++            // the face.  The linear basis has zero mean about the
++            // centroid, so polOrder 1 never noticed; from polOrder 2 the
++            // mean is O(dx^2) and the shortfall becomes an O(dx^2) error
++            // in the constant mode -- which caps the scheme at second
++            // order no matter how high polOrder goes.
++            scalar totArea = 0;
++
+             // Evaluate surface integral using Gaussian quadratures
+             forAll(triFaces, i)
+             {
+@@ -808,6 +821,7 @@ void Foam::geometryWENO::surfIntTrans
+                 vector vn = (v1 - v0) ^ (v2 - v0);
+ 
+                 area = 0.5*mag(vn);
++                totArea += area;
+ 
+                 /**************************************************************\
+                 Note: The face is the same for the neighbour and the owner
+@@ -863,7 +877,7 @@ void Foam::geometryWENO::surfIntTrans
+                         {
+                             intBasTrans[faces[faceI]][OwnNeighIndex](n,m,l) -=
+                             (
+-                                area*volIntegralsList[cellI](n,m,l)
++                                totArea*volIntegralsList[cellI](n,m,l)
+                             );
+                         }
+                     }
 diff --git a/libWENOEXT/WENOBase/geometryWENO/geometryWENO.H b/libWENOEXT/WENOBase/geometryWENO/geometryWENO.H
 index e113b7a..dde484f 100644
 --- a/libWENOEXT/WENOBase/geometryWENO/geometryWENO.H
@@ -512,83 +1503,232 @@ index e113b7a..dde484f 100644
      // Member Functions
  
 diff --git a/libWENOEXT/WENOBase/globalfvMesh.C b/libWENOEXT/WENOBase/globalfvMesh.C
-index 1170072..ea29d45 100644
+index 1170072..e6ab2d7 100644
 --- a/libWENOEXT/WENOBase/globalfvMesh.C
 +++ b/libWENOEXT/WENOBase/globalfvMesh.C
-@@ -256,19 +256,15 @@ Foam::labelList Foam::WENO::globalfvMesh::localToGlobalCellIDList()
+@@ -220,7 +220,14 @@ Foam::autoPtr<Foam::fvMesh> Foam::WENO::globalfvMesh::createGlobalMesh(const fvM
+ {
+     if (Pstream::parRun())
      {
-         const vectorField& localCellCenters  = localMesh_.C();
+-        return reconstructRegionalMesh::reconstruct(neighborProcessor_,sendToProcessor_,mesh);
++        return reconstructRegionalMesh::reconstruct
++        (
++            neighborProcessor_,
++            sendToProcessor_,
++            mesh,
++            cellProcTmp_,
++            cellSrcTmp_
++        );
+     }
+     return autoPtr<fvMesh>(nullptr);
+ }
+@@ -238,7 +245,11 @@ Foam::autoPtr<Foam::fvMesh> Foam::WENO::globalfvMesh::createLocalMesh(const fvMe
+         {
+             labelList list(1);
+             list[0] = Pstream::myProcNo();
+-            return reconstructRegionalMesh::reconstruct(list,list,mesh);
++            labelList dummyProc, dummySrc;
++            return reconstructRegionalMesh::reconstruct
++            (
++                list, list, mesh, dummyProc, dummySrc
++            );
+         }
+     }
  
+@@ -251,35 +262,29 @@ Foam::labelList Foam::WENO::globalfvMesh::localToGlobalCellIDList()
+ {
+     // Fill cellID list
+     labelList localToGlobalCellID(localMesh_.nCells(),-1);
+-       
++
+     if (Pstream::parRun())
+     {
+-        const vectorField& localCellCenters  = localMesh_.C();
+-
 -        meshSearch mSearch(globalMesh_);
 -
 -        label oldCellIndex = 0;
-+        // OF-13 port: meshSearch is a cached DemandDrivenMeshObject now
-+        const meshSearch& mSearch = meshSearch::New(globalMesh_);
++        // Direct inversion of the reconstruction provenance: the merge
++        // carried (source proc, source-local ID) for every global cell,
++        // so no geometric matching is needed (the former findCell sweep
++        // took hours on high-aspect-ratio graded cells)
++        forAll(cellSrcTmp_, globalI)
++        {
++            if (cellProcTmp_[globalI] == Pstream::myProcNo())
++            {
++                localToGlobalCellID[cellSrcTmp_[globalI]] = globalI;
++            }
++        }
  
-+        
-         // Loop over all local cells and look for cell center
-         forAll(localCellCenters,cellI)
+-        // Loop over all local cells and look for cell center
+-        forAll(localCellCenters,cellI)
++        forAll(localToGlobalCellID, cellI)
          {
-             // Find cell
+-            // Find cell
 -            label globalCellIndex = mSearch.findCell(localCellCenters[cellI],oldCellIndex);
 -            if (globalCellIndex == -1)
 -                globalCellIndex = mSearch.findCell(localCellCenters[cellI]);
 -                
 -            oldCellIndex = globalCellIndex;
-+            label globalCellIndex = mSearch.findCell(localCellCenters[cellI]);
-             
-             if (globalCellIndex >= 0)
-                 localToGlobalCellID[cellI] = globalCellIndex;
-@@ -337,36 +333,38 @@ Foam::labelList Foam::WENO::globalfvMesh::globalToLocalCellIDList()
+-            
+-            if (globalCellIndex >= 0)
+-                localToGlobalCellID[cellI] = globalCellIndex;
+-            else
++            if (localToGlobalCellID[cellI] == -1)
+             {
+-                globalMesh_.write();
+-                FatalErrorInFunction << "Could not find local cell in global mesh" <<nl
+-                                     << "Local cellID: "<<cellI<<"  position: "<< localCellCenters[cellI] << nl
+-                                     << "Global cell Index: "<<globalCellIndex<<nl
+-                                     << "Writing out global mesh" 
+-                                     << exit(FatalError);
++                FatalErrorInFunction
++                    << "Local cell " << cellI
++                    << " missing from the reconstructed halo mesh"
++                    << exit(FatalError);
              }
          }
+     }
+@@ -291,94 +296,40 @@ Foam::labelList Foam::WENO::globalfvMesh::localToGlobalCellIDList()
+             localToGlobalCellID[cellI] = cellI;
+         }
+     }
+-    
++
+     return localToGlobalCellID;
+ }
          
+ Foam::labelList Foam::WENO::globalfvMesh::globalToLocalCellIDList()
+ {
+-   labelList globalToLocalCellID(globalMesh_.nCells(),-1);
+-    
+-    procList_.setSize(globalMesh_.nCells(),-1);
+-
+-    // Check if parallel 
++    // Check if parallel
+     if (Pstream::parRun())
+     {
+-               
+-        PstreamBuffers pBufs(Pstream::commsTypes::nonBlocking);
+-      
+-        // Distribute the cell centers of the local mesh
+-        forAll(sendToProcessor_, procI)
+-        {
+-            // Have to send tmpList because vectorField cannot use 
+-            // overload of operator<<() for reading the list from buffer
+-            UOPstream toBuffer(sendToProcessor_[procI], pBufs);
+-            List<vector> tmpList(localMesh_.C());
+-            toBuffer << tmpList;
+-        }
+-        
+-        pBufs.finishedSends();
+-        
+-        // Neighbour processor list contains the own processor itself.
+-        List<vectorField> cellCentersList(neighborProcessor_.size());
+-        
+-        forAll(neighborProcessor_, procI)
+-        {
+-            if (neighborProcessor_[procI] != Pstream::myProcNo())
+-            {
+-                List<vector> tmpList;
+-                UIPstream fromBuffer(neighborProcessor_[procI], pBufs);
+-                fromBuffer >> tmpList;
+-                cellCentersList[procI] = vectorField(tmpList);
+-            }
+-            else
+-            {
+-                cellCentersList[procI] = localMesh_.C();
+-            }
+-        }
+-        
 -        meshSearch mSearch(globalMesh_);
-+        // OF-13 port: meshSearch is a cached DemandDrivenMeshObject now
-+        const meshSearch& mSearch = meshSearch::New(globalMesh_);
-         
-         // Loop over all global cells and find corresponding cell center
-         forAll(cellCentersList,procI)
-          { 
-             const vectorField& localCellCentersI = cellCentersList[procI];
-             
+-        
+-        // Loop over all global cells and find corresponding cell center
+-        forAll(cellCentersList,procI)
+-         { 
+-            const vectorField& localCellCentersI = cellCentersList[procI];
+-            
 -            label oldCellIndex = 0;
 -            
-+                        
-             forAll(localCellCentersI,cellI)
-             { 
-                 // Find cell
+-            forAll(localCellCentersI,cellI)
+-            { 
+-                // Find cell
 -                label globalCellIndex = mSearch.findCell(localCellCentersI[cellI],oldCellIndex);
 -                if (globalCellIndex == -1)
 -                    globalCellIndex = mSearch.findCell(localCellCentersI[cellI]);
 -                    
 -                oldCellIndex = globalCellIndex;
-+                label globalCellIndex = mSearch.findCell(localCellCentersI[cellI]);
-                     
-                 if (globalCellIndex >= 0)
-                 {
-                     globalToLocalCellID[globalCellIndex] = cellI;
-                     procList_[globalCellIndex] = neighborProcessor_[procI];
-                 }
+-                    
+-                if (globalCellIndex >= 0)
+-                {
+-                    globalToLocalCellID[globalCellIndex] = cellI;
+-                    procList_[globalCellIndex] = neighborProcessor_[procI];
+-                }
 -                else
-+                else if (neighborProcessor_[procI] == Pstream::myProcNo())
-+                {
-+                    // Own cells must ALWAYS be present in the halo mesh
-                     FatalErrorInFunction << "Processor local point not found in global mesh" <<nl
-                                << "For local cell "<<localCellCentersI[cellI]
-                                << " of processor "<<procI
-                                << " for global mesh of processor "
-                                <<Pstream::myProcNo()<<nl
-                                << exit(FatalError);
-+                }
-+                // else: the neighbour sent only its halo BAND (see
-+                // reconstructRegionalMesh haloLayers); cells outside the
-+                // band are legitimately absent from the halo mesh
-             }
-         }
+-                    FatalErrorInFunction << "Processor local point not found in global mesh" <<nl
+-                               << "For local cell "<<localCellCentersI[cellI]
+-                               << " of processor "<<procI
+-                               << " for global mesh of processor "
+-                               <<Pstream::myProcNo()<<nl
+-                               << exit(FatalError);
+-            }
+-        }
++        // Direct from the reconstruction provenance (see
++        // createGlobalMesh): per global cell the source processor and
++        // its cell index there.  Replaces the all-neighbour cell-centre
++        // exchange plus per-cell findCell of the upstream code, which
++        // degraded to hours on high-aspect-ratio graded cells and could
++        // mis-match within its geometric tolerance.
++        procList_ = cellProcTmp_;
++
++        labelList globalToLocalCellID(std::move(cellSrcTmp_));
++
++        cellProcTmp_.clear();
++
++        return globalToLocalCellID;
      }
++
+     // If it is running in serial
+-    else
++    labelList globalToLocalCellID(globalMesh_.nCells(),-1);
++
++    procList_.setSize(globalMesh_.nCells(),-1);
++
++    forAll(globalToLocalCellID,cellI)
+     {
+-        forAll(globalToLocalCellID,cellI)
+-        {
+-            globalToLocalCellID[cellI] = cellI;
+-        }
++        globalToLocalCellID[cellI] = cellI;
+     }
+-    
++
+     return globalToLocalCellID;
+ }
+ 
+diff --git a/libWENOEXT/WENOBase/globalfvMesh.H b/libWENOEXT/WENOBase/globalfvMesh.H
+index 5ee8589..d291a29 100644
+--- a/libWENOEXT/WENOBase/globalfvMesh.H
++++ b/libWENOEXT/WENOBase/globalfvMesh.H
+@@ -67,6 +67,15 @@ class globalfvMesh
+         //- List of processors to whom this processor is a neighbour
+         const labelList sendToProcessor_;
+ 
++        //- Cell provenance of the reconstructed halo mesh, filled by
++        //  createGlobalMesh (declared BEFORE globalMeshPtr_ so they are
++        //  default-initialised when reconstruct writes into them):
++        //  per global cell the source processor and the source-local
++        //  cell index.  Replaces the per-cell geometric findCell
++        //  matching (hours on high-aspect-ratio graded cells).
++        labelList cellProcTmp_;
++        labelList cellSrcTmp_;
++
+         //- Pointer to the global mesh
+         autoPtr<fvMesh> globalMeshPtr_;
+ 
 diff --git a/libWENOEXT/WENOBase/matrixDB.C b/libWENOEXT/WENOBase/matrixDB.C
-index 3ceea96..b27dc73 100644
+index 3ceea96..e88906e 100644
 --- a/libWENOEXT/WENOBase/matrixDB.C
 +++ b/libWENOEXT/WENOBase/matrixDB.C
 @@ -48,7 +48,7 @@ void Foam::matrixDB::MatrixPtr::add
@@ -618,7 +1758,86 @@ index 3ceea96..b27dc73 100644
      for (int i=0; i<A.m(); i++)
      {
          for (int j=0; j<A.n(); j++)
-@@ -427,3 +427,36 @@ Foam::Ostream& Foam::operator <<(Ostream& os,const matrixDB& matrixDB_)
+@@ -232,12 +232,24 @@ void Foam::matrixDB::resizeSubList(const label cellI, const label size)
+ void Foam::matrixDB::info()
+ {
+     int numElements = 0;
++    // Matrix-shape statistics: the per-slot GEMM work scales with
++    // rows*columns, so a stencil-construction change that silently
++    // grows the retained matrices shows up here first
++    long sumRows = 0, sumRC = 0;
++    int maxRows = 0;
+     forAll(LSmatrix_,celli)
+     {
+         forAll(LSmatrix_[celli],stencilI)
+         {
+             if (LSmatrix_[celli][stencilI].valid())
++            {
+                 numElements++;
++                const auto& A = LSmatrix_[celli][stencilI]();
++                const int r = int(A.columns());  // stencil cells
++                sumRows += r;
++                sumRC += long(A.rows())*long(A.columns());
++                if (r > maxRows) maxRows = r;
++            }
+         }
+     }
+     
+@@ -265,11 +277,34 @@ void Foam::matrixDB::info()
+         sumCounter += processorCounter[proci];
+     }
+     
++    List<long> procSumRows(Pstream::nProcs(), long(0));
++    List<long> procSumRC(Pstream::nProcs(), long(0));
++    List<int> procMaxRows(Pstream::nProcs(), 0);
++    procSumRows[Pstream::myProcNo()] = sumRows;
++    procSumRC[Pstream::myProcNo()] = sumRC;
++    procMaxRows[Pstream::myProcNo()] = maxRows;
++    Pstream::gatherList(procSumRows);
++    Pstream::gatherList(procSumRC);
++    Pstream::gatherList(procMaxRows);
++    long allRows = 0, allRC = 0;
++    int allMaxRows = 0;
++    forAll(procSumRows, proci)
++    {
++        allRows += procSumRows[proci];
++        allRC += procSumRC[proci];
++        if (procMaxRows[proci] > allMaxRows) allMaxRows = procMaxRows[proci];
++    }
++
+     Info << "\tMatrix Database Statistics: "<<nl
+          << "\t\tTotal Number of matrices: "<< sumElements << nl
+          << "\t\tNumber matrices stored: "<<sumDBSize <<nl
+          << "\t\tMemory reduction:       "<<100.0 - double(sumDBSize)/double(sumElements)*100.0<<nl
+-         << "\t\tCounter: "<<sumCounter<< endl;
++         << "\t\tCounter: "<<sumCounter<<nl
++         << "\t\tMean stencil cells/matrix: "
++         << (sumElements ? double(allRows)/sumElements : 0.0)
++         << " (max " << allMaxRows << ")" << nl
++         << "\t\tMean rows*cols/matrix:     "
++         << (sumElements ? double(allRC)/sumElements : 0.0) << endl;
+ }
+ 
+ 
+@@ -358,7 +393,7 @@ void Foam::matrixDB::write(Ostream& os) const
+ 
+ void Foam::matrixDB::read(Istream& is)
+ {
+-    geometryWENO::DynamicMatrix matrix;
++    DynamicMatrix matrix;
+     keyType key;
+     
+     int DBSize;
+@@ -376,7 +411,7 @@ void Foam::matrixDB::read(Istream& is)
+             is >> matrix;
+             DB_.insert
+             (
+-                std::pair<keyType,geometryWENO::DynamicMatrix>(key,matrix)
++                std::pair<keyType,DynamicMatrix>(key,matrix)
+             );
+             i++;
+         }
+@@ -427,3 +462,36 @@ Foam::Ostream& Foam::operator <<(Ostream& os,const matrixDB& matrixDB_)
      matrixDB_.write(os);
      return os;
  }
@@ -656,7 +1875,7 @@ index 3ceea96..b27dc73 100644
 +    DB_.swap(newDB);
 +}
 diff --git a/libWENOEXT/WENOBase/matrixDB.H b/libWENOEXT/WENOBase/matrixDB.H
-index a2de6cf..8086a96 100644
+index a2de6cf..024f76f 100644
 --- a/libWENOEXT/WENOBase/matrixDB.H
 +++ b/libWENOEXT/WENOBase/matrixDB.H
 @@ -43,6 +43,7 @@ Author
@@ -667,19 +1886,31 @@ index a2de6cf..8086a96 100644
  #include "linear.H"
  #include "Ostream.H"
  #include "blaze/Math.h"
-@@ -66,6 +67,11 @@ Ostream& operator << (Ostream&, const matrixDB&);
+@@ -66,7 +67,12 @@ Ostream& operator << (Ostream&, const matrixDB&);
  
  class matrixDB
  {
+-    using DynamicMatrix = blaze::DynamicMatrix<double>;
 +    // Storage precision: the per-cell stencil pseudo-inverses are the
 +    // dominant memory sweep of the whole solver (measured bandwidth-
 +    // bound).  They are BUILT in double (LSQ conditioning) and STORED in
 +    // float: the reconstruction correction is an O(dq) correction term,
 +    // so 1e-7 relative coefficient error is far below the scheme error.
-     using DynamicMatrix = blaze::DynamicMatrix<double>;
++    using DynamicMatrix = blaze::DynamicMatrix<float>;
      using keyType = int32_t;
      
-@@ -126,7 +132,7 @@ class matrixDB
+     using iterType = std::multimap<keyType, DynamicMatrix>::iterator;
+@@ -121,12 +127,15 @@ class matrixDB
+     
+     private:
+     
+-        //- Tolerance to accept similar matrices 
+-        //  Default value 1E-9
++        //- Tolerance to accept similar matrices, relative to the matrix
++        //  max magnitude.  Set to the float32 representation granularity:
++        //  matrices closer than this become IDENTICAL bits in the float
++        //  store anyway, so sharing them loses no information beyond the
++        //  storage precision already accepted.
          const scalar epsilon_;
  
          //- Number of key neighbours to check
@@ -688,7 +1919,16 @@ index a2de6cf..8086a96 100644
          
          //- counter to store the number of saved matrices through pointer
          int counter_ = 0;
-@@ -192,6 +198,13 @@ public:
+@@ -159,7 +168,7 @@ public:
+     // Constructors 
+     
+         //- Default Constructor
+-        matrixDB(const scalar epsilon = 1E-9) : epsilon_(epsilon) {}
++        matrixDB(const scalar epsilon = 1E-7) : epsilon_(epsilon) {}
+         
+         // delete copy constructors
+         matrixDB(const matrixDB&) = delete;
+@@ -192,6 +201,19 @@ public:
          
      // matrixDB IO
      
@@ -699,11 +1939,17 @@ index a2de6cf..8086a96 100644
 +        //  in walk order restores locality (dedup sharing preserved).
 +        void compact();
 +
++        //- Number of matrices currently stored in the bank
++        label nStored() const { return label(DB_.size()); }
++
++        //- Number of matrix slots referencing the bank
++        label nRefs() const { return counter_; }
++
          void write(Ostream& os) const;
          
          void read(Istream& is);
 diff --git a/libWENOEXT/WENOBase/reconstructRegionalMesh.C b/libWENOEXT/WENOBase/reconstructRegionalMesh.C
-index 621f029..bf71cd1 100644
+index 621f029..6147fd8 100644
 --- a/libWENOEXT/WENOBase/reconstructRegionalMesh.C
 +++ b/libWENOEXT/WENOBase/reconstructRegionalMesh.C
 @@ -1,11 +1,11 @@
@@ -723,7 +1969,7 @@ index 621f029..bf71cd1 100644
  License
      This file is part of WENO Ext.
  
-@@ -24,13 +24,19 @@ License
+@@ -24,91 +24,78 @@ License
  
  Author
      Jan Wilhelm Gärtner <jan.gaertner@outlook.de> Copyright (C) 2020
@@ -745,8 +1991,12 @@ index 621f029..bf71cd1 100644
  
  Foam::autoPtr<Foam::fvMesh> Foam::reconstructRegionalMesh::reconstruct
  (
-@@ -39,76 +45,54 @@ Foam::autoPtr<Foam::fvMesh> Foam::reconstructRegionalMesh::reconstruct
-     const fvMesh& localMesh
+     const labelList& processorList,
+     const labelList& sendToProcessorList,
+-    const fvMesh& localMesh
++    const fvMesh& localMesh,
++    labelList& cellProc,
++    labelList& cellSrcID
  )
  {
 -    // Get points, faces, neighbour, owner lists from processors 
@@ -778,6 +2028,7 @@ index 621f029..bf71cd1 100644
 +    List<wordList>   allPatchNames(Pstream::nProcs());
 +    List<labelList>  allPatchSize(Pstream::nProcs());
 +    List<labelList>  allStart(Pstream::nProcs());
++    List<labelList>  allCellIDs(Pstream::nProcs());
  
      getMeshInformation(allFaces,allPoints,allOwners,allNeighbours,
 -        processorList,sendToProcessorList,localMesh);
@@ -802,7 +2053,7 @@ index 621f029..bf71cd1 100644
 -    // (otherwise single cell domains might give problems)
 -    const boundBox bb = procBounds(processorList,allPoints);
 -    const scalar mergeDist = mergeTol*bb.mag();
-+        allPatchNames,allPatchSize,allStart,
++        allPatchNames,allPatchSize,allStart,allCellIDs,
 +        processorList,sendToProcessorList,localMesh,haloLayers);
  
 -    //Info<< "Overall mesh bounding box  : " << bb << nl
@@ -861,7 +2112,7 @@ index 621f029..bf71cd1 100644
          (
              IOobject
              (
-@@ -119,71 +103,137 @@ Foam::autoPtr<Foam::fvMesh> Foam::reconstructRegionalMesh::reconstruct
+@@ -119,71 +106,177 @@ Foam::autoPtr<Foam::fvMesh> Foam::reconstructRegionalMesh::reconstruct
                  IOobject::NO_WRITE,
                  false
              ),
@@ -928,20 +2179,25 @@ index 621f029..bf71cd1 100644
 +
 +        return m;
 +    };
-+
+ 
 +    // Seed the master mesh with the first processor's mesh directly
 +    // (the upstream code started from an empty mesh; seeding avoids the
 +    // empty-mesh edge case in the explicit-addressing faceCoupleInfo)
 +    fvMesh* masterMesh = makeProcMesh(processorList.first());
+ 
+-        // Find geometrically shared points/faces.
+-        autoPtr<faceCoupleInfo> couples
++    // Cell provenance, carried through every merge: source processor
++    // and source-local cell index of each master-mesh cell
++    cellProc.setSize(masterMesh->nCells(), processorList.first());
++    cellSrcID = allCellIDs[processorList.first()];
 +
 +    for (label i = 1; i < processorList.size(); i++)
 +    {
 +        const label procI = processorList[i];
- 
++
 +        autoPtr<fvMesh> meshToAdd(makeProcMesh(procI));
- 
--        // Find geometrically shared points/faces.
--        autoPtr<faceCoupleInfo> couples
++
 +        // Find the geometrically coupled boundary-face pairs (the
 +        // OF-13 replacement for the removed perfect-match constructor)
 +        labelList masterAddr, slaveAddr;
@@ -972,10 +2228,45 @@ index 621f029..bf71cd1 100644
 +            masterAddr,
 +            meshToAdd(),
 +            slaveAddr
++        );
++
++        autoPtr<mapAddedPolyMesh> map
++        (
++            add(*masterMesh, meshToAdd(), couples, false)
          );
 -        
 +
-+        add(*masterMesh, meshToAdd(), couples, false);
++        // Remap the provenance through the merge maps
++        labelList newProc(masterMesh->nCells(), -1);
++        labelList newSrc(masterMesh->nCells(), -1);
++
++        const labelList& oldMap = map->oldCellMap();
++        forAll(oldMap, ci)
++        {
++            newProc[oldMap[ci]] = cellProc[ci];
++            newSrc[oldMap[ci]] = cellSrcID[ci];
++        }
++
++        const labelList& addMap = map->addedCellMap();
++        const labelList& srcIDs = allCellIDs[procI];
++        forAll(addMap, ci)
++        {
++            newProc[addMap[ci]] = procI;
++            newSrc[addMap[ci]] = srcIDs[ci];
++        }
++
++        cellProc.transfer(newProc);
++        cellSrcID.transfer(newSrc);
++    }
++
++    forAll(cellProc, ci)
++    {
++        if (cellProc[ci] < 0)
++        {
++            FatalErrorInFunction
++                << "cell " << ci << " lost its provenance in the merge"
++                << exit(FatalError);
++        }
 +    }
 +
 +    if (processorList.size() == 1)
@@ -1046,7 +2337,7 @@ index 621f029..bf71cd1 100644
  }
  
  
-@@ -196,11 +246,11 @@ Foam::autoPtr<Foam::mapAddedPolyMesh> Foam::reconstructRegionalMesh::add
+@@ -196,11 +289,11 @@ Foam::autoPtr<Foam::mapAddedPolyMesh> Foam::reconstructRegionalMesh::add
  )
  {
      // -----------------------------------
@@ -1061,7 +2352,7 @@ index 621f029..bf71cd1 100644
      // Resulting merged mesh (polyMesh only!)
      autoPtr<mapAddedPolyMesh> mapPtr
      (
-@@ -212,14 +262,93 @@ Foam::autoPtr<Foam::mapAddedPolyMesh> Foam::reconstructRegionalMesh::add
+@@ -212,14 +305,93 @@ Foam::autoPtr<Foam::mapAddedPolyMesh> Foam::reconstructRegionalMesh::add
              validBoundary
          )
      );
@@ -1157,7 +2448,7 @@ index 621f029..bf71cd1 100644
      const List<pointField>& allPoints
  )
  {
-@@ -237,88 +366,260 @@ Foam::boundBox Foam::reconstructRegionalMesh::procBounds
+@@ -237,88 +409,270 @@ Foam::boundBox Foam::reconstructRegionalMesh::procBounds
  }
  
  
@@ -1223,7 +2514,8 @@ index 621f029..bf71cd1 100644
 +    labelList& subNeighbour,
 +    wordList& patchNames,
 +    labelList& patchSizes,
-+    labelList& patchStarts
++    labelList& patchStarts,
++    labelList& subCellIDs
 +)
 +{
 +    const labelList& own = mesh.faceOwner();
@@ -1242,20 +2534,37 @@ index 621f029..bf71cd1 100644
 +        {
 +            if (band.found(i)) cellMap[i] = n++;
 +        }
-+    }
  
 -        UOPstream send(procI,pBufs);
 -        send << allFaces[Pstream::myProcNo()];
 -        send << allPoints[Pstream::myProcNo()];
 -        send << allOwner[Pstream::myProcNo()];
 -        send << allNeighbours[Pstream::myProcNo()];
++        // provenance: band-mesh cell k -> sender-local cell ID
++        subCellIDs.setSize(n);
++        forAll(cellMap, i)
++        {
++            if (cellMap[i] >= 0) subCellIDs[cellMap[i]] = i;
++        }
+     }
+ 
+-    pBufs.finishedSends();
 +    // classify faces
 +    DynamicList<label> internalFaces(mesh.nInternalFaces()/4);
 +    DynamicList<label> cutFaces(1024);
 +    DynamicList<bool> cutFlip(1024);
-+
+ 
+-    for (label procI : processorList)
 +    for (label fi = 0; fi < mesh.nInternalFaces(); fi++)
-+    {
+     {
+-        if (procI == Pstream::myProcNo())
+-            continue;
+-        
+-        UIPstream recv(procI,pBufs);
+-        recv >> allFaces[procI];
+-        recv >> allPoints[procI];
+-        recv >> allOwner[procI];
+-        recv >> allNeighbours[procI];
 +        const bool o = cellMap[own[fi]] >= 0;
 +        const bool n = cellMap[nei[fi]] >= 0;
 +        if (o && n)
@@ -1272,9 +2581,8 @@ index 621f029..bf71cd1 100644
 +            cutFaces.append(fi);
 +            cutFlip.append(true);
 +        }
-     }
- 
--    pBufs.finishedSends();
++    }
++
 +    List<DynamicList<label>> patchFaces(bnd.size());
 +    forAll(bnd, pi)
 +    {
@@ -1288,19 +2596,10 @@ index 621f029..bf71cd1 100644
 +            }
 +        }
 +    }
- 
--    for (label procI : processorList)
++
 +    label nFacesTot = internalFaces.size() + cutFaces.size();
 +    forAll(patchFaces, pi)
-     {
--        if (procI == Pstream::myProcNo())
--            continue;
--        
--        UIPstream recv(procI,pBufs);
--        recv >> allFaces[procI];
--        recv >> allPoints[procI];
--        recv >> allOwner[procI];
--        recv >> allNeighbours[procI];
++    {
 +        nFacesTot += patchFaces[pi].size();
 +    }
 +
@@ -1403,6 +2702,7 @@ index 621f029..bf71cd1 100644
      List<labelList>& allPatchSize,
      List<labelList>& allStart,
 -    List<labelList>& allIndex,
++    List<labelList>& allCellIDs,
      const labelList& processorList,
      const labelList& sendToProcessorList,
 -    const fvMesh& mesh  
@@ -1433,6 +2733,7 @@ index 621f029..bf71cd1 100644
 +    allPoints[myProc] = mesh.points();
 +    allOwner[myProc] = mesh.faceOwner();
 +    allNeighbours[myProc] = mesh.faceNeighbour();
++    allCellIDs[myProc] = identityMap(mesh.nCells());
 +    patchLayout
 +    (
 +        mesh.boundaryMesh(),
@@ -1475,7 +2776,7 @@ index 621f029..bf71cd1 100644
      }
  
      PstreamBuffers pBufs(Pstream::commsTypes::nonBlocking);
-@@ -326,209 +627,106 @@ void Foam::reconstructRegionalMesh::getPatchInformation
+@@ -326,209 +680,111 @@ void Foam::reconstructRegionalMesh::getPatchInformation
      for (label procI : sendToProcessorList)
      {
          // Check for own processor ID as sendToProcessor contains its own procI
@@ -1531,6 +2832,7 @@ index 621f029..bf71cd1 100644
 +                send << allPatchNames[myProc];
 +                send << allPatchSize[myProc];
 +                send << allStart[myProc];
++                send << allCellIDs[myProc];
 +                continue;
 +            }
 +
@@ -1539,12 +2841,13 @@ index 621f029..bf71cd1 100644
 +            labelList subOwner, subNeighbour;
 +            wordList names;
 +            labelList sizes, starts;
++            labelList subCellIDs;
 +
 +            extractBand
 +            (
 +                mesh, band,
 +                subFaces, subPoints, subOwner, subNeighbour,
-+                names, sizes, starts
++                names, sizes, starts, subCellIDs
 +            );
 +
 +            send << subFaces;
@@ -1554,6 +2857,7 @@ index 621f029..bf71cd1 100644
 +            send << names;
 +            send << sizes;
 +            send << starts;
++            send << subCellIDs;
 +        }
 +        else
 +        {
@@ -1564,6 +2868,7 @@ index 621f029..bf71cd1 100644
 +            send << allPatchNames[myProc];
 +            send << allPatchSize[myProc];
 +            send << allStart[myProc];
++            send << allCellIDs[myProc];
 +        }
      }
  
@@ -1587,6 +2892,7 @@ index 621f029..bf71cd1 100644
          recv >> allPatchSize[procI];
          recv >> allStart[procI];
 -        recv >> allIndex[procI];
++        recv >> allCellIDs[procI];
      }
  }
  
@@ -1770,7 +3076,7 @@ index 621f029..bf71cd1 100644
 -}
 +// ************************************************************************* //
 diff --git a/libWENOEXT/WENOBase/reconstructRegionalMesh.H b/libWENOEXT/WENOBase/reconstructRegionalMesh.H
-index 45f56b7..dbe50b3 100644
+index 45f56b7..474e8c5 100644
 --- a/libWENOEXT/WENOBase/reconstructRegionalMesh.H
 +++ b/libWENOEXT/WENOBase/reconstructRegionalMesh.H
 @@ -1,11 +1,11 @@
@@ -1847,17 +3153,26 @@ index 45f56b7..dbe50b3 100644
  #include "codeRules.H"
  
  namespace Foam
-@@ -51,22 +67,22 @@ namespace Foam
+@@ -51,22 +67,30 @@ namespace Foam
  
  namespace reconstructRegionalMesh
  {
 -    //- Reconsturct mesh depending on processor list
-+    //- Reconstruct mesh depending on processor list
++    //- Reconstruct mesh depending on processor list.
++    //  cellProc/cellSrcID return the PROVENANCE of every merged cell:
++    //  the source processor and the cell's index on that processor.
++    //  They are exact by construction (carried through the band
++    //  extraction and every polyMeshAdder merge map), replacing the
++    //  former per-cell geometric findCell matching -- which degraded
++    //  to hours on high-aspect-ratio graded cells.
      autoPtr<fvMesh> reconstruct
      (
          const labelList& processorList,
          const labelList& sendToProcessorList,
-         const fvMesh& localMesh
+-        const fvMesh& localMesh
++        const fvMesh& localMesh,
++        labelList& cellProc,
++        labelList& cellSrcID
      );
 -    
 -    //- Get the bounds of the current domain 
@@ -1876,7 +3191,7 @@ index 45f56b7..dbe50b3 100644
      autoPtr<mapAddedPolyMesh> add
      (
          fvMesh& mesh0,
-@@ -74,91 +90,44 @@ namespace reconstructRegionalMesh
+@@ -74,91 +98,45 @@ namespace reconstructRegionalMesh
          const faceCoupleInfo& coupleInfo,
          const bool validBoundary
      );
@@ -1921,6 +3236,7 @@ index 45f56b7..dbe50b3 100644
          List<labelList>& allPatchSize,
          List<labelList>& allStart,
 -        List<labelList>& allIndex,
++        List<labelList>& allCellIDs,
          const labelList& processorList,
          const labelList& sendToProcessorList,
 -        const fvMesh& mesh
@@ -2000,7 +3316,7 @@ index 45f56b7..dbe50b3 100644
 +
 +#endif
 diff --git a/libWENOEXT/WENOUpwindFit/WENOUpwindFit.C b/libWENOEXT/WENOUpwindFit/WENOUpwindFit.C
-index c5d507f..7b6e911 100644
+index c5d507f..30192c3 100644
 --- a/libWENOEXT/WENOUpwindFit/WENOUpwindFit.C
 +++ b/libWENOEXT/WENOUpwindFit/WENOUpwindFit.C
 @@ -30,6 +30,17 @@ Author
@@ -2115,7 +3431,45 @@ index c5d507f..7b6e911 100644
      #ifdef FOAM_NEW_TMP_RULES
          tsfCorrP.ref();
      #else 
-@@ -283,8 +298,29 @@ Foam::WENOUpwindFit<Type>::correction
+@@ -253,26 +268,29 @@ Foam::WENOUpwindFit<Type>::correction
+ 
+ 
+     // Exact Riemann solver at each internal and coupled face
++    const Type* const cFlat = WENOCoeff_.coeffFlat().begin();
++    const label nDvt = WENOBase_.nDvt();
++
+     forAll(P, faceI)
+     {
+         if (faceFlux_[faceI] > 0)
+         {
+             tsfP[faceI] =
+-                sumFlux
++                sumFluxFlat
+                 (
+-                    WENOBase_.dimList()[P[faceI]],
+-                    coeffsWeighted[P[faceI]],
+-                    WENOBase_.intBasTrans()[faceI][0]
++                    cFlat + P[faceI]*nDvt,
++                    WENOBase_.intBasFlat().begin() + (2*faceI)*nDvt,
++                    nDvt
+                 ) / WENOBase_.refFacAr()[faceI];
+         }
+         else if (faceFlux_[faceI] < 0)
+         {
+             tsfP[faceI] =
+-                sumFlux
++                sumFluxFlat
+                 (
+-                    WENOBase_.dimList()[N[faceI]],
+-                    coeffsWeighted[N[faceI]],
+-                    WENOBase_.intBasTrans()[faceI][1]
++                    cFlat + N[faceI]*nDvt,
++                    WENOBase_.intBasFlat().begin() + (2*faceI + 1)*nDvt,
++                    nDvt
+                 )  /WENOBase_.refFacAr()[faceI];
+         }
+         else
+@@ -283,13 +301,54 @@ Foam::WENOUpwindFit<Type>::correction
      
      coupledRiemannSolver(mesh, tsfP, vf, coeffsWeighted);
      
@@ -2145,7 +3499,32 @@ index c5d507f..7b6e911 100644
  
      return tsfCorrP;
  }
-@@ -327,7 +363,7 @@ template<class Type>
+ 
+ 
++template<class Type>
++Type Foam::WENOUpwindFit<Type>::sumFluxFlat
++(
++    const Type* coeffcI,
++    const float* basis,
++    const label nDvt
++) const
++{
++    // Dense dot product over the nDvt retained basis integrals: the
++    // compaction (WENOBase::buildIntBasFlat) already applied the
++    // (n+m+l) selection that sumFlux re-evaluated per face.
++    Type flux = pTraits<Type>::zero;
++    for (label k = 0; k < nDvt; k++)
++    {
++        flux += coeffcI[k]*basis[k];
++    }
++    return flux;
++}
++
++
+ template<class Type>
+ Type Foam::WENOUpwindFit<Type>::sumFlux
+ (
+@@ -327,7 +386,7 @@ template<class Type>
  void Foam::WENOUpwindFit<Type>::swapData
  (
      const fvMesh& mesh,
@@ -2154,7 +3533,7 @@ index c5d507f..7b6e911 100644
      #ifdef FOAM_NEW_GEOMFIELD_RULES
          Boundary& btsf
      #else 
-@@ -389,28 +425,28 @@ template<class Type>
+@@ -389,28 +448,28 @@ template<class Type>
  void Foam::WENOUpwindFit<Type>::coupledRiemannSolver
  (
      const fvMesh& mesh,
@@ -2189,7 +3568,7 @@ index c5d507f..7b6e911 100644
                  mesh,
                  IOobject::NO_READ,
                  IOobject::NO_WRITE,
-@@ -421,14 +457,14 @@ void Foam::WENOUpwindFit<Type>::coupledRiemannSolver
+@@ -421,14 +480,14 @@ void Foam::WENOUpwindFit<Type>::coupledRiemannSolver
                  (vf.name(), vf.dimensions(), pTraits<Type>::zero)
          )
      );
@@ -2206,7 +3585,25 @@ index c5d507f..7b6e911 100644
      #ifdef FOAM_NEW_GEOMFIELD_RULES
          Boundary& btsfUD = tsfUD.boundaryFieldRef();
      #else 
-@@ -503,7 +539,7 @@ void Foam::WENOUpwindFit<Type>::coupledRiemannSolver
+@@ -456,11 +515,13 @@ void Foam::WENOUpwindFit<Type>::coupledRiemannSolver
+                     label own = pOwner[faceI];
+ 
+                     btsfUD[patchI][faceI] =
+-                        sumFlux
++                        sumFluxFlat
+                         (
+-                            WENOBase_.dimList()[own],
+-                            coeffsWeighted[own],
+-                            WENOBase_.intBasTrans()[faceI + startFace][0]
++                            WENOCoeff_.coeffFlat().begin()
++                          + own*WENOBase_.nDvt(),
++                            WENOBase_.intBasFlat().begin()
++                          + (2*(faceI + startFace))*WENOBase_.nDvt(),
++                            WENOBase_.nDvt()
+                         )  /WENOBase_.refFacAr()[faceI + startFace];
+ 
+                     pSfCorr[faceI] = btsfUD[patchI][faceI];
+@@ -503,7 +564,7 @@ void Foam::WENOUpwindFit<Type>::coupledRiemannSolver
              {
                  #ifdef FOAM_NEW_COUPLED_PATCHES
                  const label neighbPatchID = refCast<const cyclicFvPatch>
@@ -2215,7 +3612,7 @@ index c5d507f..7b6e911 100644
                  #else 
                  const label neighbPatchID = refCast<const cyclicFvPatch>
                          (patches[patchI]).neighbPatchID();
-@@ -516,7 +552,7 @@ void Foam::WENOUpwindFit<Type>::coupledRiemannSolver
+@@ -516,7 +577,7 @@ void Foam::WENOUpwindFit<Type>::coupledRiemannSolver
                  }
              }
          }
@@ -2225,7 +3622,7 @@ index c5d507f..7b6e911 100644
              /*************************** NOTE *******************************
              * Currently not used as it is not quite clear how 
 diff --git a/libWENOEXT/WENOUpwindFit/WENOUpwindFit.H b/libWENOEXT/WENOUpwindFit/WENOUpwindFit.H
-index f74cf29..906c570 100644
+index f74cf29..b4b3211 100644
 --- a/libWENOEXT/WENOUpwindFit/WENOUpwindFit.H
 +++ b/libWENOEXT/WENOUpwindFit/WENOUpwindFit.H
 @@ -94,7 +94,7 @@ class WENOUpwindFit
@@ -2237,7 +3634,7 @@ index f74cf29..906c570 100644
              #ifdef FOAM_NEW_GEOMFIELD_RULES
                  Boundary& btsf
              #else 
-@@ -105,8 +105,8 @@ class WENOUpwindFit
+@@ -105,12 +105,19 @@ class WENOUpwindFit
          void coupledRiemannSolver
          (
              const fvMesh& mesh,
@@ -2248,7 +3645,18 @@ index f74cf29..906c570 100644
              const Field<Field<Type> >& coeffsWeighted
          )   const;
  
-@@ -122,9 +122,9 @@ class WENOUpwindFit
+         //- Calculating the face flux values
++        Type sumFluxFlat
++        (
++            const Type* coeffcI,
++            const float* basis,
++            const label nDvt
++        ) const;
++
+         Type sumFlux
+         (
+             const labelList& dim,
+@@ -122,9 +129,9 @@ class WENOUpwindFit
          void calcLimiter
          (
              const fvMesh& mesh,
@@ -2260,7 +3668,7 @@ index f74cf29..906c570 100644
          ) const;
  
  
-@@ -139,7 +139,7 @@ class WENOUpwindFit
+@@ -139,7 +146,7 @@ class WENOUpwindFit
                      IOobject
                      (
                          "zeroFlux",
@@ -2269,7 +3677,7 @@ index f74cf29..906c570 100644
                          this->mesh()
                      ),
                      this->mesh(),
-@@ -222,7 +222,7 @@ public:
+@@ -222,7 +229,7 @@ public:
          //- Return the interpolation weighting factors for implicit part
          tmp<surfaceScalarField> weights
          (
@@ -2278,7 +3686,7 @@ index f74cf29..906c570 100644
          ) const
          {
              return pos(faceFlux_);
-@@ -235,10 +235,10 @@ public:
+@@ -235,10 +242,10 @@ public:
          }
  
          //- Return the explicit correction to the face-interpolate
@@ -2292,7 +3700,7 @@ index f74cf29..906c570 100644
  };
  // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 diff --git a/libWENOEXT/WENOUpwindFit01/WENOUpwindFit01.C b/libWENOEXT/WENOUpwindFit01/WENOUpwindFit01.C
-index c55bbf0..5f9335f 100644
+index c55bbf0..1f4fac7 100644
 --- a/libWENOEXT/WENOUpwindFit01/WENOUpwindFit01.C
 +++ b/libWENOEXT/WENOUpwindFit01/WENOUpwindFit01.C
 @@ -38,9 +38,9 @@ template<class Type>
@@ -2307,7 +3715,39 @@ index c55bbf0..5f9335f 100644
  )    const
  {
      const Field<Type>& vfI = vf.internalField();
-@@ -213,10 +213,10 @@ void Foam::WENOUpwindFit01<Type>::calcLimiter
+@@ -95,11 +95,12 @@ void Foam::WENOUpwindFit01<Type>::calcLimiter
+                         {
+                             tsfPci = component
+                             (   vfI[P[faces[fI]]] + 
+-                                sumFlux
++                                sumFluxFlat
+                                 (
+-                                    WENOBase_.dimList()[P[faces[fI]]],
+                                     coeffsWeighted[P[faces[fI]]],
+-                                    WENOBase_.intBasTrans()[faces[fI]][0]
++                                    WENOBase_.intBasFlat().begin()
++                                  + (2*faces[fI])*WENOBase_.nDvt(),
++                                    WENOBase_.nDvt()
+                                 )  /WENOBase_.refFacAr()[faces[fI]]
+                             ,cI
+                             );
+@@ -118,11 +119,12 @@ void Foam::WENOUpwindFit01<Type>::calcLimiter
+                         {
+                             tsfPci = component
+                             (   vfI[cellI] + 
+-                                sumFlux
++                                sumFluxFlat
+                                 (
+-                                    WENOBase_.dimList()[cellI],
+                                     coeffsWeighted[cellI],
+-                                    WENOBase_.intBasTrans()[cellI][1]
++                                    WENOBase_.intBasFlat().begin()
++                                  + (2*cellI + 1)*WENOBase_.nDvt(),
++                                    WENOBase_.nDvt()
+                                 )  /WENOBase_.refFacAr()[faces[fI]]
+                             ,cI
+                             );
+@@ -213,10 +215,10 @@ void Foam::WENOUpwindFit01<Type>::calcLimiter
  
  
  template<class Type>
@@ -2320,7 +3760,7 @@ index c55bbf0..5f9335f 100644
  ) const
  {
      const fvMesh& mesh = this->mesh();
-@@ -230,14 +230,14 @@ Foam::WENOUpwindFit01<Type>::correction
+@@ -230,14 +232,14 @@ Foam::WENOUpwindFit01<Type>::correction
      const labelUList& P = mesh.owner();
      const labelUList& N = mesh.neighbour();
  
@@ -2338,7 +3778,7 @@ index c55bbf0..5f9335f 100644
                  mesh,
                  IOobject::NO_READ,
                  IOobject::NO_WRITE,
-@@ -247,7 +247,7 @@ Foam::WENOUpwindFit01<Type>::correction
+@@ -247,7 +249,7 @@ Foam::WENOUpwindFit01<Type>::correction
              dimensioned<Type>(vf.name(), vf.dimensions(), pTraits<Type>::zero)
          )
      );
@@ -2347,7 +3787,67 @@ index c55bbf0..5f9335f 100644
      #ifdef FOAM_NEW_TMP_RULES
          tsfCorrP.ref();
      #else 
-@@ -329,7 +329,7 @@ template<class Type>
+@@ -261,21 +263,23 @@ Foam::WENOUpwindFit01<Type>::correction
+         if (faceFlux_[faceI] > 0)
+         {
+             tsfP[faceI] =
+-                sumFlux
++                sumFluxFlat
+                 (
+-                    WENOBase_.dimList()[P[faceI]],
+                     coeffsWeighted[P[faceI]],
+-                    WENOBase_.intBasTrans()[faceI][0]
++                    WENOBase_.intBasFlat().begin()
++                  + (2*faceI)*WENOBase_.nDvt(),
++                    WENOBase_.nDvt()
+                 ) / WENOBase_.refFacAr()[faceI];
+         }
+         else if (faceFlux_[faceI] < 0)
+         {
+             tsfP[faceI] =
+-                sumFlux
++                sumFluxFlat
+                 (
+-                    WENOBase_.dimList()[N[faceI]],
+                     coeffsWeighted[N[faceI]],
+-                    WENOBase_.intBasTrans()[faceI][1]
++                    WENOBase_.intBasFlat().begin()
++                  + (2*faceI + 1)*WENOBase_.nDvt(),
++                    WENOBase_.nDvt()
+                 )  /WENOBase_.refFacAr()[faceI];
+         }
+         else
+@@ -292,6 +296,29 @@ Foam::WENOUpwindFit01<Type>::correction
+ }
+ 
+ 
++template<class Type>
++Type Foam::WENOUpwindFit01<Type>::sumFluxFlat
++(
++    const Field<Type>& coeffcI,
++    const float* basis,
++    const label nDvt
++) const
++{
++    // Dense dot product over the compacted basis integrals (see
++    // WENOBase::buildIntBasFlat).  NOTE: the second call site indexes
++    // the flat array with a CELL id where the original indexed
++    // intBasTrans (sized nFaces) with that same cell id -- an upstream
++    // quirk preserved verbatim, not fixed: this scheme is unused by
++    // peqsiFluid and its semantics are out of scope for the port.
++    Type flux = pTraits<Type>::zero;
++    for (label k = 0; k < nDvt; k++)
++    {
++        flux += coeffcI[k]*basis[k];
++    }
++    return flux;
++}
++
++
+ template<class Type>
+ Type Foam::WENOUpwindFit01<Type>::sumFlux
+ (
+@@ -329,7 +356,7 @@ template<class Type>
  void Foam::WENOUpwindFit01<Type>::swapData
  (
      const fvMesh& mesh,
@@ -2356,7 +3856,7 @@ index c55bbf0..5f9335f 100644
      #ifdef FOAM_NEW_GEOMFIELD_RULES
          Boundary& btsf
      #else 
-@@ -391,28 +391,28 @@ template<class Type>
+@@ -391,28 +418,28 @@ template<class Type>
  void Foam::WENOUpwindFit01<Type>::coupledRiemannSolver
  (
      const fvMesh& mesh,
@@ -2391,7 +3891,7 @@ index c55bbf0..5f9335f 100644
                  mesh,
                  IOobject::NO_READ,
                  IOobject::NO_WRITE,
-@@ -423,14 +423,14 @@ void Foam::WENOUpwindFit01<Type>::coupledRiemannSolver
+@@ -423,14 +450,14 @@ void Foam::WENOUpwindFit01<Type>::coupledRiemannSolver
                  (vf.name(), vf.dimensions(), pTraits<Type>::zero)
          )
      );
@@ -2408,7 +3908,23 @@ index c55bbf0..5f9335f 100644
      #ifdef FOAM_NEW_GEOMFIELD_RULES
          Boundary& btsfUD = tsfUD.boundaryFieldRef();
      #else 
-@@ -505,7 +505,7 @@ void Foam::WENOUpwindFit01<Type>::coupledRiemannSolver
+@@ -458,11 +485,12 @@ void Foam::WENOUpwindFit01<Type>::coupledRiemannSolver
+                     label own = pOwner[faceI];
+ 
+                     btsfUD[patchI][faceI] =
+-                        sumFlux
++                        sumFluxFlat
+                         (
+-                            WENOBase_.dimList()[own],
+                             coeffsWeighted[own],
+-                            WENOBase_.intBasTrans()[faceI + startFace][0]
++                            WENOBase_.intBasFlat().begin()
++                          + (2*(faceI + startFace))*WENOBase_.nDvt(),
++                            WENOBase_.nDvt()
+                         )  /WENOBase_.refFacAr()[faceI + startFace];
+ 
+                     pSfCorr[faceI] = btsfUD[patchI][faceI];
+@@ -505,7 +533,7 @@ void Foam::WENOUpwindFit01<Type>::coupledRiemannSolver
              {
                  #ifdef FOAM_NEW_COUPLED_PATCHES
                  const label neighbPatchID = refCast<const cyclicFvPatch>
@@ -2417,7 +3933,7 @@ index c55bbf0..5f9335f 100644
                  #else 
                  const label neighbPatchID = refCast<const cyclicFvPatch>
                          (patches[patchI]).neighbPatchID();
-@@ -518,7 +518,7 @@ void Foam::WENOUpwindFit01<Type>::coupledRiemannSolver
+@@ -518,7 +546,7 @@ void Foam::WENOUpwindFit01<Type>::coupledRiemannSolver
                  }
              }
          }
@@ -2427,7 +3943,7 @@ index c55bbf0..5f9335f 100644
              /*************************** NOTE *******************************
              * Currently not used as it is not quite clear how 
 diff --git a/libWENOEXT/WENOUpwindFit01/WENOUpwindFit01.H b/libWENOEXT/WENOUpwindFit01/WENOUpwindFit01.H
-index 29c41ed..0ef2915 100644
+index 29c41ed..df2f003 100644
 --- a/libWENOEXT/WENOUpwindFit01/WENOUpwindFit01.H
 +++ b/libWENOEXT/WENOUpwindFit01/WENOUpwindFit01.H
 @@ -87,7 +87,7 @@ class WENOUpwindFit01
@@ -2439,7 +3955,7 @@ index 29c41ed..0ef2915 100644
              #ifdef FOAM_NEW_GEOMFIELD_RULES
                  Boundary& btsf
              #else 
-@@ -98,8 +98,8 @@ class WENOUpwindFit01
+@@ -98,12 +98,19 @@ class WENOUpwindFit01
          void coupledRiemannSolver
          (
              const fvMesh& mesh,
@@ -2450,7 +3966,18 @@ index 29c41ed..0ef2915 100644
              const Field<Field<Type> >& coeffsWeighted
          )   const;
  
-@@ -115,9 +115,9 @@ class WENOUpwindFit01
+         //- Calculating the face flux values
++        Type sumFluxFlat
++        (
++            const Field<Type>& coeffcI,
++            const float* basis,
++            const label nDvt
++        ) const;
++
+         Type sumFlux
+         (
+             const labelList& dim,
+@@ -115,9 +122,9 @@ class WENOUpwindFit01
          void calcLimiter
          (
              const fvMesh& mesh,
@@ -2462,7 +3989,7 @@ index 29c41ed..0ef2915 100644
          ) const;
  
  
-@@ -132,7 +132,7 @@ class WENOUpwindFit01
+@@ -132,7 +139,7 @@ class WENOUpwindFit01
                      IOobject
                      (
                          "zeroFlux",
@@ -2471,7 +3998,7 @@ index 29c41ed..0ef2915 100644
                          this->mesh()
                      ),
                      this->mesh(),
-@@ -212,7 +212,7 @@ public:
+@@ -212,7 +219,7 @@ public:
          //- Return the interpolation weighting factors for implicit part
          tmp<surfaceScalarField> weights
          (
@@ -2480,7 +4007,7 @@ index 29c41ed..0ef2915 100644
          ) const
          {
              return pos(faceFlux_);
-@@ -225,10 +225,10 @@ public:
+@@ -225,10 +232,10 @@ public:
          }
  
          //- Return the explicit correction to the face-interpolate
