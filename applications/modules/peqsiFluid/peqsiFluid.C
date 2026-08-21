@@ -95,6 +95,7 @@ Foam::solvers::peqsiFluid::peqsiFluid(fvMesh& mesh)
     ),
 
     acousticTimeIndex_(-1),
+    ladDtLimit_(great),
 
     initialMass_(-1),
 
@@ -142,6 +143,22 @@ Foam::solvers::peqsiFluid::~peqsiFluid()
 
 
 // * * * * * * * * * * * * * * * Member Functions  * * * * * * * * * * * * * //
+
+Foam::scalar Foam::solvers::peqsiFluid::maxDeltaT() const
+{
+    const scalar coDt = isothermalFluid::maxDeltaT();
+
+    if (ladDtLimit_ < coDt)
+    {
+        Info<< "PEQSI dt limit: LAD explicit-diffusion bound "
+            << ladDtLimit_ << " s (Courant bound " << coDt << " s)"
+            << endl;
+        return ladDtLimit_;
+    }
+
+    return coDt;
+}
+
 
 void Foam::solvers::peqsiFluid::preSolve()
 {

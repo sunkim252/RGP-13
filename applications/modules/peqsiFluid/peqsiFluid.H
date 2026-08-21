@@ -187,6 +187,17 @@ protected:
         //- Guard so the acoustic substep runs once per time step
         label acousticTimeIndex_;
 
+        //- LAD explicit-diffusion time-step limit, refreshed by the
+        //  advective substep from the UNCAPPED artificial-diffusivity
+        //  demand.  The 141520 post-mortem: the demand is set by the
+        //  flow (1.15e-3 m^2/s at the jet-head interface) while the
+        //  explicit stability cap is 0.45 d^2/dt -- raise dt past
+        //  0.45 d^2/D and the cap clips the dissipation the interface
+        //  needs; dp then grew 2.3-7x per step and the run died twice
+        //  at the same dt.  This limit keeps dt below that crossing
+        //  instead of finding it by crashing.
+        scalar ladDtLimit_;
+
         //- Previous-step cp (saved by updateCoefficients; used by the
         //  LAD explicit-stability cap)
         mutable scalarField cpPrev_;
@@ -297,6 +308,10 @@ public:
 
 
     // Member Functions
+
+        //- Return the maximum time-step: the base Courant limit
+        //  combined with the LAD explicit-diffusion limit above
+        virtual scalar maxDeltaT() const;
 
         //- Called at the start of the time-step, before the PIMPLE loop
         virtual void preSolve();

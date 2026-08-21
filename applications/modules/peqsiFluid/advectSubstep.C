@@ -339,10 +339,43 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
             {
                 scalarField& D = tDart.ref().primitiveFieldRef();
                 const scalar rdt = 0.45/dt.value();
+
+                // Time-step limit from the UNCAPPED demand -- it must be
+                // read before the min() below, or the capped value feeds
+                // back into dt and the bound degenerates to dt <= dt.
+                //
+                // A single clamp-saturated cell can spiral the TK demand
+                // to 8e9 m^2/s (measured, 2-D vortex blow-up); such a
+                // cell must not crush dt to nothing, so the demand used
+                // for the limit is itself bounded (peqsiLadDtDemandMax,
+                // default 5e-3 m^2/s) and anything above that is left to
+                // the 0.45 cap to handle, exactly as today.  The safety
+                // factor covers the one-step lag: the limit computed
+                // here steers the NEXT step's dt.
+                const scalar Dsane =
+                    pimple.dict().lookupOrDefault<scalar>
+                    (
+                        "peqsiLadDtDemandMax", 5e-3
+                    );
+                const scalar fSafe =
+                    pimple.dict().lookupOrDefault<scalar>
+                    (
+                        "peqsiLadDtSafety", 0.8
+                    );
+
+                scalar dtLim = great;
                 forAll(D, i)
                 {
+                    const scalar Duse = min(D[i], Dsane);
+                    if (Duse > vSmall)
+                    {
+                        dtLim =
+                            min(dtLim, 0.45*sqr(deltaMin[i])/Duse);
+                    }
                     D[i] = min(D[i], rdt*sqr(deltaMin[i]));
                 }
+                reduce(dtLim, minOp<scalar>());
+                ladDtLimit_ = fSafe*dtLim;
             }
 
             Info<< "PEQSI LAD: rho_art max = "
