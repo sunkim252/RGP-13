@@ -103,11 +103,58 @@ void Foam::solvers::peqsiFluid::invertTemperature()
     // overwrite it with the EOS density and destroy the scheme's
     // structural mass conservation).
     //
-    // Deliberate deviation from WKK Fig. 3 (documented in the wiki):
-    // the reference inverts h(T, v) at fixed specific volume with the
-    // slope xi; this implementation inverts at fixed p with the thermo's
-    // own cp-slope Newton.  The difference is of EOS-residual order;
-    // revisit against the 1-D validation if needed.
+    // CLOSURE PAIR (peqsiConstantV, default OFF -- see the measured
+    // failure at the end of this comment).
+    //
+    // WKK Fig. 3 inverts h(T, v) at fixed specific volume with slope xi.
+    // This module used to invert at fixed p with a cp-slope Newton, on
+    // the assumption that the difference was "of EOS-residual order".
+    // Measured on the 1-D validation case A, it is not: the resulting
+    // gap between the transported density and the EOS density ran to a
+    // volume MEAN of 45%, with every cell above 1% and the worst cell
+    // carrying rho = 317 against rhoEOS = 91 at the same (p, T).  The
+    // fixed-p pair leaves p, T and h mutually consistent and lets rho --
+    // the variable that carries mass and momentum -- float.
+    //
+    // The constant-v closure instead holds the TRANSPORTED rho and h and
+    // solves for the pair (pEos, T) that the equation of state maps to
+    // them, by a 2x2 Newton on
+    //
+    //     F1 = rhoEos(pEos, T) - rho_transported = 0
+    //     F2 = hEos  (pEos, T) - h_transported   = 0
+    //
+    //     J = [ psi        drho/dT|p ]      drho/dT|p = rho^2 dpdT/dpdv
+    //         [ dh/dp|T    cp        ]      dh/dp|T   = v + T dpdT/dpdv
+    //
+    // Converged, rhoEos == rho_transported identically, so the thermo
+    // state -- and with it psi, cp, cv and therefore alpha and beta --
+    // is evaluated on ONE consistent state instead of mixing the
+    // transported density with properties taken at (p_transported, T).
+    //
+    // The inconsistency does not vanish; it MOVES to pressure, as
+    // pEos - p_transported.  That is the residual PEQSI is built to
+    // carry (p is the projected variable), but it is reported below so
+    // the trade is measured rather than assumed.
+    //
+    // MEASURED, AND IT DOES NOT WORK IN THIS FORM (1-D case A):
+    //   drift    0.446 -> 0.731 volume mean  (worse)
+    //   |pEos-p|/p max 5.07, mean |pEos-p| 12.8 MPa against a 5 MPa field
+    //   Newton pinned at 60 iterations, 998 non-convergence warnings
+    // The Jacobian is right (checked against the ideal-gas limit, where
+    // dh/dp|T collapses to zero as it must); what fails is linearising
+    // the density residual in p.  The step it is asked to take is not
+    // small: at the worst cell the transported rho is 317 where the EOS
+    // gives 91 at the same T, and closing that by pressure alone needs
+    // tens of MPa, far outside the range over which rho(p) is linear.
+    //
+    // Doing this properly needs h(T, v) evaluated directly -- which is
+    // what WKK actually do -- rather than reached through h(p, T).  For
+    // SRK that is analytic (ideal part plus departure at fixed v) but it
+    // lives in src/SRKGas, not in the basicThermo interface, so it is a
+    // deeper change than this one.  Left switchable and OFF until then;
+    // the drift diagnostic below stays on either way, because a 45%
+    // volume-mean gap between the mass-carrying density and the EOS is
+    // worth watching whichever pair closes the state.
     //
     // The discarded EOS density is the scheme's "energy-side parking":
     // report the drift as the standing audit metric.
@@ -130,90 +177,151 @@ void Foam::solvers::peqsiFluid::invertTemperature()
         label iter = 0;
         scalar maxRel = great;
 
-        // cp slope evaluated ONCE per step (adequate: cp varies slowly
-        // over the per-step temperature increments; profiling showed the
-        // per-iteration Cp() re-evaluation doubled the Newton cost)
+        const Switch constantV
+        (
+            pimple.dict().lookupOrDefault<Switch>("peqsiConstantV", false)
+        );
+
+        // Property slopes at the current thermo state (p, T).  They are
+        // the Jacobian of the closure, not its residual, so evaluating
+        // them once per step is adequate -- the residual itself is
+        // re-evaluated exactly every pass through he(p, T).
         const auto tCp = thermo_.Cp();
+        const auto tCv = thermo_.Cv();
         const scalarField& cpf = tCp().primitiveField();
+        const scalarField& cvf = tCv().primitiveField();
+        const scalarField& psif = thermo_.psi().primitiveField();
+        const scalarField& rhoEf = thermo_.rho()().primitiveField();
+        const scalarField& rhoTf = rho_.primitiveField();
 
         scalarField& Tf = Tw.primitiveFieldRef();
         const scalarField& hf = h_.primitiveField();
 
-        // After the first full-field pass only the cells still moving
-        // (steep-front cells, typically a small fraction) are iterated,
-        // via the thermo's cell-subset he(T, cells) evaluation --
-        // profiling showed the full-field SRK sweep per iteration
-        // dominating the closure cost.
-        labelList active;
+        // Pressure offset of the constant-v closure: the (pEos - p)
+        // that puts the EOS density onto the transported density.  This
+        // is where the scheme's inconsistency is parked once rho is made
+        // consistent, so it is accumulated and reported below.
+        scalarField dpEos(Tf.size(), 0.0);
+
         label nSaturated_ = 0;
 
         for (; iter < 60 && maxRel > tol; ++iter)
         {
             maxRel = 0;
 
-            if (iter == 0)
+            const volScalarField hk(thermo_.he(p_, Tw));
+            const scalarField& hkf = hk.primitiveField();
+
+            forAll(Tf, i)
             {
-                const volScalarField hk(thermo_.he(p_, Tw));
-                const scalarField& hkf = hk.primitiveField();
+                scalar dT;
 
-                DynamicList<label> nextActive(Tf.size()/8);
-                forAll(Tf, i)
+                if (constantV)
                 {
-                    scalar dT = (hf[i] - hkf[i])/max(cpf[i], small);
-                    dT = min(max(dT, -dTmax), dTmax);
-                    const scalar Tnew = Tf[i] + dT;
+                    // 2x2 Newton on (pEos, T) holding the TRANSPORTED
+                    // rho and h:
+                    //   [ psi      drho/dT|p ] [dp]   [rhoT - rhoEos]
+                    //   [ dh/dp|T  cp        ] [dT] = [hT   - hEos  ]
+                    // with the SRK slopes already used for alpha/beta:
+                    //   dpdv = -rho^2/psi, dpdT = rho sqrt((cp-cv)/(T psi))
+                    //   drho/dT|p = rho^2 dpdT/dpdv
+                    //   dh/dp|T   = v + T dpdT/dpdv
+                    const scalar rho = rhoEf[i];
+                    const scalar v = 1.0/max(rho, small);
+                    const scalar psi = max(psif[i], small);
+                    const scalar dpdv = -sqr(rho)/psi;
+                    const scalar dpdT =
+                        rho*sqrt(max((cpf[i] - cvf[i])/(Tf[i]*psi), 0.0));
+                    const scalar dvdT = -dpdT/dpdv;      // (dv/dT)_p
 
-                    // Saturated at a clamp: the transported h lies
-                    // outside the EOS window (front undershoot) -- pin
-                    // and treat as converged instead of oscillating for
-                    // 60 iterations (measured 934 warnings before the
-                    // 2-D vortex blow-up)
-                    if ((Tnew <= Tmin && dT < 0) || (Tnew >= Tmax && dT > 0))
+                    const scalar J11 = psi;
+                    const scalar J12 = -sqr(rho)*dvdT;   // drho/dT|p
+                    const scalar J21 = v - Tf[i]*dvdT;   // dh/dp|T
+                    const scalar J22 = cpf[i];
+
+                    const scalar det = J11*J22 - J12*J21;
+
+                    // Residuals: the density one is taken at the CURRENT
+                    // pEos offset (linearised in p), the enthalpy one is
+                    // the exact he(p, T) plus the same linear p-shift.
+                    const scalar F1 =
+                        rhoTf[i] - (rhoEf[i] + psi*dpEos[i]);
+                    const scalar F2 =
+                        hf[i] - (hkf[i] + J21*dpEos[i]);
+
+                    if (mag(det) > vSmall)
                     {
-                        Tf[i] = Tnew <= Tmin ? Tmin : Tmax;
-                        nSaturated_++;
-                        continue;
+                        dpEos[i] += (F1*J22 - F2*J12)/det;
+                        dT = (J11*F2 - J21*F1)/det;
                     }
-
-                    Tf[i] = min(max(Tnew, Tmin), Tmax);
-                    const scalar rel = mag(dT)/max(Tf[i], small);
-                    if (rel > tol) nextActive.append(i);
-                    maxRel = max(maxRel, rel);
+                    else
+                    {
+                        // Degenerate Jacobian: fall back to the
+                        // fixed-p cp-slope step rather than stall
+                        dT = (hf[i] - hkf[i])/max(cpf[i], small);
+                    }
                 }
-                active.transfer(nextActive);
-            }
-            else
-            {
-                scalarField Tsub(active.size());
-                forAll(active, k) Tsub[k] = Tf[active[k]];
-
-                const tmp<scalarField> thk(thermo_.he(Tsub, active));
-                const scalarField& hkf = thk();
-
-                DynamicList<label> nextActive(active.size());
-                forAll(active, k)
+                else
                 {
-                    const label i = active[k];
-                    scalar dT = (hf[i] - hkf[k])/max(cpf[i], small);
-                    dT = min(max(dT, -dTmax), dTmax);
-                    const scalar Tnew = Tf[i] + dT;
-
-                    if ((Tnew <= Tmin && dT < 0) || (Tnew >= Tmax && dT > 0))
-                    {
-                        Tf[i] = Tnew <= Tmin ? Tmin : Tmax;
-                        nSaturated_++;
-                        continue;
-                    }
-
-                    Tf[i] = min(max(Tnew, Tmin), Tmax);
-                    const scalar rel = mag(dT)/max(Tf[i], small);
-                    if (rel > tol) nextActive.append(i);
-                    maxRel = max(maxRel, rel);
+                    dT = (hf[i] - hkf[i])/max(cpf[i], small);
                 }
-                active.transfer(nextActive);
+
+                dT = min(max(dT, -dTmax), dTmax);
+                const scalar Tnew = Tf[i] + dT;
+
+                // Saturated at a clamp: the transported h lies outside
+                // the EOS window (front undershoot) -- pin and treat as
+                // converged instead of oscillating for 60 iterations
+                // (measured 934 warnings before the 2-D vortex blow-up)
+                if ((Tnew <= Tmin && dT < 0) || (Tnew >= Tmax && dT > 0))
+                {
+                    Tf[i] = Tnew <= Tmin ? Tmin : Tmax;
+                    nSaturated_++;
+                    continue;
+                }
+
+                Tf[i] = min(max(Tnew, Tmin), Tmax);
+                maxRel = max(maxRel, mag(dT)/max(Tf[i], small));
             }
 
             reduce(maxRel, maxOp<scalar>());
+        }
+
+        if (constantV)
+        {
+            // Report the pressure residual the closure now carries: this
+            // is the trade for a consistent density, and it is measured
+            // rather than assumed.
+            scalar maxDpRel = 0, sumAbs = 0;
+            forAll(dpEos, i)
+            {
+                maxDpRel =
+                    max(maxDpRel, mag(dpEos[i])/max(mag(p_[i]), small));
+                sumAbs += mag(dpEos[i]);
+            }
+            reduce(maxDpRel, maxOp<scalar>());
+            reduce(sumAbs, sumOp<scalar>());
+            label nc = Tf.size();
+            reduce(nc, sumOp<label>());
+
+            Info<< "PEQSI closure (constant-v): |pEos - p|/p max = "
+                << maxDpRel << ", mean |pEos - p| = "
+                << sumAbs/max(nc, 1) << " Pa, Newton iters = "
+                << iter << endl;
+        }
+
+        if (nSaturated_ > 0)
+        {
+            reduce(nSaturated_, sumOp<label>());
+            Info<< "PEQSI thermo closure: " << nSaturated_
+                << " clamp-saturated Newton cell-iterations" << endl;
+        }
+
+        if (maxRel > tol)
+        {
+            WarningInFunction
+                << "T Newton inversion not converged: maxRel = "
+                << maxRel << " after " << iter << " iterations" << endl;
         }
         Tw.correctBoundaryConditions();
 
@@ -268,22 +376,62 @@ void Foam::solvers::peqsiFluid::invertTemperature()
         rho_.correctBoundaryConditions();
     }
 
+    // Drift between the transported density (which carries the mass
+    // ledger) and the EOS density at (p, T).  The max alone cannot say
+    // whether a large value is one pathological cell or a whole region,
+    // and that distinction decides whether the gap is worth closing by
+    // iteration: reported here with its location and a volume-weighted
+    // distribution.
     scalar maxDrift = 0;
+    label maxCell = -1;
+    scalar volAbove10 = 0, volAbove1 = 0, volTot = 0, volWeighted = 0;
     {
         const scalarField& re = thermo_.rho()().primitiveField();
         const scalarField& rt = rho_.primitiveField();
+        const scalarField& vol = mesh.V();
+
         forAll(rt, i)
         {
-            maxDrift = max(maxDrift, mag(re[i] - rt[i])/max(rt[i], small));
+            const scalar d = mag(re[i] - rt[i])/max(rt[i], small);
+            if (d > maxDrift)
+            {
+                maxDrift = d;
+                maxCell = i;
+            }
+            volTot += vol[i];
+            volWeighted += d*vol[i];
+            if (d > 0.10) volAbove10 += vol[i];
+            if (d > 0.01) volAbove1 += vol[i];
         }
+
+        scalar maxDriftLocal = maxDrift;
         reduce(maxDrift, maxOp<scalar>());
+        reduce(volAbove10, sumOp<scalar>());
+        reduce(volAbove1, sumOp<scalar>());
+        reduce(volTot, sumOp<scalar>());
+        reduce(volWeighted, sumOp<scalar>());
+
+        // Only the rank actually holding the maximum reports its state
+        if (maxCell >= 0 && mag(maxDriftLocal - maxDrift) < small)
+        {
+            Pout<< "PEQSI drift peak: " << maxDrift
+                << " at " << mesh.C()[maxCell]
+                << " rho=" << rt[maxCell]
+                << " rhoEOS=" << re[maxCell]
+                << " p=" << p_[maxCell]
+                << " T=" << thermo_.T()[maxCell]
+                << " h=" << h_[maxCell] << endl;
+        }
     }
 
     Info<< "PEQSI thermo closure: T = ["
         << gMin(thermo_.T().primitiveField()) << ", "
         << gMax(thermo_.T().primitiveField())
         << "] K, rho drift (EOS vs transported) max = "
-        << maxDrift << endl;
+        << maxDrift
+        << ", vol-mean = " << volWeighted/max(volTot, vSmall)
+        << ", vol frac >1% = " << volAbove1/max(volTot, vSmall)
+        << ", >10% = " << volAbove10/max(volTot, vSmall) << endl;
 }
 
 

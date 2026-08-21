@@ -683,7 +683,8 @@ void Foam::solvers::peqsiFluid::applySCFilter
     //
     //   per direction l:
     //     Dp      = -1/4 lap_l(p)                  (high-pass pressure)
-    //     r       = (Dp/p)^2                       (dimensionless sensor)
+    //     Dh      = -1/4 lap_l(h)                  (high-pass enthalpy)
+    //     r       = max((Dp/p)^2, (Dh/|h|)^2)      (dimensionless sensor)
     //     sig_i   = max(0, 1 - rTh/r)              (their Eq. for sigma)
     //     q      += sigmaMax/4 div(sig_f w_l D_l^2 grad q),  q in {p, rho, U}
     //
@@ -721,7 +722,37 @@ void Foam::solvers::peqsiFluid::applySCFilter
         );
 
         const volScalarField Dp(-0.25*fvc::laplacian(wd2, p_));
-        const volScalarField r(sqr(Dp/p_));
+        const volScalarField Dh(-0.25*fvc::laplacian(wd2, h_));
+
+        // The sensor triggers on EITHER carrier.  BCB gate on pressure
+        // alone, which is right for the acoustic spikes they target; it
+        // is blind to the mode that killed 141472 at t = 6.63 ms, where
+        // one cell at the jet head went T 298 -> 1032 K in four steps
+        // while the pressure field stayed smooth enough that (Dp/p)^2
+        // never crossed rTh.  Adding h to the filtered SET (552889f)
+        // could not help on its own: with sigma = 0 the filter is the
+        // identity on every variable in the set, so the trigger has to
+        // see h too.
+        //
+        // h is not sign-definite (it runs around -1.3e5 J/kg here), so
+        // the local magnitude does the normalising, floored against a
+        // global scale -- otherwise a cell whose h passes through zero
+        // manufactures an unbounded sensor out of a finite wiggle.
+        const dimensionedScalar hScale
+        (
+            "hScale",
+            h_.dimensions(),
+            max(gMax(mag(h_.primitiveField())), vSmall)
+        );
+
+        const volScalarField r
+        (
+            max
+            (
+                sqr(Dp/p_),
+                sqr(Dh/max(mag(h_), 1e-3*hScale))
+            )
+        );
 
         const volScalarField sigSC
         (
