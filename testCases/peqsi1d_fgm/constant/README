@@ -1,0 +1,5 @@
+Two large inputs are not versioned here; fetch them before running:
+
+  fgmProperties   <- tools/fgm_table_gen/data/fpvwork/peqsi_dpm2_lo30_coef.dict
+                     (the verification bake with PEQSI_* blocks and W)
+  thermo.wang2011 <- the rd0110 case constant/ (106-species Wang 2011)

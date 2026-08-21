@@ -1,0 +1,39 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  13
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version         2;
+    format          ascii;
+    class           dictionary;
+    location        "constant";
+    object          physicalProperties;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// Wang-Huo-Yang 2015 surrogate, real-fluid thermo at 52.5 bar.
+// SRK EOS + Chung-Takahashi transport, 106 Wang-2011 species.
+// fgmFluid sets species mass fractions from the FPV manifold each iteration.
+
+thermoType
+{
+    type            heRhoThermo;
+    mixture         SRKchungTakaMixture;
+    transport       chung;
+    thermo          janaf;
+    energy          absoluteEnthalpy;
+    equationOfState SRKGas;
+    specie          rfSpecie;
+}
+
+defaultSpecie N2;
+speciesDiffusion off;   // Tier-0: skip dead Takahashi diffusion matrices (FPV)
+
+#include "thermo.wang2011"
+
+
+// ************************************************************************* //

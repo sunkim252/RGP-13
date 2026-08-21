@@ -1,0 +1,25 @@
+FoamFile { format ascii; class dictionary; object fvSolution; }
+solvers
+{
+    "PEQSI:dp.*"
+    {
+        solver          PBiCGStab;
+        preconditioner  DILU;
+        tolerance       1e-10;
+        relTol          0;
+    }
+}
+PIMPLE
+{
+    peqsiConstantV no;
+    peqsiFGM yes;
+    peqsiHelmholtzTheta 0.5;
+    peqsiFilterSigma 0.5;
+    peqsiFilterSC 1.0;
+    peqsiFilterSCThreshold 1e-5;
+
+    momentumPredictor yes;
+    nOuterCorrectors 1;
+    nCorrectors     1;
+    nNonOrthogonalCorrectors 0;
+}

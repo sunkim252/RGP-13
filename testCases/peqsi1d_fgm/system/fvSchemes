@@ -1,0 +1,20 @@
+FoamFile { format ascii; class dictionary; object fvSchemes; }
+ddtSchemes { default Euler; }
+gradSchemes { default Gauss linear; }
+divSchemes
+{
+    default none;
+    div(phiv,rho)  Gauss limitedLinear 1;
+    div(phiv,rhoU) Gauss filteredLinear;
+    div(phiv,p)    Gauss limitedLinear 1;
+    div(phiv,rhoh) Gauss limitedLinear 1;
+    div(phiv)      Gauss linear;
+    div(phiv,Z)    Gauss WENOUpwindFit01 2;
+    div(phiv,Zvar) Gauss WENOUpwindFit 2 1;
+    div(phiv,Yc)   Gauss WENOUpwindFit 2 1;
+    "div\(\(PEQSI:mu\*.*" Gauss linear;
+    "div\(PEQSI:.*"        Gauss linear;
+}
+laplacianSchemes { default Gauss linear corrected; }
+interpolationSchemes { default linear; }
+snGradSchemes { default corrected; }
