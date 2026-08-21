@@ -448,6 +448,7 @@ void Foam::solvers::peqsiFluid::invertTemperature()
     scalar maxDrift = 0;
     label maxCell = -1;
     scalar volAbove10 = 0, volAbove1 = 0, volTot = 0, volWeighted = 0;
+    label nAbove10 = 0, nAbove1 = 0;
     {
         const scalarField& re = thermo_.rho()().primitiveField();
         const scalarField& rt = rho_.primitiveField();
@@ -463,8 +464,8 @@ void Foam::solvers::peqsiFluid::invertTemperature()
             }
             volTot += vol[i];
             volWeighted += d*vol[i];
-            if (d > 0.10) volAbove10 += vol[i];
-            if (d > 0.01) volAbove1 += vol[i];
+            if (d > 0.10) { volAbove10 += vol[i]; nAbove10++; }
+            if (d > 0.01) { volAbove1 += vol[i]; nAbove1++; }
         }
 
         scalar maxDriftLocal = maxDrift;
@@ -473,6 +474,8 @@ void Foam::solvers::peqsiFluid::invertTemperature()
         reduce(volAbove1, sumOp<scalar>());
         reduce(volTot, sumOp<scalar>());
         reduce(volWeighted, sumOp<scalar>());
+        reduce(nAbove10, sumOp<label>());
+        reduce(nAbove1, sumOp<label>());
 
         // Only the rank actually holding the maximum reports its state
         if (maxCell >= 0 && mag(maxDriftLocal - maxDrift) < small)
@@ -495,6 +498,22 @@ void Foam::solvers::peqsiFluid::invertTemperature()
         << ", vol-mean = " << volWeighted/max(volTot, vSmall)
         << ", vol frac >1% = " << volAbove1/max(volTot, vSmall)
         << ", >10% = " << volAbove10/max(volTot, vSmall) << endl;
+
+    // Cell-COUNT fractions as well as volume fractions.  On a strongly
+    // graded mesh the two say very different things: the drift lives in
+    // the transcritical interface, which sits in the SMALLEST cells,
+    // while the volume is dominated by the large quiescent cells far
+    // downstream -- so a volume weighting flatters the number by roughly
+    // the cell-size ratio.  Reporting both stops that reading.
+    {
+        label nTot = rho_.primitiveField().size();
+        reduce(nTot, sumOp<label>());
+        Info<< "PEQSI drift by cell count: frac >1% = "
+            << scalar(nAbove1)/max(nTot, 1)
+            << ", >10% = " << scalar(nAbove10)/max(nTot, 1)
+            << "  (" << nAbove1 << " / " << nAbove10
+            << " of " << nTot << " cells)" << endl;
+    }
 }
 
 

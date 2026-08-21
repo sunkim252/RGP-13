@@ -712,6 +712,7 @@ void Foam::solvers::peqsiFluid::applySCFilter
     const dimensionedScalar rFloor(dimless, vSmall);
 
     scalar sigMaxAll = 0;   // diagnostic: strongest sensor this step
+    scalar rMaxAll = 0;     // raw sensor value, reported even when quiet
 
     for (direction cmpt = 0; cmpt < 3; cmpt++)
     {
@@ -745,14 +746,46 @@ void Foam::solvers::peqsiFluid::applySCFilter
             max(gMax(mag(h_.primitiveField())), vSmall)
         );
 
+        // Enthalpy term: OFF by default, and it should stay off.
+        //
+        // BCB gate on (Dp/p)^2, and that works because of pressure
+        // EQUILIBRIUM: a physical contact carries no pressure jump, so
+        // whatever Dp survives the high-pass is numerical.  Enthalpy has
+        // no such property here -- a 125 K core in a 298 K ambient is a
+        // large PHYSICAL jump in h -- so (Dh/|h|)^2 does not detect
+        // wiggles, it detects the interface.  Measured on the 3-D jet:
+        // the sensor went from 6 firings in 3652 steps to 58 in 59, at
+        // ~0.97 strength, and the jet diffused from a 20 mm head to a
+        // 60 mm smear in one millisecond.  That is the same failure the
+        // |grad rho| LAD sensor showed on the Mayer case: a first-
+        // derivative measure cannot tell a transcritical interface from
+        // grid-scale noise.
+        //
+        // The mode that killed 141472 was in dp, not in h, so the
+        // pressure sensor is the right instrument for it -- it just
+        // fired too late.  Calibrating rTh needs the sensor's margin
+        // during the growth, which is why rMax is now reported every
+        // step whether or not the filter fires.
+        const Switch hSensor
+        (
+            pimple.dict().lookupOrDefault<Switch>("peqsiFilterSCEnthalpy", false)
+        );
+
         const volScalarField r
         (
-            max
+            hSensor
+          ? volScalarField
             (
-                sqr(Dp/p_),
-                sqr(Dh/max(mag(h_), 1e-3*hScale))
+                max
+                (
+                    sqr(Dp/p_),
+                    sqr(Dh/max(mag(h_), 1e-3*hScale))
+                )
             )
+          : volScalarField(sqr(Dp/p_))
         );
+
+        rMaxAll = max(rMaxAll, gMax(r.primitiveField()));
 
         const volScalarField sigSC
         (
@@ -808,9 +841,14 @@ void Foam::solvers::peqsiFluid::applySCFilter
         h_.correctBoundaryConditions();
     }
 
+    // rMax every step, sigma only when it bites: the threshold can only
+    // be calibrated against how close the sensor ran to it while the
+    // instability was still growing.
+    Info<< "PEQSI SC sensor: rMax = " << rMaxAll
+        << " (rTh = " << rTh << ")";
     if (sigMaxAll > small)
     {
-        Info<< "PEQSI SC filter: max sensor strength = "
-            << sigMaxAll << endl;
+        Info<< ", max sigma = " << sigMaxAll;
     }
+    Info<< endl;
 }
