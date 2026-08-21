@@ -683,9 +683,19 @@ void Foam::solvers::peqsiFluid::fgmClosure()
     const scalar pTbl = tbl.pRef();
     const scalar RR = constant::thermodynamic::RR;
 
-    // coefficient-diagnostic accumulators
+    // Coefficient diagnostic.  A single max hides where the table is
+    // weak, and "where" is the actionable half: the tabulation session
+    // reports self-reproduction over the WHOLE manifold, this reports
+    // it over the states a run actually visits, so binning by the
+    // manifold coordinates turns the solver into an independent probe
+    // of table quality.  Bins: c (progress) and T, which is where the
+    // known weaknesses live (hot core, high c).
     scalar dAlpha = 0, dBeta = 0, dT = 0;
     label nGas = 0, nDense = 0;
+
+    const label nBin = 4;
+    FixedList<scalar, nBin> dTbinC(0.0), dTbinT(0.0);
+    FixedList<label, nBin> nBinC(0), nBinT(0);
 
     const bool haveCoeffs = tbl.hasOptTable("PEQSI_alpha");
     const List<scalar>* aT =
@@ -757,7 +767,17 @@ void Foam::solvers::peqsiFluid::fgmClosure()
                    /max(mag(beta_[celli]), small));
         }
 
-        dT = max(dT, mag(tbl.interpolate(Ttbl, st) - Tf[celli]));
+        const scalar dTc = mag(tbl.interpolate(Ttbl, st) - Tf[celli]);
+        dT = max(dT, dTc);
+
+        // c bins [0,.25,.5,.75,1], T bins [<600, <1200, <2000, >=2000]
+        const label ic = min(label(Ccl*nBin), nBin - 1);
+        dTbinC[ic] = max(dTbinC[ic], dTc); nBinC[ic]++;
+
+        const scalar Tc2 = Tf[celli];
+        const label it =
+            Tc2 < 600 ? 0 : (Tc2 < 1200 ? 1 : (Tc2 < 2000 ? 2 : 3));
+        dTbinT[it] = max(dTbinT[it], dTc); nBinT[it]++;
     }
 
     forAll(spn, k)
@@ -772,10 +792,41 @@ void Foam::solvers::peqsiFluid::fgmClosure()
     reduce(nGas, sumOp<label>());
     reduce(nDense, sumOp<label>());
 
+    for (label b = 0; b < nBin; b++)
+    {
+        reduce(dTbinC[b], maxOp<scalar>());
+        reduce(dTbinT[b], maxOp<scalar>());
+        reduce(nBinC[b], sumOp<label>());
+        reduce(nBinT[b], sumOp<label>());
+    }
+
     Info<< "PEQSI FGM: coeff diag max rel dAlpha = " << dAlpha
         << ", dBeta = " << dBeta
         << ", |T_tbl - T| max = " << dT
-        << " K, phase gas/dense = " << nGas << "/" << nDense << endl;
+        << " K, phase gas/dense = " << nGas << "/" << nDense << nl
+        << "PEQSI FGM: |dT| by c  ";
+    for (label b = 0; b < nBin; b++)
+    {
+        if (nBinC[b])
+        {
+            Info<< "[" << 0.25*b << "," << 0.25*(b + 1) << ")="
+                << dTbinC[b] << "K/" << nBinC[b] << " ";
+        }
+    }
+    Info<< nl << "PEQSI FGM: |dT| by T  ";
+    {
+        static const char* lab[4] =
+            {"<600", "<1200", "<2000", ">=2000"};
+        for (label b = 0; b < nBin; b++)
+        {
+            if (nBinT[b])
+            {
+                Info<< lab[b] << "=" << dTbinT[b] << "K/"
+                    << nBinT[b] << " ";
+            }
+        }
+    }
+    Info<< endl;
 }
 
 
