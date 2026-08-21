@@ -241,6 +241,27 @@ protected:
         //  (Bogey, de Cacqueray & Bailly, JCP 228 (2009) 1447)
         void applySCFilter(const scalar sigmaMax, const scalar rTh);
 
+        //- Bounding artificial diffusivity for a [0,1] scalar, after
+        //  Terashima & Koshi 2012 Eq. (27):
+        //
+        //    D* = C_Y c bar[(Y-1)H(Y-1) - Y(1-H(Y))] Delta_Y
+        //
+        //  with C_Y = 100 (their standard value), c the local sound
+        //  speed, Delta_Y = (dx dy dz)^(1/3) and the overbar the same
+        //  truncated-Gaussian filter used by the LAD terms.  The bracket
+        //  vanishes inside [0,1], so the term is EXACTLY zero wherever
+        //  the scalar is bounded and grows with the violation -- it
+        //  removes over/undershoots (and with them the temperature
+        //  oscillations they drive) without touching resolved fronts.
+        //  Used for the FGM manifold coordinates (Z, normalised c),
+        //  which are bounded by construction.
+        tmp<volScalarField> boundingArtDiffusivity
+        (
+            const volScalarField& Y,
+            const volScalarField& c,
+            const scalar CY
+        ) const;
+
         //- Face mask: 0 on every face of a boundary-adjacent cell
         //  (filter identity in the boundary cell layer), exchanged
         //  across coupled patches

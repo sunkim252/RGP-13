@@ -24,6 +24,8 @@ License
 \*---------------------------------------------------------------------------*/
 
 #include "peqsiFluid.H"
+#include "fvcLaplacian.H"
+#include "zeroGradientFvPatchFields.H"
 
 // * * * * * * * * * * * * * * * Member Functions  * * * * * * * * * * * * * //
 
@@ -282,6 +284,77 @@ void Foam::solvers::peqsiFluid::invertTemperature()
         << gMax(thermo_.T().primitiveField())
         << "] K, rho drift (EOS vs transported) max = "
         << maxDrift << endl;
+}
+
+
+
+Foam::tmp<Foam::volScalarField>
+Foam::solvers::peqsiFluid::boundingArtDiffusivity
+(
+    const volScalarField& Y,
+    const volScalarField& c,
+    const scalar CY
+) const
+{
+    // Terashima & Koshi, JCP 231 (2012) 6907, Eq. (27): artificial
+    // diffusivity that switches on only where a [0,1] scalar leaves its
+    // bounds,
+    //   D* = C_Y c bar[(Y-1)H(Y-1) - Y(1-H(Y))] Delta_Y
+    // with C_Y = 100 their standard value.  The bracket is the amount by
+    // which the bound is violated (positive on both sides), so D* is
+    // identically zero on a bounded field: resolved fronts are untouched
+    // and only over/undershoots are diffused away.
+    ensureDirGeometry();
+
+    const PtrList<surfaceScalarField>& wDir = ladWDir_();
+    const PtrList<volScalarField>& DeltaDir = ladDeltaDir_();
+
+    // Bound violation, Eq. (27) bracket
+    tmp<volScalarField> tviol
+    (
+        new volScalarField
+        (
+            IOobject("PEQSI:boundViol", mesh.time().name(), mesh),
+            mesh,
+            dimensionedScalar(dimless, 0),
+            zeroGradientFvPatchScalarField::typeName
+        )
+    );
+    volScalarField& viol = tviol.ref();
+    {
+        const scalarField& yf = Y.primitiveField();
+        scalarField& vf = viol.primitiveFieldRef();
+        forAll(vf, i)
+        {
+            vf[i] = (yf[i] > 1 ? yf[i] - 1 : 0) + (yf[i] < 0 ? -yf[i] : 0);
+        }
+        viol.correctBoundaryConditions();
+    }
+
+    // Truncated-Gaussian overbar (same operator as the LAD terms)
+    volScalarField violBar(viol);
+    for (direction cmpt = 0; cmpt < 3; cmpt++)
+    {
+        violBar += sqr(DeltaDir[cmpt])/24.0*fvc::laplacian(wDir[cmpt], viol);
+    }
+    violBar = max(violBar, dimensionedScalar(dimless, 0));
+
+    // Delta_Y = (dx dy dz)^(1/3): the cube root of the cell volume
+    volScalarField DeltaY
+    (
+        IOobject("PEQSI:DeltaY", mesh.time().name(), mesh),
+        mesh,
+        dimensionedScalar(dimLength, 0),
+        zeroGradientFvPatchScalarField::typeName
+    );
+    {
+        const scalarField& V = mesh.V();
+        scalarField& d = DeltaY.primitiveFieldRef();
+        forAll(d, i) d[i] = cbrt(V[i]);
+        DeltaY.correctBoundaryConditions();
+    }
+
+    return CY*c*violBar*DeltaY;
 }
 
 
