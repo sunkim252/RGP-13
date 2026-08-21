@@ -71,6 +71,11 @@ Foam::solvers::peqsiFluid::peqsiFluid(fvMesh& mesh)
         )
     ),
 
+    fgmActive_
+    (
+        pimple.dict().lookupOrDefault<Switch>("peqsiFGM", false)
+    ),
+
     alpha_
     (
         IOobject("PEQSI:alpha", runTime.name(), mesh),
@@ -106,11 +111,26 @@ Foam::solvers::peqsiFluid::peqsiFluid(fvMesh& mesh)
     // Initial coefficient evaluation from the restart state
     updateCoefficients();
 
+    if (fgmActive_)
+    {
+        // Stage 1: the state is declared and read, the manifold closure
+        // and the multi-species pressure source are not wired yet --
+        // refuse rather than run a half-coupled system silently.
+        FatalErrorInFunction
+            << "peqsiFGM is set but the FGM coupling is still at stage 1 "
+            << "(state declaration only).  See the wiki section "
+            << "'FGM coupling design' for the staged plan; run with "
+            << "peqsiFGM off for the inert path."
+            << exit(FatalError);
+    }
+
     Info<< "peqsiFluid: PEQSI fractional-step solver "
         << "(Wada et al., Phys. Fluids 36 (2024) 116104)" << nl
         << "    advective substep: SSP-RK3, p advected (PEQSI Eq. 10)" << nl
         << "    acoustic substep: consistency-form Helmholtz (Eq. 19)" << nl
         << "    thermo closure: T from h(T,v) Newton inversion (WKK Fig. 3)"
+        << nl
+        << "    composition: single-species (FGM coupling: stage 1/6)"
         << endl;
 }
 

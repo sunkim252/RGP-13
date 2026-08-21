@@ -115,6 +115,43 @@ protected:
         volScalarField h_;
 
 
+    // FGM (flamelet-manifold) coupling -- OFF unless peqsiFGM is set.
+    //
+    // Rationale and equations: PEQSI Sec. IV states the single-species
+    // limitation and the extension route (h = h(rho, p, Y); the species
+    // diffusion terms enter the pressure equation).  The multi-species
+    // pressure-evolution equation itself is published in Terashima &
+    // Koshi 2012 Sec. 2.4:
+    //   Dp/Dt = (dp/drho)_{e,Y} Drho/Dt + (dp/de)_{rho,Y} De/Dt
+    //         + sum_i (dp/dY_i)_{rho,e} DY_i/Dt
+    // and the manifold closure is the project's existing validated
+    // FGM/FPV table (fgmFluid, FGMTable).  Nothing here is a new
+    // scheme: PEQSI's semi-implicit split + TK's multi-species pressure
+    // evolution + the existing manifold.
+    //
+    // Stage 1 (this commit) declares the state only; the transport,
+    // manifold closure and the composition source term follow in the
+    // staged work (wiki "PEQSI Method and Discretisation" Sec. 12).
+
+        //- Master switch (PIMPLE dict key peqsiFGM, default off).  With
+        //  it off every field below stays unallocated and the solver is
+        //  bit-identical to the validated inert path.
+        Switch fgmActive_;
+
+        //- Transported mixture fraction (mean)
+        autoPtr<volScalarField> Z_;
+
+        //- Transported mixture-fraction variance
+        autoPtr<volScalarField> Zvar_;
+
+        //- Transported progress variable (unnormalised Yc, as in
+        //  fgmFluid: removes the Yc_eq cross terms by construction)
+        autoPtr<volScalarField> Yc_;
+
+        //- Manifold source of the progress variable (table lookup)
+        autoPtr<volScalarField> sourceYc_;
+
+
     // PEQSI real-gas coefficient fields (evaluated in thermoClosure)
 
         //- alpha = (1/(rho xi)) (dp/dT)_v   [-]
