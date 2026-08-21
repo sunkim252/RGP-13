@@ -769,16 +769,38 @@ void Foam::solvers::peqsiFluid::applySCFilter
             (sigmaMax/4.0)*fvc::interpolate(sigSC)*wd2
         );
 
+        // Filter the CONSERVED quantities, not the primitives.
+        //
+        // Each pass is a flux divergence, so it leaves the volume
+        // integral of whatever it is applied to invariant.  Applied to
+        // rho that is exactly right -- mass comes out at 1e-14.  Applied
+        // to U and h it conserves the integral of U and of h, which are
+        // not the conserved quantities: momentum is rho*U and energy is
+        // rho*h, and in a variable-density field smoothing the primitive
+        // does not conserve the product.  Measured on 1-D case A, that
+        // cost 22% of the energy (rho*h rel 0.223 with the filter on
+        // against 7.7e-9 with it off) -- against the paper's <5% budget.
+        //
+        // Filtering rho*U and rho*h and dividing by the filtered rho
+        // afterwards conserves all three integrals and leaves the
+        // sensor, and therefore the shock capturing, untouched.
+        const volScalarField rhoh("PEQSI:rhoh", rho_*h_);
+        const volVectorField rhoU("PEQSI:rhoU", rho_*U_);
+
         p_ += fvc::laplacian(coeff, p_);
         rho_ += fvc::laplacian(coeff, rho_);
-        U_ += fvc::laplacian(coeff, U_);
+
+        const volScalarField rhohNew(rhoh + fvc::laplacian(coeff, rhoh));
+        const volVectorField rhoUNew(rhoU + fvc::laplacian(coeff, rhoU));
+
+        U_ = rhoUNew/max(rho_, dimensionedScalar(rho_.dimensions(), small));
+        h_ = rhohNew/max(rho_, dimensionedScalar(rho_.dimensions(), small));
         // h is in the SC set (BCB apply their shock-capturing filter to
         // the full conservative set including energy): the 141455
         // runaway at t=9.30 ms rode on h/T (rho stable at 84 while
         // T 239 -> 1864 K) -- untouchable by a p,rho,U-only set.  The
         // sensor gating keeps monotone transcritical fronts untouched
         // (the failure mode of un-gated enthalpy filtering).
-        h_ += fvc::laplacian(coeff, h_);
 
         p_.correctBoundaryConditions();
         rho_.correctBoundaryConditions();
