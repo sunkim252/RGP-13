@@ -1,0 +1,170 @@
+--- src/FGM/FGMTable.H.bak.bucket	2026-08-21 20:24:20.327944200 +0900
++++ src/FGM/FGMTable.H	2026-08-21 20:24:20.344388438 +0900
+@@ -186,9 +186,26 @@
+         //  result = (1-w)*axis[i] + w*axis[i+1]. Clamps to the ends. For
+         //  axes of length 1 the call is degenerate: returns i=0, w=0 so
+         //  the multilinear interpolation collapses to that slice.
++        //- 비균등 축 가속용 균등 버킷 인덱스.
++        //  buck[k] = axis 에서 (a0 + span*k/M) 이하인 최대 인덱스.
++        //  ★왜: bracket 의 O(1) 빠른 경로는 축이 균등이라는 가정에 기댄다.
++        //  Z 축을 |dT/dZ| 등분포로 잡으면 밀도비가 70배까지 벌어져 초기추정이
++        //  크게 빗나가고 선형 걷기가 최대 44회로 늘어난다(실측). 버킷을 두면
++        //  0.10회(최대 1회)로 돌아온다 -- 균등 축과 사실상 동일. 이분탐색(6.5회)
++        //  보다 낫고 캐시 지역성도 유지된다. 메모리는 축당 ~4 KB.
++        //  균등 축에서도 같은 셀을 찾으므로 결과는 비트 동일하다.
++        List<label> Z_buck_;
++        List<label> gZ_buck_;
++        List<label> C_buck_;
++        List<label> chi_buck_;
++
++        //- 버킷 생성. M = ceil(span/min(dx)) 로 축 셀당 버킷 1개 이상 보장.
++        static void buildBucket(const List<scalar>& axis, List<label>& buck);
++
+         void bracket
+         (
+             const List<scalar>& axis,
++            const List<label>& buck,
+             scalar v,
+             label& i,
+             scalar& w
+--- src/FGM/FGMTable.C.bak.bucket	2026-08-21 20:24:20.327944200 +0900
++++ src/FGM/FGMTable.C	2026-08-21 20:24:54.570911666 +0900
+@@ -24,6 +24,7 @@
+ \*---------------------------------------------------------------------------*/
+ 
+ #include "FGMTable.H"
++#include <cmath>
+ #include "tabulatedRealGasMixture.H"
+ 
+ // * * * * * * * * * * * * * * * * Constructors  * * * * * * * * * * * * * * //
+@@ -348,6 +349,33 @@
+                 << "(Tier-4): " << Le_tables_.sortedToc() << nl << endl;
+         }
+     }
++
++    // 축 버킷. 모든 축이 확정된 뒤(4-D 는 chi/enthalpy/W 를 늦게 채운다) 1회.
++    // 균등 축이면 버킷이 있어도 같은 셀을 찍으므로 결과는 비트 동일하다.
++    buildBucket(Z_axis_,   Z_buck_);
++    buildBucket(gZ_axis_,  gZ_buck_);
++    buildBucket(C_axis_,   C_buck_);
++    buildBucket(chi_axis_, chi_buck_);
++    {
++        auto ratio = [](const List<scalar>& a) -> scalar
++        {
++            if (a.size() < 3) return 1;
++            scalar lo = GREAT, hi = 0;
++            for (label i = 1; i < a.size(); i++)
++            {
++                const scalar d = a[i] - a[i-1];
++                lo = min(lo, d); hi = max(hi, d);
++            }
++            return (lo > VSMALL) ? hi/lo : 1;
++        };
++        const scalar rZ = ratio(Z_axis_);
++        if (rZ > 1.05)
++        {
++            Info<< "    non-uniform Z axis (dZ ratio " << rZ
++                << "), bucket index " << Z_buck_.size() << " entries" << nl
++                << endl;
++        }
++    }
+ }
+ 
+ 
+@@ -359,9 +387,49 @@
+ 
+ // * * * * * * * * * * * * * * Member Functions  * * * * * * * * * * * * * * //
+ 
++void Foam::FGMTable::buildBucket(const List<scalar>& axis, List<label>& buck)
++{
++    buck.clear();
++    const label n = axis.size();
++    if (n < 2)
++    {
++        return;
++    }
++    const scalar span = axis[n - 1] - axis[0];
++    if (span <= VSMALL)
++    {
++        return;
++    }
++    scalar dmin = GREAT;
++    for (label i = 1; i < n; i++)
++    {
++        dmin = min(dmin, axis[i] - axis[i - 1]);
++    }
++    if (dmin <= VSMALL)
++    {
++        return;
++    }
++    // 축 셀당 버킷 1개 이상. 상한 2^20 (4 MB) 로 병적인 축을 막는다.
++    label M = label(std::ceil(span/dmin));
++    M = max(n, min(M, label(1 << 20)));
++    buck.setSize(M + 1);
++    label j = 0;
++    for (label k = 0; k <= M; k++)
++    {
++        const scalar x = axis[0] + span*scalar(k)/scalar(M);
++        while (j + 1 < n && axis[j + 1] <= x)
++        {
++            j++;
++        }
++        buck[k] = j;
++    }
++}
++
++
+ void Foam::FGMTable::bracket
+ (
+     const List<scalar>& axis,
++    const List<label>& buck,
+     scalar v,
+     label& i,
+     scalar& w
+@@ -398,7 +466,15 @@
+     // is a drop-in, bit-identical replacement for the old O(n) linear scan.
+     const scalar span = axis[n - 1] - axis[0];
+     label j = 1;
+-    if (span > VSMALL)
++    const label M = buck.size() - 1;
++    if (M >= 1 && span > VSMALL)
++    {
++        // 버킷: 비균등 축에서도 O(1) 로 시작 셀을 찍는다.
++        label k = label((v - axis[0])/span*scalar(M));
++        k = max(label(0), min(k, M));
++        j = max(label(1), min(buck[k] + 1, n - 1));
++    }
++    else if (span > VSMALL)
+     {
+         j = label((v - axis[0])/span*(n - 1)) + 1;
+         j = max(label(1), min(j, n - 1));
+@@ -429,10 +505,10 @@
+ {
+     label iZ, iG, iC, iK;
+ 
+-    bracket(Z_axis_,   Z,   iZ, st.wZ);
+-    bracket(gZ_axis_,  gZ,  iG, st.wG);
+-    bracket(C_axis_,   C,   iC, st.wC);
+-    bracket(chi_axis_, chi, iK, st.wK);
++    bracket(Z_axis_, Z_buck_,   Z,   iZ, st.wZ);
++    bracket(gZ_axis_, gZ_buck_,  gZ,  iG, st.wG);
++    bracket(C_axis_, C_buck_,   C,   iC, st.wC);
++    bracket(chi_axis_, chi_buck_, chi, iK, st.wK);
+ 
+     // Degenerate-axis folding: for any axis of length 1 the bracket above
+     // returns i=0, w=0; the +1 corner must fold onto the same slice or the
+@@ -686,10 +762,10 @@
+     label iZ, iG, iC, iK;
+     scalar wZ, wG, wC, wK;
+ 
+-    bracket(Z_axis_,   Z,   iZ, wZ);
+-    bracket(gZ_axis_,  gZ,  iG, wG);
+-    bracket(C_axis_,   C,   iC, wC);
+-    bracket(chi_axis_, chi, iK, wK);
++    bracket(Z_axis_, Z_buck_,   Z,   iZ, wZ);
++    bracket(gZ_axis_, gZ_buck_,  gZ,  iG, wG);
++    bracket(C_axis_, C_buck_,   C,   iC, wC);
++    bracket(chi_axis_, chi_buck_, chi, iK, wK);
+ 
+     // Fold the chi-high neighbour to the same slice for a 3-D table (mirrors
+     // interpolateTable), so the chi-high corners are valid indices with the

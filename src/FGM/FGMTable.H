@@ -186,9 +186,26 @@ class FGMTable
         //  result = (1-w)*axis[i] + w*axis[i+1]. Clamps to the ends. For
         //  axes of length 1 the call is degenerate: returns i=0, w=0 so
         //  the multilinear interpolation collapses to that slice.
+        //- 비균등 축 가속용 균등 버킷 인덱스.
+        //  buck[k] = axis 에서 (a0 + span*k/M) 이하인 최대 인덱스.
+        //  ★왜: bracket 의 O(1) 빠른 경로는 축이 균등이라는 가정에 기댄다.
+        //  Z 축을 |dT/dZ| 등분포로 잡으면 밀도비가 70배까지 벌어져 초기추정이
+        //  크게 빗나가고 선형 걷기가 최대 44회로 늘어난다(실측). 버킷을 두면
+        //  0.10회(최대 1회)로 돌아온다 -- 균등 축과 사실상 동일. 이분탐색(6.5회)
+        //  보다 낫고 캐시 지역성도 유지된다. 메모리는 축당 ~4 KB.
+        //  균등 축에서도 같은 셀을 찾으므로 결과는 비트 동일하다.
+        List<label> Z_buck_;
+        List<label> gZ_buck_;
+        List<label> C_buck_;
+        List<label> chi_buck_;
+
+        //- 버킷 생성. M = ceil(span/min(dx)) 로 축 셀당 버킷 1개 이상 보장.
+        static void buildBucket(const List<scalar>& axis, List<label>& buck);
+
         void bracket
         (
             const List<scalar>& axis,
+            const List<label>& buck,
             scalar v,
             label& i,
             scalar& w
