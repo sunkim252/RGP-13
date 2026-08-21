@@ -406,10 +406,19 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
         for (int i = 0; i < 9; i++) tot += tPhase_[i];
         Info<< "PEQSI timers after " << tPhaseSteps_ << " steps (cpu s, "
             << "this rank):" << nl;
+        // Master-rank numbers alone were misleading on the weighted
+        // decomposition: rank 0 is far-field, and its rk3 entry was
+        // mostly WAIT for the jet-corridor ranks at the RK-stage halo
+        // syncs.  min/max across ranks separates compute imbalance
+        // (spread in the busy phase) from where the wait surfaces.
         for (int i = 0; i < 9; i++)
         {
+            scalar tMin = tPhase_[i], tMax = tPhase_[i];
+            reduce(tMin, minOp<scalar>());
+            reduce(tMax, maxOp<scalar>());
             Info<< "    " << nm[i] << " = " << tPhase_[i]
-                << " (" << 100*tPhase_[i]/max(tot, small) << "%)" << nl;
+                << " (" << 100*tPhase_[i]/max(tot, small)
+                << "%)  ranks[" << tMin << ", " << tMax << "]" << nl;
         }
         Info<< "    accounted total = " << tot << endl;
     }

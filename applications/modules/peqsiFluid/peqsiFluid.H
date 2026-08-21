@@ -198,6 +198,25 @@ protected:
         //  instead of finding it by crashing.
         scalar ladDtLimit_;
 
+        // Single-species SRK replica for the constant-v closure: only
+        // p(v, T) is replicated (15 lines of cubic algebra, molar);
+        // enthalpy comes from the library's he(p, T).  Cross-checked
+        // against the library state on first use.  The FGM stage
+        // replaces this with manifold-baked coefficients.
+        bool srkReplicaValid_;
+        mutable bool srkChecked_;
+        scalar srkW_;
+        scalar srkB_;
+        scalar srkCoef1_;
+        scalar srkCoef2_;
+        scalar srkCoef3_;
+        scalar srkC_;
+        scalar srkCq0_;
+        scalar srkCq1_;
+        scalar srkCq2_;
+        scalar srkCTlo_;
+        scalar srkCThi_;
+
         //- Previous-step cp (saved by updateCoefficients; used by the
         //  LAD explicit-stability cap)
         mutable scalarField cpPrev_;

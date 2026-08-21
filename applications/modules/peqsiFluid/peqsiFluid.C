@@ -24,6 +24,7 @@ License
 \*---------------------------------------------------------------------------*/
 
 #include "peqsiFluid.H"
+#include "thermodynamicConstants.H"
 #include "localEulerDdtScheme.H"
 #include "zeroGradientFvPatchFields.H"
 #include "addToRunTimeSelectionTable.H"
@@ -96,11 +97,72 @@ Foam::solvers::peqsiFluid::peqsiFluid(fvMesh& mesh)
 
     acousticTimeIndex_(-1),
     ladDtLimit_(great),
+    srkReplicaValid_(false),
+    srkChecked_(false),
+    srkW_(0), srkB_(0), srkCoef1_(0), srkCoef2_(0), srkCoef3_(0),
+    srkC_(0), srkCq0_(0), srkCq1_(0), srkCq2_(0), srkCTlo_(0), srkCThi_(0),
 
     initialMass_(-1),
 
     initialRhoH_(0)
 {
+    // ------------------------------------------------------------------
+    // Single-species SRK replica coefficients for the constant-v closure
+    // (thermoClosure.C).  Replicates the SRKGas dictionary constructor:
+    // same formulas, same dictionary, cross-checked against the library
+    // state at first use.
+    // ------------------------------------------------------------------
+    {
+        const wordList& sp = thermo_.species();
+        if (sp.size() == 1)
+        {
+            const dictionary& props =
+                mesh.lookupObject<IOdictionary>("physicalProperties");
+
+            if (props.found(sp[0]))
+            {
+                const dictionary& spDict = props.subDict(sp[0]);
+                const dictionary& rf = spDict.subDict("rfProperties");
+
+                srkW_ = spDict.subDict("specie").lookup<scalar>("molWeight");
+
+                const scalar Tc = rf.lookup<scalar>("Tc");
+                const scalar Pc = rf.lookup<scalar>("Pc");
+                const scalar omega = rf.lookup<scalar>("omega");
+                const scalar RR = constant::thermodynamic::RR;
+
+                srkB_ = 0.08664*RR*Tc/Pc;
+                const scalar a = 0.42747*sqr(RR*Tc)/Pc;
+                const scalar S = 0.48508 + 1.5517*omega - 0.15613*sqr(omega);
+                srkCoef1_ = a*sqr(1.0 + S);
+                srkCoef2_ = a*2*S*(1 + S)/sqrt(Tc);
+                srkCoef3_ = a*sqr(S)/Tc;
+
+                if (rf.found("c"))
+                {
+                    srkC_ = rf.lookup<scalar>("c");
+                }
+                else if (rf.lookupOrDefault<Switch>("penelouxShift", false))
+                {
+                    const scalar Zra = 0.29056 - 0.08775*omega;
+                    srkC_ = 0.40768*(0.29441 - Zra)*RR*Tc/Pc;
+                }
+
+                if (rf.found("penelouxCoeffs"))
+                {
+                    const scalarList pc
+                    (
+                        rf.lookup<scalarList>("penelouxCoeffs")
+                    );
+                    srkCq0_ = pc[0]; srkCq1_ = pc[1]; srkCq2_ = pc[2];
+                    srkCTlo_ = pc[3]; srkCThi_ = pc[4];
+                }
+
+                srkReplicaValid_ = true;
+            }
+        }
+    }
+
     if (fv::localEulerDdt::enabled(mesh))
     {
         FatalErrorInFunction

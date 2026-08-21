@@ -24,6 +24,7 @@ License
 \*---------------------------------------------------------------------------*/
 
 #include "peqsiFluid.H"
+#include "thermodynamicConstants.H"
 #include "fvcLaplacian.H"
 #include "zeroGradientFvPatchFields.H"
 
@@ -189,93 +190,145 @@ void Foam::solvers::peqsiFluid::invertTemperature()
         if (constantV)
         {
             // ----------------------------------------------------------
-            // Constant-v closure, driven through the thermo's own p.
+            // Constant-v closure -- WKK Fig. 3, literally: hold the
+            // TRANSPORTED (rho, h) and invert temperature at fixed
+            // specific volume.
             //
-            // No new thermo API is needed: p_ IS thermo_.p(), so writing
-            // a trial pressure into it and calling correct() evaluates
-            // the equation of state exactly at that pressure.  That
-            // turns the p-direction of the Newton from a linearisation
-            // (which failed: the step needed is tens of MPa, far outside
-            // the range where rho is linear in p) into a real one, and
-            // it touches no shared thermophysical code.
+            // The pressure at fixed (v, T) is analytic for SRK, so the
+            // 2x2 (p, T) Newton the first two attempts fought with
+            // collapses to a 1-D Newton in T:
             //
-            // On exit the properties are left at the CONSISTENT state
-            // (pEos, T) while p_ is restored to the transported
-            // pressure the momentum and pressure equations need.  That
-            // is the point: psi, cp, cv -- and therefore alpha and beta
-            // -- stop being a mix of the transported density with
-            // properties taken at a pressure that does not produce it.
+            //     p(v, T) = RR T/(vs - b) - aAlpha(T)/(vs (vs + b)),
+            //     vs = W v + c(T)                     [molar, Peneloux]
+            //
+            // and the enthalpy at that state is the LIBRARY's own
+            // he(p(v,T), T) -- only the 15 lines of cubic algebra are
+            // replicated, and they are cross-checked cell-by-cell
+            // against the library state on first use (srkCheck below):
+            // if the replica disagreed with SRKGas (root blending,
+            // Peneloux c(T), unit conventions), the run refuses to
+            // continue rather than silently closing on a different EOS.
+            //
+            // Slope: xi = (dh/dT)_v = cv + vs (dp/dT)_v with the
+            // analytic (dp/dT)_v = RR/(vs-b) - aAlpha'(T)/(vs(vs+b)).
+            //
+            // Scope: single species (the guard below).  The FGM stage
+            // replaces the replica with table-baked coefficients.
             // ----------------------------------------------------------
-            const label nOuter =
-                pimple.dict().lookupOrDefault<label>("peqsiConstantVIters", 8);
+            if (!srkReplicaValid_)
+            {
+                FatalErrorInFunction
+                    << "peqsiConstantV requires the single-species SRK "
+                    << "replica (multi-species closes via the manifold "
+                    << "coefficients in the FGM stage)" << exit(FatalError);
+            }
 
             const volScalarField pSave("PEQSI:pSave", p_);
             const scalarField& rhoTf = rho_.primitiveField();
             scalarField& pf = p_.primitiveFieldRef();
 
-            const scalar dpFrac = 0.5;   // per-pass |dp|/p clamp
+            const scalar RR = constant::thermodynamic::RR;
 
-            for (; iter < nOuter && maxRel > tol; ++iter)
+            // Peneloux translation c(T) -- replica of SRKGas::cAt
+            auto cAt = [this](const scalar T) -> scalar
+            {
+                if (srkCTlo_ <= 0) return srkC_;
+                if (T <= srkCTlo_)
+                    return srkCq0_ + srkCq1_*T + srkCq2_*T*T;
+                if (T >= srkCThi_) return srkC_;
+                const scalar cL =
+                    srkCq0_ + srkCq1_*srkCTlo_ + srkCq2_*sqr(srkCTlo_);
+                scalar s = (T - srkCTlo_)/(srkCThi_ - srkCTlo_);
+                s = s*s*(3.0 - 2.0*s);
+                return cL*(1.0 - s) + srkC_*s;
+            };
+
+            // p(v, T) and (dp/dT)_v, molar algebra; v in m^3/kg
+            auto pOfVT =
+                [this, &cAt, RR](const scalar v, const scalar T,
+                                 scalar& dpdT) -> scalar
+            {
+                const scalar vs = srkW_*v + cAt(T);      // m^3/kmol
+                const scalar sqrtT = sqrt(max(T, small));
+                const scalar aAlpha =
+                    srkCoef1_ - srkCoef2_*sqrtT + srkCoef3_*T;
+                const scalar daAlpha =
+                    -srkCoef2_/(2*sqrtT) + srkCoef3_;
+                const scalar den1 = vs - srkB_;
+                const scalar den2 = vs*(vs + srkB_);
+                dpdT = RR/den1 - daAlpha/den2;
+                return RR*T/den1 - aAlpha/den2;
+            };
+
+            // ---- one-time replica cross-check against the library ----
+            // The incoming state is EOS-consistent by construction:
+            // thermo_.rho() at the current (p, T) is what SRKGas says.
+            // p(1/rhoEos, T) from the replica must reproduce p.
+            if (!srkChecked_)
+            {
+                const scalarField& rhoEf0 =
+                    thermo_.rho()().primitiveField();
+                const scalarField& Tf0 = Tw.primitiveField();
+                scalar worst = 0;
+                forAll(Tf0, i)
+                {
+                    scalar dpdTdum;
+                    const scalar pRep =
+                        pOfVT(1.0/max(rhoEf0[i], small), Tf0[i], dpdTdum);
+                    worst =
+                        max(worst, mag(pRep - pf[i])/max(mag(pf[i]), small));
+                }
+                reduce(worst, maxOp<scalar>());
+                Info<< "PEQSI closure: SRK p(v,T) replica check, "
+                    << "max |p_rep - p|/p = " << worst << endl;
+                if (worst > 1e-6)
+                {
+                    FatalErrorInFunction
+                        << "SRK replica disagrees with the library EOS ("
+                        << worst << "); refusing to close on a different "
+                        << "equation of state" << exit(FatalError);
+                }
+                srkChecked_ = true;
+            }
+
+            // ---- Newton in T at fixed v, field-synchronous ----------
+            // he(p, T) is a field call, so the iteration is field-wise:
+            // every pass writes the trial p(v, T) into p_ (which IS the
+            // thermo's p) and evaluates the library enthalpy there.
+            const auto tCv = thermo_.Cv();
+            const scalarField& cvf = tCv().primitiveField();
+
+            for (; iter < 60 && maxRel > tol; ++iter)
             {
                 maxRel = 0;
 
-                thermo_.correct();
-
-                const auto tCp = thermo_.Cp();
-                const auto tCv = thermo_.Cv();
-                const scalarField& cpf = tCp().primitiveField();
-                const scalarField& cvf = tCv().primitiveField();
-                const scalarField& psif = thermo_.psi().primitiveField();
-                const scalarField& rhoEf = thermo_.rho()().primitiveField();
+                forAll(Tf, i)
+                {
+                    scalar dpdT;
+                    pf[i] =
+                        max
+                        (
+                            pOfVT(1.0/max(rhoTf[i], small), Tf[i], dpdT),
+                            1e4
+                        );
+                }
+                p_.correctBoundaryConditions();
 
                 const volScalarField hk(thermo_.he(p_, Tw));
                 const scalarField& hkf = hk.primitiveField();
 
                 forAll(Tf, i)
                 {
-                    const scalar rho = max(rhoEf[i], small);
-                    const scalar v = 1.0/rho;
-                    const scalar psi = max(psif[i], small);
-                    const scalar dpdv = -sqr(rho)/psi;
-                    const scalar dpdT =
-                        rho*sqrt(max((cpf[i] - cvf[i])/(Tf[i]*psi), 0.0));
-                    const scalar dvdT = -dpdT/dpdv;      // (dv/dT)_p
+                    scalar dpdT;
+                    const scalar v = 1.0/max(rhoTf[i], small);
+                    pOfVT(v, Tf[i], dpdT);
+                    const scalar xi =
+                        max(cvf[i] + (srkW_*v)*dpdT/srkW_, small);
 
-                    //   [ psi          -rho^2 (dv/dT)_p ] [dp]   [F1]
-                    //   [ v - T(dv/dT)_p       cp       ] [dT] = [F2]
-                    const scalar J11 = psi;
-                    const scalar J12 = -sqr(rho)*dvdT;
-                    const scalar J21 = v - Tf[i]*dvdT;
-                    const scalar J22 = cpf[i];
-                    const scalar det = J11*J22 - J12*J21;
-
-                    const scalar F1 = rhoTf[i] - rhoEf[i];
-                    const scalar F2 = hf[i] - hkf[i];
-
-                    scalar dp, dT;
-                    if (mag(det) > vSmall)
-                    {
-                        dp = (F1*J22 - F2*J12)/det;
-                        dT = (J11*F2 - J21*F1)/det;
-                    }
-                    else
-                    {
-                        dp = 0;
-                        dT = F2/max(cpf[i], small);
-                    }
-
-                    // Clamps: the first passes can ask for enormous
-                    // steps out of a badly inconsistent start, and an
-                    // unclamped step leaves the SRK validity range (and
-                    // can drive p negative, where the root solver's
-                    // floor silently takes over)
-                    const scalar dpLim = dpFrac*mag(pf[i]);
-                    dp = min(max(dp, -dpLim), dpLim);
+                    scalar dT = (hf[i] - hkf[i])/xi;
                     dT = min(max(dT, -dTmax), dTmax);
-
-                    pf[i] = max(pf[i] + dp, 1e4);
-
                     const scalar Tnew = Tf[i] + dT;
+
                     if ((Tnew <= Tmin && dT < 0) || (Tnew >= Tmax && dT > 0))
                     {
                         Tf[i] = Tnew <= Tmin ? Tmin : Tmax;
@@ -283,28 +336,86 @@ void Foam::solvers::peqsiFluid::invertTemperature()
                         continue;
                     }
                     Tf[i] = min(max(Tnew, Tmin), Tmax);
-
-                    maxRel =
-                        max
-                        (
-                            maxRel,
-                            max
-                            (
-                                mag(F1)/max(rhoTf[i], small),
-                                mag(dT)/max(Tf[i], small)
-                            )
-                        );
+                    maxRel = max(maxRel, mag(dT)/max(Tf[i], small));
                 }
 
                 reduce(maxRel, maxOp<scalar>());
-                p_.correctBoundaryConditions();
                 Tw.correctBoundaryConditions();
             }
 
-            // Refresh properties at the converged, CONSISTENT state...
+            // ---- reachability fallback --------------------------------
+            // At transcritical interface cells the transported (v, h)
+            // pair lies OUTSIDE the image of the equation of state: no
+            // temperature reproduces that enthalpy at that volume, and
+            // p(v, T) runs into the spinodal (p <= 0, floored).
+            // Measured on case A: forcing the closure there collapsed
+            // pEos to the 1e4 Pa floor on 58% of the cells and the
+            // garbage properties fed back through alpha/beta into the
+            // dynamics.  Parking the inconsistency in p is only
+            // possible where the state is reachable; elsewhere the cell
+            // falls back to the fixed-p (h, p) inversion, and the count
+            // is reported -- that count IS the measure of how much of
+            // the field the constant-v closure can actually serve.
+            label nFallback = 0;
+            {
+                const scalar dpFracMax = 0.5;   // |pEos-p|/p beyond which
+                                                // the parking is deemed
+                                                // unphysical
+
+                DynamicList<label> bad(Tf.size()/8);
+                forAll(Tf, i)
+                {
+                    const bool clamped =
+                        (Tf[i] <= Tmin + small) || (Tf[i] >= Tmax - small);
+                    const bool floored = (pf[i] <= 1e4 + small);
+                    const bool wild =
+                        mag(pf[i] - pSave[i])
+                      > dpFracMax*max(mag(pSave[i]), small);
+
+                    if (clamped || floored || wild)
+                    {
+                        bad.append(i);
+                        pf[i] = pSave[i];
+                    }
+                }
+                nFallback = bad.size();
+
+                // fixed-p Newton on the fallback cells only
+                if (returnReduce(nFallback, sumOp<label>()) > 0)
+                {
+                    const auto tCp = thermo_.Cp();
+                    const scalarField& cpf = tCp().primitiveField();
+
+                    for (label k = 0; k < 60; ++k)
+                    {
+                        scalarField Tsub(bad.size());
+                        forAll(bad, m) Tsub[m] = Tf[bad[m]];
+                        const tmp<scalarField> thk(thermo_.he(Tsub, bad));
+                        const scalarField& hkf2 = thk();
+
+                        scalar mrel = 0;
+                        forAll(bad, m)
+                        {
+                            const label i = bad[m];
+                            scalar dT =
+                                (hf[i] - hkf2[m])/max(cpf[i], small);
+                            dT = min(max(dT, -dTmax), dTmax);
+                            Tf[i] = min(max(Tf[i] + dT, Tmin), Tmax);
+                            mrel = max(mrel, mag(dT)/max(Tf[i], small));
+                        }
+                        if (mrel < tol) break;
+                    }
+                }
+
+                reduce(nFallback, sumOp<label>());
+            }
+
+            // p_ now holds pEos(v, T*) on the reachable cells and the
+            // transported pressure on the fallback cells; refresh every
+            // property THERE, then hand the transported pressure back
+            // to the solver.
             thermo_.correct();
 
-            // ...then hand the transported pressure back to the solver.
             scalar maxDpRel = 0, sumAbs = 0;
             forAll(pf, i)
             {
@@ -322,8 +433,9 @@ void Foam::solvers::peqsiFluid::invertTemperature()
 
             Info<< "PEQSI closure (constant-v): |pEos - p|/p max = "
                 << maxDpRel << ", mean |pEos - p| = " << sumAbs/max(nc, 1)
-                << " Pa, outer iters = " << iter
-                << ", maxRel = " << maxRel << endl;
+                << " Pa, T-Newton iters = " << iter
+                << ", maxRel = " << maxRel
+                << ", fallback cells = " << nFallback << endl;
         }
         else
         {
