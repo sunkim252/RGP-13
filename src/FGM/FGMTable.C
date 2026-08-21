@@ -224,6 +224,40 @@ Foam::FGMTable::FGMTable
         Info<< "    Cnorm Yc_eq(Z): [" << lo << ", " << hi << "]" << endl;
     }
 
+    // -------- optional per-node blocks (PEQSI coefficients, W) --------
+    // Read if present; production fgmFluid tables carry none of these.
+    {
+        static const char* optNames[] =
+        {
+            "PEQSI_cv", "PEQSI_dpdT_v", "PEQSI_dpdv_T",
+            "PEQSI_xi", "PEQSI_alpha", "PEQSI_beta",
+            "PEQSI_dpdTn", "PEQSI_dpdvn", "PEQSI_betan",
+            "W"
+        };
+        const label nNode = nZ_*nGz_*nC_*max(nChi_, 1);
+
+        for (const char* nm : optNames)
+        {
+            if (found(nm))
+            {
+                List<scalar> tbl(lookup(nm));
+                if (tbl.size() != nNode)
+                {
+                    FatalErrorInFunction
+                        << nm << " size " << tbl.size()
+                        << " != node count " << nNode << exit(FatalError);
+                }
+                optTables_.insert(word(nm), move(tbl));
+            }
+        }
+        if (optTables_.size())
+        {
+            Info<< "    optional blocks: " << optTables_.toc() << endl;
+        }
+    }
+
+    pRef_ = lookupOrDefault<scalar>("pressure", 0);
+
     sourcePV_ = List<scalar>(lookup("sourcePV"));
     const label nTot = nZ_*nGz_*nC_*nChi_;
     Info<< "    sourcePV entries: " << sourcePV_.size()

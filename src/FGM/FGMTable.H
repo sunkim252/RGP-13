@@ -150,6 +150,18 @@ class FGMTable
         //  needed only when the solver transports the UNNORMALISED Yc.
         List<scalar> Cnorm_table_;
 
+        //- Optional per-node tables read if present (PEQSI real-gas
+        //  coefficient blocks and the mean molecular weight).  Absent
+        //  in the fgmFluid production tables, so reading them is inert
+        //  there; the peqsiFluid FGM stage consumes them.
+        HashTable<List<scalar>> optTables_;
+
+        //- Table reference pressure [Pa] (scalar entry "pressure",
+        //  optional): the state the pressure-sensitive coefficients
+        //  were baked at.  The dimensionless forms rescale with the
+        //  cell pressure; see the PEQSI closure.
+        scalar pRef_;
+
         //- Tabulated species mass fractions, keyed by species name.
         //  Each entry is a flat list of length nZ*nGz*nC*nChi.
         HashTable<List<scalar>> Y_tables_;
@@ -441,6 +453,14 @@ public:
 
             //- True if the table ships Yc_eq(Z) (the c normalisation).
             inline bool hasCnorm() const { return Cnorm_table_.size() > 0; }
+
+            inline bool hasOptTable(const word& nm) const
+            { return optTables_.found(nm); }
+
+            inline const List<scalar>& optTable(const word& nm) const
+            { return optTables_[nm]; }
+
+            inline scalar pRef() const { return pRef_; }
 
             //- Yc_eq(Z): equilibrium value of the raw progress variable.
             //  Linear interpolation on the Z axis, clamped at both ends.

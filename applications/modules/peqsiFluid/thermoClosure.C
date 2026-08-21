@@ -96,6 +96,14 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
 
 void Foam::solvers::peqsiFluid::invertTemperature()
 {
+    // Stage 2a: composition (and the coefficient diagnostics) from the
+    // manifold BEFORE the temperature inversion, so the (h, p) Newton
+    // and every property behind it run on the looked-up mixture.
+    if (fgmActive_)
+    {
+        fgmClosure();
+    }
+
     // ------------------------------------------------------------------
     // Temperature closure on the transported (h, p) state, reusing the
     // validated heRhoThermo machinery: seed he with the transported h,
@@ -628,6 +636,147 @@ void Foam::solvers::peqsiFluid::invertTemperature()
     }
 }
 
+
+
+void Foam::solvers::peqsiFluid::fgmClosure()
+{
+    // ------------------------------------------------------------------
+    // Manifold lookup (stage 2a).  Per cell:
+    //   c   = Yc / Cnorm(Z)
+    //   dh  = h - [(1-Z) hOx + Z hFuel] - dhRef(Z, gZ, c, dh=0)
+    //   Y_k, W, sourceYc, and the PEQSI coefficient diagnostics from
+    //   the shared 4-axis stencil.
+    //
+    // What is CONSUMED at this stage: composition (written into the
+    // thermo, which then serves he/psi/Cp/Cv to the closure) and the
+    // PV source.  The coefficient blocks are COMPARED against the
+    // runtime evaluation and reported -- switching the solver onto them
+    // (peqsiUseTableCoeffs) is the follow-up step once the wiring
+    // numbers are seen.  The dimensionless/raw phase rule from the
+    // dp/p study is applied in the comparison so the diagnostic tests
+    // the form that would actually be used.
+    // ------------------------------------------------------------------
+    FGMTable& tbl = fgmTable_();
+
+    const scalarField& Zf = Z_().primitiveField();
+    const scalarField& gZf = Zvar_().primitiveField();
+    const scalarField& Ycf = Yc_().primitiveField();
+    const scalarField& hfld = h_.primitiveField();
+    const scalarField& pfld = p_.primitiveField();
+    const scalarField& rhof = rho_.primitiveField();
+    const scalarField& Tf = thermo_.T().primitiveField();
+
+    scalarField& src = sourceYc_().primitiveFieldRef();
+
+    const wordList& spn = tbl.speciesNames();
+    PtrList<volScalarField>& Yall = thermo_.Y();
+    const wordList& thSp = thermo_.species();
+    List<scalarField*> Yp(spn.size());
+    forAll(spn, k)
+    {
+        const label ti = findIndex(thSp, spn[k]);
+        Yp[k] = &Yall[ti].primitiveFieldRef();
+    }
+
+    const scalar hOx = tbl.hOx();
+    const scalar hFuel = tbl.hFuel();
+    const scalar pTbl = tbl.pRef();
+    const scalar RR = constant::thermodynamic::RR;
+
+    // coefficient-diagnostic accumulators
+    scalar dAlpha = 0, dBeta = 0, dT = 0;
+    label nGas = 0, nDense = 0;
+
+    const bool haveCoeffs = tbl.hasOptTable("PEQSI_alpha");
+    const List<scalar>* aT =
+        haveCoeffs ? &tbl.optTable("PEQSI_alpha") : nullptr;
+    const List<scalar>* bnT =
+        haveCoeffs ? &tbl.optTable("PEQSI_betan") : nullptr;
+    const List<scalar>* bT =
+        haveCoeffs ? &tbl.optTable("PEQSI_beta") : nullptr;
+    const List<scalar>* WT =
+        tbl.hasOptTable("W") ? &tbl.optTable("W") : nullptr;
+    const List<scalar>& Ttbl = tbl.Ttable();
+
+    const scalar Zdense =
+        pimple.dict().lookupOrDefault<scalar>("peqsiZdense", 0.5);
+
+    forAll(Zf, celli)
+    {
+        const scalar Zcl = min(max(Zf[celli], 0.0), 1.0);
+        const scalar gz = max(gZf[celli], 0.0);
+
+        const scalar Cn = tbl.hasCnorm() ? tbl.interpolateCnorm(Zcl) : 1.0;
+        const scalar Ccl =
+            min(max(Ycf[celli]/max(Cn, small), 0.0), 1.0);
+
+        // dh with the dh = 0 slice reference (see FGMTable.H)
+        const scalar hMix = (1.0 - Zcl)*hOx + Zcl*hFuel;
+        const scalar dh =
+            hfld[celli] - hMix - (tbl.hasDhRef() ? tbl.interpolateDhRef(Zcl, gz, Ccl) : 0.0);
+
+        FGMTable::FGMStencil st;
+        tbl.makeStencil(Zcl, gz, Ccl, dh, st);
+
+        forAll(spn, k)
+        {
+            (*Yp[k])[celli] = tbl.interpolate(tbl.Ytable(spn[k]), st);
+        }
+        src[celli] = rhof[celli]*tbl.interpolate(tbl.sourcePVTable(), st);
+
+        if (haveCoeffs && WT)
+        {
+            const scalar Wc = tbl.interpolate(*WT, st);
+            const scalar v = 1.0/max(rhof[celli], small);
+            const scalar Zcomp =
+                pfld[celli]*v*Wc/(RR*max(Tf[celli], small));
+
+            // phase rule from the reactive dp/p study: gas cells rescale
+            // the pressure-sensitive coefficients with the CELL pressure;
+            // dense cells use the raw bake
+            scalar betaTab;
+            if (Zcomp > Zdense)
+            {
+                betaTab = tbl.interpolate(*bnT, st)*pfld[celli];
+                nGas++;
+            }
+            else
+            {
+                betaTab = tbl.interpolate(*bT, st);
+                nDense++;
+            }
+            const scalar alphaTab = tbl.interpolate(*aT, st);
+
+            dAlpha =
+                max(dAlpha,
+                    mag(alphaTab - alpha_[celli])
+                   /max(mag(alpha_[celli]), small));
+            dBeta =
+                max(dBeta,
+                    mag(betaTab - beta_[celli])
+                   /max(mag(beta_[celli]), small));
+        }
+
+        dT = max(dT, mag(tbl.interpolate(Ttbl, st) - Tf[celli]));
+    }
+
+    forAll(spn, k)
+    {
+        Yall[findIndex(thSp, spn[k])].correctBoundaryConditions();
+    }
+    sourceYc_().correctBoundaryConditions();
+
+    reduce(dAlpha, maxOp<scalar>());
+    reduce(dBeta, maxOp<scalar>());
+    reduce(dT, maxOp<scalar>());
+    reduce(nGas, sumOp<label>());
+    reduce(nDense, sumOp<label>());
+
+    Info<< "PEQSI FGM: coeff diag max rel dAlpha = " << dAlpha
+        << ", dBeta = " << dBeta
+        << ", |T_tbl - T| max = " << dT
+        << " K, phase gas/dense = " << nGas << "/" << nDense << endl;
+}
 
 
 Foam::tmp<Foam::volScalarField>

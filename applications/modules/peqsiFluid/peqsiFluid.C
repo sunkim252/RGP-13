@@ -176,15 +176,69 @@ Foam::solvers::peqsiFluid::peqsiFluid(fvMesh& mesh)
 
     if (fgmActive_)
     {
-        // Stage 1: the state is declared and read, the manifold closure
-        // and the multi-species pressure source are not wired yet --
-        // refuse rather than run a half-coupled system silently.
-        FatalErrorInFunction
-            << "peqsiFGM is set but the FGM coupling is still at stage 1 "
-            << "(state declaration only).  See the wiki section "
-            << "'FGM coupling design' for the staged plan; run with "
-            << "peqsiFGM off for the inert path."
-            << exit(FatalError);
+        // ------------------------------------------------------------
+        // Stage 2a: manifold coordinates transported, composition and
+        // the real-gas coefficient blocks looked up from the baked
+        // table.  Scope: wiring, conservation and stability -- the
+        // underlying table is the verification bake (dpm2), not
+        // production physics.
+        // ------------------------------------------------------------
+        fgmTable_.reset(new FGMTable(mesh, "fgmProperties"));
+
+        // The table must carry the PEQSI coefficient blocks and W;
+        // refuse a plain combustion table -- the closure would then
+        // silently run without the real-gas coefficients.
+        for (const char* nm :
+             {"PEQSI_xi", "PEQSI_alpha", "PEQSI_betan", "W"})
+        {
+            if (!fgmTable_().hasOptTable(nm))
+            {
+                FatalErrorInFunction
+                    << "peqsiFGM: table lacks block '" << nm
+                    << "' -- bake with bake_peqsi_coeffs.py"
+                    << exit(FatalError);
+            }
+        }
+
+        // Every table species must exist in the thermo so the looked-up
+        // composition can be written into it
+        forAll(fgmTable_().speciesNames(), i)
+        {
+            const word& sp = fgmTable_().speciesNames()[i];
+            if (findIndex(thermo_.species(), sp) < 0)
+            {
+                FatalErrorInFunction
+                    << "peqsiFGM: table species " << sp
+                    << " missing from the thermo" << exit(FatalError);
+            }
+        }
+
+        auto readField = [&](const word& nm) -> volScalarField*
+        {
+            return new volScalarField
+            (
+                IOobject
+                (
+                    nm, runTime.name(), mesh,
+                    IOobject::MUST_READ, IOobject::AUTO_WRITE
+                ),
+                mesh
+            );
+        };
+        Z_.reset(readField("Z"));
+        Zvar_.reset(readField("Zvar"));
+        Yc_.reset(readField("Yc"));
+
+        sourceYc_.reset
+        (
+            new volScalarField
+            (
+                IOobject("PEQSI:sourceYc", runTime.name(), mesh),
+                mesh,
+                dimensionedScalar(dimMass/dimVolume/dimTime, 0),
+                zeroGradientFvPatchScalarField::typeName
+            )
+        );
     }
 
     Info<< "peqsiFluid: PEQSI fractional-step solver "
@@ -193,7 +247,10 @@ Foam::solvers::peqsiFluid::peqsiFluid(fvMesh& mesh)
         << "    acoustic substep: consistency-form Helmholtz (Eq. 19)" << nl
         << "    thermo closure: T from h(T,v) Newton inversion (WKK Fig. 3)"
         << nl
-        << "    composition: single-species (FGM coupling: stage 1/6)"
+        << "    composition: "
+        << (fgmActive_
+            ? "manifold (FGM stage 2a: wiring verification)"
+            : "single-species (FGM off)")
         << endl;
 }
 

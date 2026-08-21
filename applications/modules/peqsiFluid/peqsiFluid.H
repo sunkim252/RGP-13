@@ -81,6 +81,7 @@ See also
 
 #include "isothermalFluid.H"
 #include "fluidMulticomponentThermo.H"
+#include "FGMTable.H"
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
@@ -150,6 +151,19 @@ protected:
 
         //- Manifold source of the progress variable (table lookup)
         autoPtr<volScalarField> sourceYc_;
+
+        //- The manifold (stage 2a): constructed only when peqsiFGM is
+        //  set, from constant/fgmProperties -- the baked table with the
+        //  PEQSI coefficient blocks and W (verified against md5 on
+        //  delivery; the reader FatalErrors on any missing block).
+        autoPtr<FGMTable> fgmTable_;
+
+        //- n-state copies of the transported manifold coordinates for
+        //  the SSP-RK3 combination (held per advective substep, like
+        //  rhoN_/UN_)
+        autoPtr<volScalarField> ZN_;
+        autoPtr<volScalarField> ZvarN_;
+        autoPtr<volScalarField> YcN_;
 
 
     // PEQSI real-gas coefficient fields (evaluated in thermoClosure)
@@ -270,6 +284,21 @@ protected:
         //- Sensor-gated conservative 2nd-order shock-capturing filter
         //  (Bogey, de Cacqueray & Bailly, JCP 228 (2009) 1447)
         void applySCFilter(const scalar sigmaMax, const scalar rTh);
+
+        //- Stage 2a: one SSP-RK3 stage of the manifold coordinates
+        //  (advective, non-conservative form -- composition must not
+        //  respond to the acoustic projection at a contact)
+        void advectManifoldStage
+        (
+            const surfaceScalarField& phiv,
+            const volScalarField& divPhiv,
+            const scalar cOld,
+            const scalar cNew,
+            const scalar dtv
+        );
+
+        //- Stage 2a: manifold lookup -> composition + diagnostics
+        void fgmClosure();
 
         //- Bounding artificial diffusivity for a [0,1] scalar, after
         //  Terashima & Koshi 2012 Eq. (27):

@@ -109,6 +109,12 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
     // Snapshot the n-state (consumed by the acoustic substep)
     rhoN_.set(new volScalarField("PEQSI:rhoN", rho_));
     UN_.set(new volVectorField("PEQSI:UN", U_));
+    if (fgmActive_)
+    {
+        ZN_.reset(new volScalarField("PEQSI:ZN", Z_()));
+        ZvarN_.reset(new volScalarField("PEQSI:ZvarN", Zvar_()));
+        YcN_.reset(new volScalarField("PEQSI:YcN", Yc_()));
+    }
     pN_.set(new volScalarField("PEQSI:pN", p_));
     hN_.set(new volScalarField("PEQSI:hN", h_));
 
@@ -647,6 +653,11 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
         ru.correctBoundaryConditions();
         pw.correctBoundaryConditions();
         rh.correctBoundaryConditions();
+
+        if (fgmActive_)
+        {
+            advectManifoldStage(phiv, divPhiv, cOld, cNew, dtv);
+        }
     };
 
     stage(0.0, 1.0);            // q1 = qn + dt L(qn)
@@ -684,6 +695,91 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
     h_.correctBoundaryConditions();
 
     mark(tPhase_[3]);
+}
+
+
+
+
+void Foam::solvers::peqsiFluid::advectManifoldStage
+(
+    const surfaceScalarField& phiv,
+    const volScalarField& divPhiv,
+    const scalar cOld,
+    const scalar cNew,
+    const scalar dtv
+)
+{
+    // One SSP-RK3 stage of the manifold coordinates, ADVECTIVE form:
+    //
+    //     dq/dt + u . grad q = S,      q in {Z, Zvar, Yc}
+    //
+    // Non-conservative on purpose, twice over.  First, composition must
+    // not respond to the acoustic projection at a contact -- the dp
+    // kick changes rho, and a conservative rho*q carrier would need the
+    // same Delta-M pairing the momentum needs; the advective form makes
+    // the invariance exact by construction (TK 2012 transport their
+    // mass fractions the same way).  Second, u . grad q obeys a maximum
+    // principle, so with a bounded reconstruction the coordinates stay
+    // in their physical ranges without clipping.
+    //
+    // The price is that int(rho q) is conserved only through rho's own
+    // ledger -- acceptable for the stage-2a wiring scope, revisited
+    // when the source terms arrive.
+    //
+    // Boundedness hygiene: the TK Eq. 27 bounding artificial
+    // diffusivity on Z (C_Y = 100, active only OUTSIDE [0,1], so it is
+    // the identity on a healthy field).
+    auto stageOne =
+        [&](volScalarField& q, const volScalarField& qN, const word& key,
+            const volScalarField* Sq)
+    {
+        tmp<volScalarField> tLq =
+            -(fvc::div(phiv, q, key) - q*divPhiv);
+
+        if (Sq)
+        {
+            tLq.ref() += *Sq/max(rho_, dimensionedScalar(dimDensity, small));
+        }
+
+        const scalarField& Lq = tLq().primitiveField();
+        const scalarField& qNf = qN.primitiveField();
+        scalarField& qf = q.primitiveFieldRef();
+
+        forAll(qf, i)
+        {
+            qf[i] = cOld*qNf[i] + cNew*(qf[i] + dtv*Lq[i]);
+        }
+        q.correctBoundaryConditions();
+    };
+
+    stageOne(Z_(), ZN_(), "div(phiv,Z)", nullptr);
+    stageOne(Zvar_(), ZvarN_(), "div(phiv,Zvar)", nullptr);
+    stageOne(Yc_(), YcN_(), "div(phiv,Yc)", &sourceYc_());
+
+    // Bounding diffusivity on Z (explicit, inside the stage): inactive
+    // on a bounded field, O(dx) strength where an excursion exists
+    if (pimple.dict().lookupOrDefault<Switch>("peqsiBoundZ", true))
+    {
+        // speed of sound from the App-D identity beta/(1-alpha) = -rho c^2
+        // (alpha_/beta_ are refreshed every step by updateCoefficients)
+        const volScalarField cSound
+        (
+            "PEQSI:cSound",
+            sqrt
+            (
+                max
+                (
+                    -beta_/((1.0 - alpha_)
+                   *max(rho_, dimensionedScalar(dimDensity, small))),
+                    dimensionedScalar(sqr(dimVelocity), small)
+                )
+            )
+        );
+        const tmp<volScalarField> tD =
+            boundingArtDiffusivity(Z_(), cSound, 100.0);
+        Z_() += runTime.deltaT()*cNew*fvc::laplacian(tD(), Z_());
+        Z_().correctBoundaryConditions();
+    }
 }
 
 
