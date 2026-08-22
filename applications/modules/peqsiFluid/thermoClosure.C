@@ -1977,6 +1977,39 @@ void Foam::solvers::peqsiFluid::updateCompositionSource()
     // the term exists to fill.
     //
     // "both" is kept for the A/B that established this.
+    //
+    // ---------------------------------------------------------------
+    // Adversarial check on the above, because the first two arguments
+    // for dropping B were weaker than they looked.
+    //
+    // The energy audit proves LESS than it appears to.  iL*S_Y is added
+    // to Lp and to Lrh with the SAME value, so rho e = rho h - p gains
+    // X - X = 0 whatever X is.  de/e ~ 6e-09 confirms the wiring is
+    // consistent; it says nothing about the magnitude.  Any S_Y passes.
+    //
+    // The closed-box endpoint is not conservation-determined either --
+    // that was the next guess and it is also wrong.  Doubling the source
+    // moves it:
+    //     parts=pressure   T 3866.7 K,  p 7.337 MPa
+    //     parts=both       T 4000.0 K,  p 9.544 MPa
+    // both conserving energy to ~1e-08.  The state is overdetermined, so
+    // a given e admits different (h, p) splits and the inversion lands
+    // on different T.
+    //
+    // What DOES pin the magnitude is the EOS, and it needs no table
+    // temperature.  With e, v and Y fixed the true state is unique, so
+    // the right source drives the transported state ONTO the EOS:
+    //
+    //     S_Y off          rho drift 0.2695
+    //     parts=pressure   rho drift 0.0269      10x closer
+    //     parts=both       rho drift 0.2227      overshot
+    //
+    // Read as a line through those three, the zero crossing sits just
+    // below A, so the derived term is right to within about 10% and the
+    // 2.7% residual is consistent with the rest of the discretisation
+    // rather than with a missing factor.  This is independent of the
+    // table lookup that the constant-pressure endpoint check relies on.
+    // ---------------------------------------------------------------
     const bool pressureOnly =
         pimple.dict().lookupOrDefault<word>("peqsiCompSourceParts", "pressure")
      != "both";
