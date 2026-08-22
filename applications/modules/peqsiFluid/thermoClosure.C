@@ -139,6 +139,84 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
     Info<< "PEQSI coefficients: max |beta/(1-alpha) + rho c^2| / (rho c^2) = "
         << maxDev << endl;
 
+    // What the density drift actually costs (peqsiCoeffDrift).
+    //
+    // The coefficients above mix two determinations of the same state:
+    // rho is the TRANSPORTED density, while cp, cv and psi come from the
+    // thermo, evaluated at the EOS state (p, T, Y).  Where the two
+    // densities disagree -- the drift -- alpha and beta are assembled at
+    // a state that is not a state.
+    //
+    // Recomputing both ways answers what that costs, and the answer is
+    // nothing, for a reason worth recording.
+    //
+    //   measured: rho gap 0.257 max -> alpha 4.8e-16, beta 0.257
+    //
+    // alpha is invariant to machine precision and beta tracks the gap
+    // exactly 1:1.  Both follow from the algebra: with
+    // (dp/dv)_T = -rho^2/psi and (dp/dT)_v = rho S, S = sqrt((cp-cv)/(T psi)),
+    //
+    //   xi   = cv + v (dp/dT)_v = cv + S          (v rho = 1, so no rho)
+    //   alpha = (dp/dT)_v/(rho xi) = S/xi         -> rho cancels
+    //   beta  = rho [ -1/psi - S (T S - 1/psi)/xi ]  -> beta is LINEAR in rho
+    //
+    // (An earlier expectation that beta would amplify the gap by its
+    // -7.6 to -14.8 v-exponent was wrong: that exponent describes beta
+    // along the MANIFOLD, where composition and state both move, not
+    // this linear prefactor.)
+    //
+    // Because beta is linear in rho, and every dynamical use of it is in
+    // the combination rho/beta or beta/rho --
+    //
+    //   advectSubstep:305   sqrt(-beta/((1-alpha) rhoN))   sound speed
+    //   advectSubstep:787   -beta/((1-alpha) rho)          c^2
+    //   correctPressure:93  rhoN (1-alpha)/beta            Helmholtz
+    //                                                      coefficient and
+    //                                                      the Eq. 11 update
+    //
+    // -- the drift CANCELS out of the dynamics exactly.  The
+    // overdetermined thermodynamic state is real, but PEQSI's leading
+    // terms are structurally immune to it, and the drift is a
+    // consistency diagnostic rather than an error that propagates.
+    //
+    // What is NOT covered: rho_EOS used directly (the boundary refresh),
+    // and the fact that the transport properties are a consistent
+    // function of (p, T, Y) while the dynamics run on the transported
+    // rho -- those two states differ by the drift, and nothing here makes
+    // them agree.
+    if (pimple.dict().lookupOrDefault<Switch>("peqsiCoeffDrift", false))
+    {
+        const scalarField& rhoE = thermo_.rho()().primitiveField();
+        scalar dAmax = 0, dBmax = 0, dAsum = 0, dBsum = 0, dRmax = 0;
+        forAll(rho, i)
+        {
+            const scalar re = max(rhoE[i], small);
+            const scalar ve = 1.0/re;
+            const scalar dpdvE = -sqr(re)/psi[i];
+            const scalar dpdTE =
+                re*sqrt(max((cp[i] - cv[i])/(T[i]*psi[i]), 0.0));
+            const scalar xiE = cv[i] + ve*dpdTE;
+            const scalar dhdvE = T[i]*dpdTE + ve*dpdvE;
+            const scalar aE = dpdTE/(re*xiE);
+            const scalar bE = (dpdvE - dpdTE*dhdvE/xiE)/re;
+
+            const scalar da = mag(aE - a[i])/max(mag(a[i]), small);
+            const scalar db = mag(bE - b[i])/max(mag(b[i]), small);
+            dAmax = max(dAmax, da); dBmax = max(dBmax, db);
+            dAsum += da; dBsum += db;
+            dRmax = max(dRmax, mag(re - rho[i])/max(rho[i], small));
+        }
+        label n = rho.size();
+        reduce(n, sumOp<label>());
+        reduce(dAmax, maxOp<scalar>()); reduce(dBmax, maxOp<scalar>());
+        reduce(dRmax, maxOp<scalar>());
+        reduce(dAsum, sumOp<scalar>()); reduce(dBsum, sumOp<scalar>());
+        Info<< "PEQSI coeff drift: rho gap max = " << dRmax
+            << " -> alpha " << dAmax << " max / " << dAsum/max(n, 1)
+            << " mean, beta " << dBmax << " max / " << dBsum/max(n, 1)
+            << " mean" << endl;
+    }
+
     alpha_.correctBoundaryConditions();
     beta_.correctBoundaryConditions();
 }
