@@ -211,6 +211,50 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
         << gMax(dp.primitiveField()) << " Pa (theta = " << theta << ")"
         << endl;
 
+    // S_Y chain instrumentation (peqsiTraceSY).  The composition source
+    // delivers a pressure impulse of the right size -- summed over the
+    // burn it matches what the closed case actually gains -- yet almost
+    // no velocity comes out.  This prints every link so the loss can be
+    // located instead of guessed at:
+    //
+    //   S_Y            the source itself                       [Pa/s]
+    //   dt*iL*S_Y      what it adds to p* in one step           [Pa]
+    //   spread(p*)     how much of that is NON-uniform, i.e. the only
+    //                  part a laplacian can see                 [Pa]
+    //   dp             what the Helmholtz actually returned     [Pa]
+    //   max|U|         what reached the velocity field          [m/s]
+    //
+    // A uniform p* increment has zero gradient, so if spread(p*) is tiny
+    // next to dt*iL*S_Y the answer is geometric, not a coupling defect:
+    // in a uniform burn the expansion can only be communicated from a
+    // pressure-setting boundary, at the speed of sound.
+    if (pimple.dict().lookupOrDefault<Switch>("peqsiTraceSY", false))
+    {
+        const scalar dtv = mesh.time().deltaTValue();
+        scalar sMax = 0, kick = 0;
+        if (sourceP_.valid())
+        {
+            const scalarField& SY = sourceP_().primitiveField();
+            const scalarField& aF = alpha_.primitiveField();
+            forAll(SY, i)
+            {
+                sMax = max(sMax, mag(SY[i]));
+                kick = max(kick, mag(dtv*SY[i]/max(1.0 - aF[i], small)));
+            }
+            reduce(sMax, maxOp<scalar>());
+            reduce(kick, maxOp<scalar>());
+        }
+        const scalar pLo = gMin(p_.primitiveField());
+        const scalar pHi = gMax(p_.primitiveField());
+        Info<< "PEQSI S_Y chain: S_Y = " << sMax << " Pa/s"
+            << ", dt*iL*S_Y = " << kick << " Pa"
+            << ", spread(p) = " << (pHi - pLo) << " Pa"
+            << ", dp = " << (gMax(dp.primitiveField())
+                           - gMin(dp.primitiveField())) << " Pa"
+            << ", max|U| = " << gMax(mag(U_.primitiveField()))
+            << " m/s" << endl;
+    }
+
     // Blow-up forensics: when dp leaves the physical band, report the
     // extreme cell's location and coefficient state (each rank reports
     // its own extreme -- cheap, only fires when already abnormal)

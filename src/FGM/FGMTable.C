@@ -241,7 +241,13 @@ Foam::FGMTable::FGMTable
             // decane sits below its freezing point and the two Chung
             // implementations extrapolate differently.  Read for that
             // comparison, not for consumption.
-            "mu", "kappa"
+            "mu", "kappa",
+            // Table-state density.  Diagnostic in origin, but S_Y needs a
+            // density response to a composition change and thermo::rho()
+            // is a CACHED field -- it does not answer until correct()
+            // runs -- so the manifold-direction derivative comes from
+            // here instead.
+            "PEQSI_rho"
         };
         const label nNode = nZ_*nGz_*nC_*max(nChi_, 1);
 

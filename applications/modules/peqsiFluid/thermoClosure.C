@@ -1250,48 +1250,53 @@ void Foam::solvers::peqsiFluid::fgmClosure()
             dYdcH_.reset(new scalarField(Zf.size(), 0.0));
         }
 
-        const scalarField rho0(thermo_.rho()().primitiveField());
+        // Perturb the STENCIL COORDINATE, not the Y fields.  With Opt-1
+        // armed the mixture reads its composition from the stencil
+        // (CfieldPtr_ == cNormF_) and never looks at Y, so a perturbation
+        // written into Y is invisible to the thermo -- that mistake made
+        // the derivative come out identically zero.
+        const scalarField cSave(cNormF_());
+        const List<scalar>* rhoTab =
+            tbl.hasOptTable("PEQSI_rho") ? &tbl.optTable("PEQSI_rho") : nullptr;
+
         const scalarField h0(thermo_.he(p_, thermo_.T())().primitiveField());
 
-        // rewrite Y at c + dc on the same stencil coordinates
         forAll(Zf, celli)
         {
-            const scalar Zcl = min(max(Zf[celli], 0.0), 1.0);
-            const scalar gz = max(gZf[celli], 0.0);
-            const scalar Ccl = min(max(cNormF_()[celli] + dc, 0.0), 1.0);
-
-            FGMTable::FGMStencil st2;
-            tbl.makeStencil(Zcl, gz, Ccl, dhF_()[celli], st2);
-            forAll(spn, k)
-            {
-                (*Yp[k])[celli] = tbl.interpolate(tbl.Ytable(spn[k]), st2);
-            }
+            cNormF_()[celli] = min(max(cSave[celli] + dc, 0.0), 1.0);
         }
 
-        const scalarField rho1(thermo_.rho()().primitiveField());
         const scalarField h1(thermo_.he(p_, thermo_.T())().primitiveField());
 
         forAll(Zf, celli)
         {
-            const scalar step =
-                min(max(cNormF_()[celli] + dc, 0.0), 1.0) - cNormF_()[celli];
+            const scalar step = cNormF_()[celli] - cSave[celli];
             const scalar inv = mag(step) > small ? 1.0/step : 0.0;
-            dYdcRho_()[celli] = (rho1[celli] - rho0[celli])*inv;
             dYdcH_()[celli] = (h1[celli] - h0[celli])*inv;
+
+            // Density response from the table.  thermo::rho() is cached
+            // and would need a correct() to answer, so the manifold's own
+            // density is differenced instead and scaled to the cell by
+            // the ratio -- what enters S_Y is a relative response.
+            scalar dR = 0;
+            if (rhoTab && mag(step) > small)
+            {
+                const scalar Zcl = min(max(Zf[celli], 0.0), 1.0);
+                const scalar gz = max(gZf[celli], 0.0);
+                FGMTable::FGMStencil s0, s1;
+                tbl.makeStencil(Zcl, gz, cSave[celli], dhF_()[celli], s0);
+                tbl.makeStencil(Zcl, gz, cNormF_()[celli], dhF_()[celli], s1);
+                const scalar r0 = tbl.interpolate(*rhoTab, s0);
+                const scalar r1 = tbl.interpolate(*rhoTab, s1);
+                if (mag(r0) > vSmall)
+                {
+                    dR = (r1 - r0)*inv*(rhof[celli]/r0);
+                }
+            }
+            dYdcRho_()[celli] = dR;
         }
 
-        // restore the manifold composition
-        forAll(Zf, celli)
-        {
-            const scalar Zcl = min(max(Zf[celli], 0.0), 1.0);
-            const scalar gz = max(gZf[celli], 0.0);
-            FGMTable::FGMStencil st0;
-            tbl.makeStencil(Zcl, gz, cNormF_()[celli], dhF_()[celli], st0);
-            forAll(spn, k)
-            {
-                (*Yp[k])[celli] = tbl.interpolate(tbl.Ytable(spn[k]), st0);
-            }
-        }
+        cNormF_() = cSave;
     }
 
     forAll(spn, k)
