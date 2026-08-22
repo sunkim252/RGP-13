@@ -1803,7 +1803,38 @@ void Foam::solvers::peqsiFluid::updateCompositionSource()
     const tmp<volScalarField> tCv(thermo_.Cv());
     const scalarField& cvF = tCv().primitiveField();
 
+    // Only the DIRECT part of the composition response belongs here.
+    //
+    //   S_Y = sum_k [ (dp/dY_k)_{T,v} - rho alpha (dh/dY_k)_{T,v} ] DY_k/Dt
+    //           \________ A ________/   \__________ B __________/
+    //
+    // The derivation puts both terms in, and both were carried at first.
+    // Measurement says otherwise: A alone is stable and lands on the
+    // constant-pressure endpoint, while A - rho alpha B overshoots by
+    // about a factor of two and blows the run up.
+    //
+    // The reason is that B is already accounted for.  It is the
+    // TEMPERATURE-MEDIATED half of the response -- composition changes,
+    // the mixture enthalpy at fixed T changes, and T must move to keep
+    // the transported h.  That is precisely what this closure's own
+    // temperature inversion does: it solves h(T, p, Y) for T with the
+    // manifold's Y every step, so the temperature response to a
+    // composition change is captured there and alpha/beta are then
+    // evaluated at the corrected state.  Adding B to the pressure
+    // equation counts it a second time.
+    //
+    // A has no such counterpart.  It is the response at FIXED T and v,
+    // and nothing else in the scheme supplies it, because p here is
+    // transported rather than derived from the EOS.  That is the gap
+    // the term exists to fill.
+    //
+    // "both" is kept for the A/B that established this.
+    const bool pressureOnly =
+        pimple.dict().lookupOrDefault<word>("peqsiCompSourceParts", "pressure")
+     != "both";
+
     scalar sMax = 0;
+    scalar aPk = 0, bPk = 0, hPk = 0, dpk = 0, rPk = 0;
     forAll(S, i)
     {
         const scalar rho = max(rf[i], small);
@@ -1832,8 +1863,19 @@ void Foam::solvers::peqsiFluid::updateCompositionSource()
 
         const scalar B = dh + dhdp*A;
 
-        S[i] = A - rho*aF[i]*B;
-        sMax = max(sMax, mag(S[i]));
+        // A/B discriminator (peqsiCompSourceParts).  The split shows the
+        // pressure part A alone matching the physical estimate (6.6e11
+        // against 5.0e11) and the enthalpy part roughly doubling it.
+        // "pressure" drops the enthalpy contribution so the two can be
+        // told apart: if A alone is stable, the defect is localised in
+        // the (dh/dY)_{T,v} evaluation; if it is not, the problem is that
+        // a source this stiff does not belong in an explicit RK stage.
+        S[i] = pressureOnly ? A : (A - rho*aF[i]*B);
+        if (mag(S[i]) > sMax)
+        {
+            sMax = mag(S[i]);
+            aPk = A; bPk = -rho*aF[i]*B; hPk = dh; dpk = dhdp; rPk = dRho;
+        }
     }
 
     sourceP_().correctBoundaryConditions();
@@ -1846,6 +1888,10 @@ void Foam::solvers::peqsiFluid::updateCompositionSource()
     {
         Info<< "PEQSI composition source: max |S_Y| = " << sMax
             << " Pa/s (dt*S_Y = " << sMax*mesh.time().deltaTValue()
-            << " Pa)" << endl;
+            << " Pa)" << nl
+            << "PEQSI S_Y split: A(pressure) = " << aPk
+            << ", -rho*alpha*B(enthalpy) = " << bPk
+            << " | dh/dt = " << hPk << ", dh/dp|T = " << dpk
+            << ", drho/dt = " << rPk << endl;
     }
 }
