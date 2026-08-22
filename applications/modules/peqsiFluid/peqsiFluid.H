@@ -213,6 +213,17 @@ protected:
         List<scalarField> RGfields_;
         bool tier2Armed_ = false;
 
+        //- Mesh state the manifold lookups were armed for.  Opt-1 and
+        //  Tier-2 both recover a cell index from the ADDRESS RANGE of
+        //  cached field pointers, so a redistribution (DLB) or a
+        //  refinement reallocates those fields and the recovery then
+        //  yields a wrong IN-RANGE index -- an out-of-bounds read, not a
+        //  clean failure.  The cell count alone misses an equal-count
+        //  redistribution, which moves the data pointer without changing
+        //  the size, so the species-0 data pointer is tracked too.
+        label armedNCells_ = -1;
+        const scalar* armedYData_ = nullptr;
+
 
     // PEQSI real-gas coefficient fields (evaluated in thermoClosure)
 

@@ -860,6 +860,30 @@ void Foam::solvers::peqsiFluid::fgmClosure()
 
     scalarField& src = sourceYc_().primitiveFieldRef();
 
+    // Re-arm on a mesh change before anything reads the cached fields.
+    // Everything below is sized to the CURRENT cell count; the lookups
+    // armed at the bottom of this function cache pointers into it.
+    const scalar* const yData =
+        thermo_.Y().size() ? thermo_.Y()[0].primitiveField().begin() : nullptr;
+    const bool meshMoved =
+        armedNCells_ >= 0
+     && (mesh.nCells() != armedNCells_ || yData != armedYData_);
+
+    if (meshMoved)
+    {
+        alphaTab_.clear();
+        betaTab_.clear();
+        tabUsable_.clear();
+        cNormF_.clear();
+        dhF_.clear();
+        Tguess_.clear();
+        RGfields_.clear();
+        baseBlendArmed_ = false;
+        tier2Armed_ = false;
+        Info<< "PEQSI manifold: mesh changed (" << armedNCells_ << " -> "
+            << mesh.nCells() << " cells) -- re-arming the lookups" << endl;
+    }
+
     if (!alphaTab_.valid())
     {
         alphaTab_.reset(new scalarField(Zf.size(), 0.0));
@@ -1323,6 +1347,9 @@ void Foam::solvers::peqsiFluid::fgmClosure()
             baseBlendArmed_ = true;
         }
     }
+
+    armedNCells_ = mesh.nCells();
+    armedYData_ = yData;
 }
 
 
