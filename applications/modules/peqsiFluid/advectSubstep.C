@@ -254,6 +254,14 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
         pimple.dict().lookupOrDefault<word>("peqsiLadImplicitMode", "stage")
     );
 
+    // Time weighting of the implicit diffusion.  Default backward Euler.
+    // theta = 0.5 (Crank-Nicolson) was tried and is WORSE for the split
+    // form (L1 against the explicit branch 5.33e-3 -> 7.70e-3), which
+    // located the gap in the operator splitting rather than in the
+    // diffusion's time order -- hence the per-stage form below.
+    const scalar theta_ =
+        pimple.dict().lookupOrDefault<scalar>("peqsiLadTheta", 1.0);
+
     tmp<volScalarField> tDart;      // rho_art [m2/s]
     tmp<volScalarField> tKappaArt;  // kappa_art [W/(m K)]
 
@@ -576,6 +584,56 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
         Q.correctBoundaryConditions();
     };
 
+    // One implicit LAD solve on a transported scalar; returns the
+    // increment and adds it to q.
+    //
+    // The transported carriers r/rh inherit rhoN_'s patches, which are
+    // 'calculated' -- those cannot supply gradientInternalCoeffs(), so
+    // fvm::laplacian on them aborts ("cannot be called for a
+    // calculatedFvPatchField on patch inlet").  The solve therefore runs
+    // on a zeroGradient clone.  That is exact, not an approximation:
+    // Dart is explicitly zeroed on every boundary above, so the
+    // artificial diffusion carries no boundary flux by construction and
+    // the clone's patches only have to state that.  Boundary values of
+    // r/rh are left untouched -- only the internal increment is applied.
+    auto ladSolve = [&](volScalarField& q, const scalar dtCoeff)
+    {
+        volScalarField qs
+        (
+            IOobject
+            (
+                "PEQSI:ladSolve",
+                runTime.name(),
+                mesh,
+                IOobject::NO_READ,
+                IOobject::NO_WRITE,
+                false
+            ),
+            mesh,
+            dimensionedScalar(q.dimensions(), Zero),
+            zeroGradientFvPatchScalarField::typeName
+        );
+        qs.primitiveFieldRef() = q.primitiveField();
+        qs.correctBoundaryConditions();
+
+        const volScalarField qHat("PEQSI:ladHat", qs);
+        const dimensionedScalar rdtQ("rdtQ", dimless/dimTime, 1.0/dtCoeff);
+
+        fvScalarMatrix qEqn
+        (
+            fvm::Sp(rdtQ, qs)
+          - theta_*fvm::laplacian(tDart(), qs)
+         ==
+            rdtQ*qHat
+          + (1.0 - theta_)*fvc::laplacian(tDart(), qHat)
+        );
+        qEqn.solve(mesh.solution().solverDict("rhoLAD"));
+
+        scalarField dq(qs.primitiveField() - qHat.primitiveField());
+        q.primitiveFieldRef() += dq;
+        return dq;
+    };
+
     // One SSP-RK3 stage: q <- cOld*qn + cNew*(q + dt*L(q)).
     // The updates are FUSED into primitive loops (internal + physical
     // boundaries): the field-expression form allocated ~25 full-field
@@ -735,36 +793,15 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
         // takes the SAME mass increment the solve produced.
         if (tDart.valid() && ladImplicit && ladImplicitMode == "stage")
         {
-            const dimensionedScalar rdtS
-            (
-                "rdtS", dimless/dimTime, 1.0/(cNew*dtv)
-            );
+            const scalarField dr(ladSolve(r, cNew*dtv));
+            ladSolve(rh, cNew*dtv);
 
-            const volScalarField rHat("PEQSI:rHatLAD", r);
-
-            fvScalarMatrix rEqn
-            (
-                fvm::Sp(rdtS, r) - fvm::laplacian(tDart(), r) == rdtS*rHat
-            );
-            rEqn.solve(mesh.solution().solverDict("rhoLAD"));
-
-            const volScalarField rhHat("PEQSI:rhHatLAD", rh);
-
-            fvScalarMatrix rhEqn
-            (
-                fvm::Sp(rdtS, rh) - fvm::laplacian(tDart(), rh) == rdtS*rhHat
-            );
-            rhEqn.solve(mesh.solution().solverDict("rhoLAD"));
-
+            // Eq. 24 takes the SAME mass increment the solve produced
+            const vectorField& UNi = UN_().primitiveField();
+            vectorField& rui = ru.primitiveFieldRef();
+            forAll(rui, i)
             {
-                const scalarField& rNew = r.primitiveField();
-                const scalarField& rOld = rHat.primitiveField();
-                const vectorField& UNi = UN_().primitiveField();
-                vectorField& rui = ru.primitiveFieldRef();
-                forAll(rui, i)
-                {
-                    rui[i] += UNi[i]*(rNew[i] - rOld[i]);
-                }
+                rui[i] += UNi[i]*dr[i];
             }
 
             r.correctBoundaryConditions();
@@ -817,54 +854,14 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
     // the invariance Eq. 24 exists to preserve.
     if (tDart.valid() && ladImplicit && ladImplicitMode == "split")
     {
-        const dimensionedScalar rdtD("rdt", dimless/dimTime, 1.0/dt.value());
+        const scalarField dr(ladSolve(r, dt.value()));
+        ladSolve(rh, dt.value());
 
-        // theta weighting of the split diffusion.  Default backward
-        // Euler.  theta = 0.5 (Crank-Nicolson) was tried and is WORSE
-        // here, which locates the residual discrepancy: measured on the
-        // Mayer-scale 1-D interface at dt 1e-6, L1(implicit - explicit)
-        // went 5.33e-3 (theta 1) -> 7.70e-3 (theta 0.5) and the 10-90
-        // width stayed 55 against the explicit branch's 53 either way.
-        // The gap is therefore not the diffusion's time order but the
-        // SPLITTING: the explicit branch applies LAD inside each RK
-        // stage, so it interacts with the advection within the substep,
-        // while this branch applies it once at the end.  Both converge
-        // to the same solution -- the width difference is gone by
-        // dt 1e-7 -- so the cost is a dt-truncation effect at the
-        // operating point, not a change of model.
-        const scalar theta =
-            pimple.dict().lookupOrDefault<scalar>("peqsiLadTheta", 1.0);
-
-        const volScalarField rStar("PEQSI:rStarLAD", r);
-
-        fvScalarMatrix rEqn
-        (
-            fvm::Sp(rdtD, r) - theta*fvm::laplacian(tDart(), r)
-         ==
-            rdtD*rStar + (1.0 - theta)*fvc::laplacian(tDart(), rStar)
-        );
-        rEqn.solve(mesh.solution().solverDict("rhoLAD"));
-
-        const volScalarField rhStar("PEQSI:rhStarLAD", rh);
-
-        fvScalarMatrix rhEqn
-        (
-            fvm::Sp(rdtD, rh) - theta*fvm::laplacian(tDart(), rh)
-         ==
-            rdtD*rhStar + (1.0 - theta)*fvc::laplacian(tDart(), rhStar)
-        );
-        rhEqn.solve(mesh.solution().solverDict("rhoLAD"));
-
-        // Eq. 24 momentum increment, from the SAME mass increment
+        const vectorField& UNi = UN_().primitiveField();
+        vectorField& rui = ru.primitiveFieldRef();
+        forAll(rui, i)
         {
-            const scalarField& rNew = r.primitiveField();
-            const scalarField& rOld = rStar.primitiveField();
-            const vectorField& UNi = UN_().primitiveField();
-            vectorField& rui = ru.primitiveFieldRef();
-            forAll(rui, i)
-            {
-                rui[i] += UNi[i]*(rNew[i] - rOld[i]);
-            }
+            rui[i] += UNi[i]*dr[i];
         }
 
         r.correctBoundaryConditions();
