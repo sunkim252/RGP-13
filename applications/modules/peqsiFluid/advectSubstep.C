@@ -240,6 +240,20 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
         pimple.dict().lookupOrDefault<Switch>("peqsiLadImplicit", false)
     );
 
+    // Where the implicit solve sits.  "stage" (default) solves inside
+    // every SSP-RK3 stage, so the diffusion still interacts with the
+    // advection within the substep -- that coupling is what the explicit
+    // branch has and what a single split step at the end throws away
+    // (measured on the Mayer-scale 1-D interface at dt 1e-6: the split
+    // widened the 10-90 interface 53 -> 55 cells, and Crank-Nicolson did
+    // not help, which located the gap in the splitting rather than in
+    // the diffusion's time order).  "split" keeps the cheaper one-solve
+    // form for comparison.
+    const word ladImplicitMode
+    (
+        pimple.dict().lookupOrDefault<word>("peqsiLadImplicitMode", "stage")
+    );
+
     tmp<volScalarField> tDart;      // rho_art [m2/s]
     tmp<volScalarField> tKappaArt;  // kappa_art [W/(m K)]
 
@@ -710,6 +724,54 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
         pw.correctBoundaryConditions();
         rh.correctBoundaryConditions();
 
+        // IMEX inside the stage: the loops above produced the
+        // advection-only stage value q^ = cOld qn + cNew (q + dt A(q)).
+        // Close the stage on the diffusion implicitly,
+        //
+        //     q - cNew dt div(D grad q) = q^,
+        //
+        // which reduces to the explicit branch's cNew dt D(q^) as
+        // dt D -> 0 and is unconditionally stable otherwise.  Eq. 24
+        // takes the SAME mass increment the solve produced.
+        if (tDart.valid() && ladImplicit && ladImplicitMode == "stage")
+        {
+            const dimensionedScalar rdtS
+            (
+                "rdtS", dimless/dimTime, 1.0/(cNew*dtv)
+            );
+
+            const volScalarField rHat("PEQSI:rHatLAD", r);
+
+            fvScalarMatrix rEqn
+            (
+                fvm::Sp(rdtS, r) - fvm::laplacian(tDart(), r) == rdtS*rHat
+            );
+            rEqn.solve(mesh.solution().solverDict("rhoLAD"));
+
+            const volScalarField rhHat("PEQSI:rhHatLAD", rh);
+
+            fvScalarMatrix rhEqn
+            (
+                fvm::Sp(rdtS, rh) - fvm::laplacian(tDart(), rh) == rdtS*rhHat
+            );
+            rhEqn.solve(mesh.solution().solverDict("rhoLAD"));
+
+            {
+                const scalarField& rNew = r.primitiveField();
+                const scalarField& rOld = rHat.primitiveField();
+                const vectorField& UNi = UN_().primitiveField();
+                vectorField& rui = ru.primitiveFieldRef();
+                forAll(rui, i)
+                {
+                    rui[i] += UNi[i]*(rNew[i] - rOld[i]);
+                }
+            }
+
+            r.correctBoundaryConditions();
+            rh.correctBoundaryConditions();
+            ru.correctBoundaryConditions();
+        }
+
         if (fgmActive_)
         {
             advectManifoldStage(phiv, divPhiv, cOld, cNew, dtv);
@@ -753,7 +815,7 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
     // stages (UNi there, UN_() here): under velocity equilibrium the
     // momentum increment is then u times the mass increment, which is
     // the invariance Eq. 24 exists to preserve.
-    if (tDart.valid() && ladImplicit)
+    if (tDart.valid() && ladImplicit && ladImplicitMode == "split")
     {
         const dimensionedScalar rdtD("rdt", dimless/dimTime, 1.0/dt.value());
 
