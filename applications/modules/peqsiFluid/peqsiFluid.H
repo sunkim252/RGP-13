@@ -240,6 +240,10 @@ protected:
         //  normalisation itself to turn dYc/dt into Dc/Dt.
         autoPtr<scalarField> cnormZ_;
 
+        //- Table density at the base state, filled on the stencil
+        //  fgmClosure already builds
+        autoPtr<scalarField> rhoTabF_;
+
         //- Reference internal-energy field for peqsiEnergyAudit
         autoPtr<scalarField> reInit_;
         scalar E0_ = 0;

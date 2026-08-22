@@ -192,10 +192,14 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
         {
             const scalar re = max(rhoE[i], small);
             const scalar ve = 1.0/re;
-            const scalar dpdvE = -sqr(re)/psi[i];
+            // A diagnostic must not be able to kill a run: psi and xi
+            // are positive for a stable fluid, but this is exactly the
+            // path one enables when the state is already suspect.
+            const scalar psiE = max(psi[i], vSmall);
+            const scalar dpdvE = -sqr(re)/psiE;
             const scalar dpdTE =
-                re*sqrt(max((cp[i] - cv[i])/(T[i]*psi[i]), 0.0));
-            const scalar xiE = cv[i] + ve*dpdTE;
+                re*sqrt(max((cp[i] - cv[i])/max(T[i]*psiE, vSmall), 0.0));
+            const scalar xiE = max(cv[i] + ve*dpdTE, small);
             const scalar dhdvE = T[i]*dpdTE + ve*dpdvE;
             const scalar aE = dpdTE/(re*xiE);
             const scalar bE = (dpdvE - dpdTE*dhdvE/xiE)/re;
@@ -233,8 +237,18 @@ void Foam::solvers::peqsiFluid::invertTemperature()
     // and every property behind it run on the looked-up mixture.
     if (fgmActive_)
     {
-        if (pimple.dict().lookupOrDefault<word>("peqsiZvar", "algebraic")
-         == "algebraic")
+        const word zvarMode
+        (
+            pimple.dict().lookupOrDefault<word>("peqsiZvar", "algebraic")
+        );
+        if (zvarMode != "algebraic" && zvarMode != "transport")
+        {
+            FatalErrorInFunction
+                << "peqsiZvar must be 'algebraic' or 'transport', got '"
+                << zvarMode << "'.  A typo silently leaves the segregation "
+                << "axis unclosed." << exit(FatalError);
+        }
+        if (zvarMode == "algebraic")
         {
             updateSegregation();
         }
@@ -1162,6 +1176,10 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         cNormF_.reset(new scalarField(Zf.size(), 0.0));
         dhF_.reset(new scalarField(Zf.size(), 0.0));
         cnormZ_.reset(new scalarField(Zf.size(), 1.0));
+        if (pimple.dict().lookupOrDefault<Switch>("peqsiCompSource", false))
+        {
+            rhoTabF_.reset(new scalarField(Zf.size(), 0.0));
+        }
 
         if
         (
@@ -1521,20 +1539,57 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         const List<scalar>* rhoTab =
             tbl.hasOptTable("PEQSI_rho") ? &tbl.optTable("PEQSI_rho") : nullptr;
 
-        const scalarField h0(thermo_.he(p_, thermo_.T())().primitiveField());
+        // Without the table's density there is no composition response to
+        // difference, so S_Y comes out identically zero -- and a source
+        // that is silently inert looks exactly like a source that is
+        // correctly small.  Say so once.
+        if (!rhoTab)
+        {
+            static bool warnedRho = false;
+            if (!warnedRho)
+            {
+                WarningInFunction
+                    << "peqsiCompSource is on but the table carries no "
+                    << "PEQSI_rho block, so the composition source is "
+                    << "identically zero.  Re-bake the table or turn the "
+                    << "switch off." << endl;
+                warnedRho = true;
+            }
+        }
+
+        // The enthalpy pair is only consumed by the B term, and the
+        // default drops B (peqsiCompSourceParts pressure).  Evaluating
+        // he() over the whole field twice for a value nothing reads cost
+        // 42% of the step.
+        const word parts
+        (
+            pimple.dict().lookupOrDefault<word>("peqsiCompSourceParts",
+                                                "pressure")
+        );
+        if (parts != "pressure" && parts != "both")
+        {
+            FatalErrorInFunction
+                << "peqsiCompSourceParts must be 'pressure' or 'both', got '"
+                << parts << "'.  A typo here silently selects the default "
+                << "and changes the physics." << exit(FatalError);
+        }
+        const bool needH = (parts == "both");
+
+        scalarField h0, h1;
+        if (needH) h0 = thermo_.he(p_, thermo_.T())().primitiveField();
 
         forAll(Zf, celli)
         {
             cNormF_()[celli] = min(max(cSave[celli] + dc, 0.0), 1.0);
         }
 
-        const scalarField h1(thermo_.he(p_, thermo_.T())().primitiveField());
+        if (needH) h1 = thermo_.he(p_, thermo_.T())().primitiveField();
 
         forAll(Zf, celli)
         {
             const scalar step = cNormF_()[celli] - cSave[celli];
             const scalar inv = mag(step) > small ? 1.0/step : 0.0;
-            dYdcH_()[celli] = (h1[celli] - h0[celli])*inv;
+            dYdcH_()[celli] = needH ? (h1[celli] - h0[celli])*inv : 0.0;
 
             // Density response from the table.  thermo::rho() is cached
             // and would need a correct() to answer, so the manifold's own
@@ -1545,10 +1600,9 @@ void Foam::solvers::peqsiFluid::fgmClosure()
             {
                 const scalar Zcl = min(max(Zf[celli], 0.0), 1.0);
                 const scalar gz = max(gZf[celli], 0.0);
-                FGMTable::FGMStencil s0, s1;
-                tbl.makeStencil(Zcl, gz, cSave[celli], dhF_()[celli], s0);
+                FGMTable::FGMStencil s1;
                 tbl.makeStencil(Zcl, gz, cNormF_()[celli], dhF_()[celli], s1);
-                const scalar r0 = tbl.interpolate(*rhoTab, s0);
+                const scalar r0 = rhoTabF_.valid() ? rhoTabF_()[celli] : 0.0;
                 const scalar r1 = tbl.interpolate(*rhoTab, s1);
                 if (mag(r0) > vSmall)
                 {
