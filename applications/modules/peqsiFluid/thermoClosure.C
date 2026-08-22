@@ -1309,7 +1309,8 @@ void Foam::solvers::peqsiFluid::fgmClosure()
             // the pressure-sensitive coefficients with the CELL pressure;
             // dense cells use the raw bake
             scalar betaTab;
-            if (Zcomp > Zdense)
+            const bool gasCell = (Zcomp > Zdense);
+            if (gasCell)
             {
                 betaTab = tbl.interpolate(*bnT, st)*pfld[celli];
                 nGas++;
@@ -1362,8 +1363,34 @@ void Foam::solvers::peqsiFluid::fgmClosure()
             // tightening trades speed for accuracy directly: every cell
             // the gate rejects costs a Newton and gains the exact
             // inversion.
+            // The table is baked at ONE pressure, so vTab is the specific
+            // volume at pTbl.  A cell at a different pressure has a
+            // genuinely different volume, and comparing the two raw was
+            // measuring the pressure excursion rather than any departure
+            // from the manifold.  It dominates: with the gate at 2% in v,
+            //
+            //     case                   |dp|/p   cells kept
+            //     2-D shear, no reaction   0.9%      95.2%
+            //     2-D counterflow, burning 5.6%      11.6%
+            //     1-D constant-p, burning 23.5%       0.0%
+            //
+            // and refining dt fourfold changes none of it (35.9, 35.9,
+            // 35.8%), so it is not an accumulating error -- it is where
+            // the pressure went.
+            //
+            // Corrected with the phase rule beta already uses.  In the
+            // gas branch v scales as 1/p at fixed T; in the dense branch
+            // the fluid is nearly incompressible and normalising by p is
+            // the wrong physics.  The tabulator measured exactly that
+            // split: over +-19% in pressure the normalised form holds to
+            // 0.30% in the gas phase where the raw value moves 19-43%,
+            // and in the liquid fuel below ~400 K it reverses -- the
+            // normalised form is 15-22% off where the raw is 2-3%.
+            const scalar vTabP =
+                gasCell ? vTab*(pTbl/max(pfld[celli], vSmall)) : vTab;
+
             useF[celli] =
-                mag(vTab - vCell) < vGateTol*max(vCell, small);
+                mag(vTabP - vCell) < vGateTol*max(vCell, small);
             if (rb > dBeta)
             {
                 dBeta = rb;
