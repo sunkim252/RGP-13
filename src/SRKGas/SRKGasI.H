@@ -647,7 +647,14 @@ inline bool Foam::SRKGas<Specie>::cubicBranches
         return false;
     }
 
-    const scalar th = ::acos(max(scalar(-1), min(scalar(1), Rl/sqrt(-Q3))));
+    // The clamp guards roundoff pushing the ratio past +-1 when the roots
+    // merge; the vSmall floor guards the triple root itself.  Q3 = 0 forces
+    // Rl = 0 here (D <= 0 means Rl^2 <= -Q3), so the ratio would be 0/0, and
+    // a NaN SURVIVES the clamp -- min/max compare with <, and every NaN
+    // comparison is false, so both pass it straight through.  Measure-zero,
+    // but O2 runs at P/Pc = 1.041 where the roots sit near merging, and this
+    // is the failure class the Cantera cubic was just found to have.
+    const scalar th = ::acos(max(scalar(-1), min(scalar(1), Rl/sqrt(max(-Q3, vSmall)))));
     const scalar qm = 2*sqrt(-Q);
     const scalar pi = constant::mathematical::pi;
     const scalar r[3] =
@@ -718,7 +725,7 @@ inline Foam::scalar Foam::SRKGas<Specie>::Z
         // overestimates v by an order of magnitude. Pattern identical to
         // elyHanleyTransport::srkMethaneRho (Pedersen/marlim3, validated in
         // test/proto_eosdensity.py).
-        const scalar th = ::acos(max(scalar(-1), min(scalar(1), Rl/sqrt(-Q3))));
+        const scalar th = ::acos(max(scalar(-1), min(scalar(1), Rl/sqrt(max(-Q3, vSmall)))));
         const scalar qm = 2*sqrt(-Q);
         const scalar pi = constant::mathematical::pi;
         const scalar r[3] =
