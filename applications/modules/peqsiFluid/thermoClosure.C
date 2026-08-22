@@ -85,6 +85,53 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
         maxDev = max(maxDev, mag(lhs - rhs)/max(mag(rhs), small));
     }
 
+    // ------------------------------------------------------------------
+    // Manifold coefficients (peqsiUseTableCoeffs).  The runtime SRK
+    // evaluation above stays as the fallback: it serves every cell the
+    // manifold cannot -- cells whose specific volume has drifted off the
+    // table state, and every cell at all when the switch is off.
+    //
+    // The motivation is cost, not accuracy.  Profiled on the
+    // multicomponent path, the temperature Newton and the property
+    // sweeps behind it take 84% of the step against 2.1% for a single
+    // species, because thirty-species janaf and SRK departure functions
+    // are evaluated per cell per iteration.  (An earlier claim that the
+    // tabulated derivatives would also be more accurate was withdrawn:
+    // the (cp - cv) identity route reproduces the analytic derivatives
+    // to six figures.)
+    // ------------------------------------------------------------------
+    if
+    (
+        fgmActive_
+     && alphaTab_.valid()
+     && pimple.dict().lookupOrDefault<Switch>("peqsiUseTableCoeffs", false)
+    )
+    {
+        const scalarField& aT = alphaTab_();
+        const scalarField& bT = betaTab_();
+        const boolList& useT = tabUsable_();
+
+        label nTab = 0;
+        forAll(a, i)
+        {
+            if (useT[i])
+            {
+                a[i] = aT[i];
+                b[i] = bT[i];
+                nTab++;
+            }
+        }
+        reduce(nTab, sumOp<label>());
+        label nAll = a.size();
+        reduce(nAll, sumOp<label>());
+
+        Info<< "PEQSI coefficients: from manifold on " << nTab << "/"
+            << nAll << " cells (runtime SRK elsewhere)" << endl;
+
+        alpha_.correctBoundaryConditions();
+        beta_.correctBoundaryConditions();
+    }
+
     reduce(maxDev, maxOp<scalar>());
     Info<< "PEQSI coefficients: max |beta/(1-alpha) + rho c^2| / (rho c^2) = "
         << maxDev << endl;
@@ -668,6 +715,16 @@ void Foam::solvers::peqsiFluid::fgmClosure()
 
     scalarField& src = sourceYc_().primitiveFieldRef();
 
+    if (!alphaTab_.valid())
+    {
+        alphaTab_.reset(new scalarField(Zf.size(), 0.0));
+        betaTab_.reset(new scalarField(Zf.size(), 0.0));
+        tabUsable_.reset(new boolList(Zf.size(), false));
+    }
+    scalarField& aTabF = alphaTab_();
+    scalarField& bTabF = betaTab_();
+    boolList& useF = tabUsable_();
+
     const wordList& spn = tbl.speciesNames();
     PtrList<volScalarField>& Yall = thermo_.Y();
     const wordList& thSp = thermo_.species();
@@ -767,6 +824,7 @@ void Foam::solvers::peqsiFluid::fgmClosure()
             }
             const scalar alphaTab = tbl.interpolate(*aT, st);
 
+
             dAlpha =
                 max(dAlpha,
                     mag(alphaTab - alpha_[celli])
@@ -791,6 +849,16 @@ void Foam::solvers::peqsiFluid::fgmClosure()
             const scalar rb =
                 mag(betaTab*vTab - beta_[celli]*vCell)
                /max(mag(beta_[celli]*vCell), small);
+            // Publish for updateCoefficients.  Usable only where the
+            // cell's specific volume matches the table's: beta carries a
+            // v exponent of -7.6 to -14.8 in the dense branch, so a cell
+            // whose state has drifted off the manifold would receive a
+            // coefficient amplified by that power.  The runtime SRK
+            // evaluation serves those cells instead.
+            aTabF[celli] = alphaTab;
+            bTabF[celli] = betaTab;   // phase rule already applied above
+            useF[celli] =
+                mag(vTab - vCell) < 0.02*max(vCell, small);
             if (rb > dBeta)
             {
                 dBeta = rb;

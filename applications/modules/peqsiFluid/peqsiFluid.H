@@ -165,6 +165,15 @@ protected:
         autoPtr<volScalarField> ZvarN_;
         autoPtr<volScalarField> YcN_;
 
+        //- Manifold-supplied real-gas coefficients and the cells that
+        //  may use them (stage 2a+).  fgmClosure fills these from the
+        //  table with the phase rule applied; updateCoefficients uses
+        //  them in place of the runtime SRK derivatives where the mask
+        //  allows, and falls back to the runtime evaluation elsewhere.
+        autoPtr<scalarField> alphaTab_;
+        autoPtr<scalarField> betaTab_;
+        autoPtr<boolList> tabUsable_;
+
 
     // PEQSI real-gas coefficient fields (evaluated in thermoClosure)
 
