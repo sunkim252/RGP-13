@@ -240,6 +240,10 @@ protected:
         //  normalisation itself to turn dYc/dt into Dc/Dt.
         autoPtr<scalarField> cnormZ_;
 
+        //- Reference internal-energy field for peqsiEnergyAudit
+        autoPtr<scalarField> reInit_;
+        scalar E0_ = 0;
+
         label armedNCells_ = -1;
         const scalar* armedYData_ = nullptr;
 

@@ -1006,6 +1006,72 @@ void Foam::solvers::peqsiFluid::invertTemperature()
         }
     }
 
+    // Internal-energy audit (peqsiEnergyAudit).
+    //
+    // rho e = rho h - p.  In a CLOSED adiabatic domain -- periodic, or
+    // all-wall/slip -- with no work crossing the boundary, int(rho e) dV
+    // must hold exactly.  Mass and rho*h are already reported; neither
+    // is the conserved quantity once the pressure moves, and rho*h in
+    // particular MUST grow in a constant-volume burn.
+    //
+    // The global figure alone hides a leak that cancels between cells,
+    // so the largest single-cell change is reported with it: a
+    // conservative scheme moves energy between cells and a broken one
+    // creates it somewhere.  Both are normalised by the initial global
+    // mean so they are directly comparable.
+    if (pimple.dict().lookupOrDefault<Switch>("peqsiEnergyAudit", false))
+    {
+        const scalarField& V = mesh.V();
+        const scalarField& rf = rho_.primitiveField();
+        const scalarField& hf = h_.primitiveField();
+        const scalarField& pf = p_.primitiveField();
+
+        scalarField re(rf.size());
+        forAll(re, i) re[i] = rf[i]*hf[i] - pf[i];
+
+        scalar E = 0, Vt = 0;
+        forAll(re, i) { E += re[i]*V[i]; Vt += V[i]; }
+        reduce(E, sumOp<scalar>());
+        reduce(Vt, sumOp<scalar>());
+
+        if (!reInit_.valid())
+        {
+            reInit_.reset(new scalarField(re));
+            E0_ = E;
+            Info<< "PEQSI energy audit: reference int(rho e) = " << E
+                << " J (mean " << E/max(Vt, vSmall) << " J/m3)" << endl;
+        }
+        else if (reInit_().size() == re.size())
+        {
+            const scalar eMean = mag(E0_)/max(Vt, vSmall);
+            scalar dMax = 0;
+            label iMax = -1;
+            forAll(re, i)
+            {
+                const scalar d = mag(re[i] - reInit_()[i])/max(eMean, vSmall);
+                if (d > dMax) { dMax = d; iMax = i; }
+            }
+            const scalar dMaxL = dMax;
+            reduce(dMax, maxOp<scalar>());
+
+            const label every =
+                pimple.dict().lookupOrDefault<label>("peqsiDiagInterval", 10);
+            static label n = 0;
+            if (every > 0 && (n++ % every) == 0)
+            {
+                Info<< "PEQSI energy audit: global d(int rho e)/|int rho e| = "
+                    << (E - E0_)/max(mag(E0_), vSmall)
+                    << ", worst cell |d(rho e)|/mean = " << dMax << endl;
+                if (iMax >= 0 && dMaxL == dMax)
+                {
+                    Pout<< "    worst at " << mesh.C()[iMax]
+                        << "  rho e " << reInit_()[iMax] << " -> " << re[iMax]
+                        << endl;
+                }
+            }
+        }
+    }
+
     Info<< "PEQSI thermo closure: T = ["
         << gMin(thermo_.T().primitiveField()) << ", "
         << gMax(thermo_.T().primitiveField())
