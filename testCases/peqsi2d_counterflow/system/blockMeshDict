@@ -1,0 +1,24 @@
+FoamFile { version 2.0; format ascii; class dictionary; object blockMeshDict; }
+scale 1;
+// 2 mm x 0.4 mm slab.  Z runs 0 -> 1 across x so the manifold is
+// traversed end to end; y is uniform.  Closed on all sides, so the
+// internal energy of the box is exactly conserved and the audit has a
+// reference that needs no benchmark data.
+vertices
+(
+    (0 0 0) (0.002 0 0) (0.002 0.0004 0) (0 0.0004 0)
+    (0 0 0.00002) (0.002 0 0.00002) (0.002 0.0004 0.00002) (0 0.0004 0.00002)
+);
+blocks ( hex (0 1 2 3 4 5 6 7) (100 20 1) simpleGrading (1 1 1) );
+boundary
+(
+    left   { type patch; faces ((0 4 7 3)); }
+    right  { type patch; faces ((1 2 6 5)); }
+    // y is uniform in this case, so cyclic top/bottom is physically
+    // identical to walls and gives WENO a periodic direction to extend
+    // its stencil into -- with 20 cells and non-cyclic ends the bank
+    // build overruns.
+    top    { type cyclic; neighbourPatch bottom; faces ((3 7 6 2)); }
+    bottom { type cyclic; neighbourPatch top;    faces ((0 1 5 4)); }
+    empties{ type empty; faces ((0 3 2 1) (4 5 6 7)); }
+);

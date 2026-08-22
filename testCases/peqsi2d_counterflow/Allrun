@@ -1,0 +1,11 @@
+#!/bin/bash
+# 2-D reacting case on the dp2b manifold.  Needs only an OpenFOAM
+# environment; the initial fields are pre-generated into 0.orig by
+# gen_ic.py, which needs python3 and the table.
+set -e
+rm -rf 0 [0-9]*e-0* processor*
+cp -r 0.orig 0
+blockMesh > log.blockMesh 2>&1
+foamRun > log.run 2>&1
+grep 'energy audit: global' log.run | tail -1
+grep 'PEQSI conservation' log.run | tail -1

@@ -1,0 +1,34 @@
+FoamFile { format ascii; class dictionary; object fvSolution; }
+solvers
+{
+    "PEQSI:dp.*"
+    {
+        solver          PBiCGStab;
+        preconditioner  DILU;
+        tolerance       1e-10;
+        relTol          0;
+    }
+}
+PIMPLE
+{
+    peqsiTimers yes;
+    peqsiConstantV no;
+    peqsiFGM yes;
+    peqsiEnergyAudit yes;
+    peqsiClosedDomain no;
+    peqsiCompSource yes;
+    peqsiTableT     yes;
+    peqsiBaseBlend  yes;
+    peqsiTier2      yes;
+    peqsiTseed yes;
+    peqsiUseTableCoeffs yes;
+    peqsiHelmholtzTheta 0.5;
+    peqsiFilterSigma 0.5;
+    peqsiFilterSC 1.0;
+    peqsiFilterSCThreshold 1e-5;
+
+    momentumPredictor yes;
+    nOuterCorrectors 1;
+    nCorrectors     1;
+    nNonOrthogonalCorrectors 0;
+}

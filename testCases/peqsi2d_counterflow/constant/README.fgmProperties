@@ -1,0 +1,7 @@
+The FGM table is not stored in the repository (280 MB).  Link it:
+
+    ln -s <path>/peqsi_dp2b_lo30_coef_rg.dict constant/fgmProperties
+
+then generate the initial fields with
+
+    python3 gen_ic.py . 0.80
