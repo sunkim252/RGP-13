@@ -143,6 +143,10 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
 
 void Foam::solvers::peqsiFluid::invertTemperature()
 {
+    static cpuTime clk;
+    static scalar tNewtLoop_ = 0, tNewtCorrect_ = 0;
+    clk.cpuTimeIncrement();
+
     // Stage 2a: composition (and the coefficient diagnostics) from the
     // manifold BEFORE the temperature inversion, so the (h, p) Newton
     // and every property behind it run on the looked-up mixture.
@@ -537,10 +541,62 @@ void Foam::solvers::peqsiFluid::invertTemperature()
             const auto tCp = thermo_.Cp();
             const scalarField& cpf = tCp().primitiveField();
 
+            // First pass over the whole field, then only over the cells
+            // still moving.  The multicomponent enthalpy is the entire
+            // cost of this closure -- 95% of the step on the 2-D case --
+            // and it is paid per cell per iteration, so after the first
+            // pass the field-wide he() is mostly re-deriving values that
+            // have already converged.  he(T, cells) evaluates the subset
+            // (the constant-v branch's fallback loop already uses it).
+            DynamicList<label> active(Tf.size()/4);
+
+            // Take the temperature straight from the manifold wherever
+            // the cell's specific volume still matches the table's.
+            // Enthalpy is an AXIS of this table, so the tabulated T is
+            // the exact inversion at the table's own specific volume --
+            // the Newton on those cells is re-deriving, through 106
+            // janaf and SRK departure evaluations per cell per
+            // iteration, a number the table already holds.  Only the
+            // volume offset needs work, and that is one linear term.
+            // Cells off the manifold (useF false) keep the full Newton.
+            const bool tableT =
+                fgmActive_ && Tguess_.valid() && tabUsable_.valid()
+             && pimple.dict().lookupOrDefault<Switch>("peqsiTableT", false);
+
+            if (tableT)
+            {
+                const scalarField& Tg = Tguess_();
+                const boolList& useT = tabUsable_();
+                label nT = 0;
+                forAll(Tf, i)
+                {
+                    if (useT[i] && Tg[i] > Tmin && Tg[i] < Tmax)
+                    {
+                        Tf[i] = Tg[i];
+                        nT++;
+                    }
+                    else
+                    {
+                        active.append(i);
+                    }
+                }
+                reduce(nT, sumOp<label>());
+                label nA = Tf.size();
+                reduce(nA, sumOp<label>());
+                Info<< "PEQSI closure: T from manifold on " << nT << "/"
+                    << nA << " cells (Newton elsewhere)" << endl;
+                if (returnReduce(active.empty(), andOp<bool>()))
+                {
+                    maxRel = 0;
+                }
+            }
+
             for (; iter < 60 && maxRel > tol; ++iter)
             {
                 maxRel = 0;
 
+                if (iter == 0 && !tableT)
+                {
                 const volScalarField hk(thermo_.he(p_, Tw));
                 const scalarField& hkf = hk.primitiveField();
 
@@ -563,18 +619,53 @@ void Foam::solvers::peqsiFluid::invertTemperature()
                     }
 
                     Tf[i] = min(max(Tnew, Tmin), Tmax);
-                    maxRel = max(maxRel, mag(dT)/max(Tf[i], small));
+                    const scalar rel = mag(dT)/max(Tf[i], small);
+                    if (rel > tol) active.append(i);
+                    maxRel = max(maxRel, rel);
+                }
+                }
+                else
+                {
+                    scalarField Tsub(active.size());
+                    forAll(active, m) Tsub[m] = Tf[active[m]];
+                    const tmp<scalarField> thk(thermo_.he(Tsub, active));
+                    const scalarField& hkf = thk();
+
+                    DynamicList<label> next(active.size());
+                    forAll(active, m)
+                    {
+                        const label i = active[m];
+                        scalar dT = (hf[i] - hkf[m])/max(cpf[i], small);
+                        dT = min(max(dT, -dTmax), dTmax);
+                        const scalar Tnew = Tf[i] + dT;
+
+                        if ((Tnew <= Tmin && dT < 0) || (Tnew >= Tmax && dT > 0))
+                        {
+                            Tf[i] = Tnew <= Tmin ? Tmin : Tmax;
+                            nSaturated_++;
+                            continue;
+                        }
+
+                        Tf[i] = min(max(Tnew, Tmin), Tmax);
+                        const scalar rel = mag(dT)/max(Tf[i], small);
+                        if (rel > tol) next.append(i);
+                        maxRel = max(maxRel, rel);
+                    }
+                    active.transfer(next);
                 }
 
                 reduce(maxRel, maxOp<scalar>());
             }
         }
 
+        tNewtLoop_ += clk.cpuTimeIncrement();
+
         {
             label it2 = iter;
             reduce(it2, maxOp<label>());
             Info<< "PEQSI thermo closure: T-Newton iterations = " << it2
-                << endl;
+                << ", loop " << tNewtLoop_ << " s, correct() "
+                << tNewtCorrect_ << " s" << endl;
         }
 
         if (nSaturated_ > 0)
@@ -617,7 +708,9 @@ void Foam::solvers::peqsiFluid::invertTemperature()
     // everything at the transported pressure and throw that away.
     if (!pimple.dict().lookupOrDefault<Switch>("peqsiConstantV", false))
     {
+        clk.cpuTimeIncrement();
         thermo_.correct();
+        tNewtCorrect_ += clk.cpuTimeIncrement();
     }
 
     // Boundary values of the transported density: its 'calculated'
@@ -819,6 +912,9 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         haveCoeffs ? &tbl.optTable("PEQSI_cv") : nullptr;
     const List<scalar>* dpdTT =
         haveCoeffs ? &tbl.optTable("PEQSI_dpdT_v") : nullptr;
+    const List<scalar>* dpdvT_ =
+        haveCoeffs && tbl.hasOptTable("PEQSI_dpdv_T")
+      ? &tbl.optTable("PEQSI_dpdv_T") : nullptr;
     const List<scalar>* WT =
         tbl.hasOptTable("W") ? &tbl.optTable("W") : nullptr;
     const List<scalar>& Ttbl = tbl.Ttable();
@@ -929,7 +1025,24 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         // thirty-species janaf and SRK departure functions, per cell,
         // per iteration.
         const scalar Ttab = tbl.interpolate(Ttbl, st);
-        if (haveDTdv)
+        if (!haveDTdv && haveCoeffs && dpdvT_)
+        {
+            // (dT/dv)_h = -(dh/dv)_T / (dh/dT)_v, and
+            // (dh/dv)_T = T (dp/dT)_v + v (dp/dv)_T  [from du = T ds - p dv].
+            // Every factor is already tabulated, so the derivative needs
+            // no extra bake: a dedicated dTdv_h block would only be this
+            // same product, evaluated at the same nodes.
+            const scalar xiT_ = tbl.interpolate(*xiT, st);
+            const scalar vT =
+                (xiT_ - tbl.interpolate(*cvT, st))
+               /max(tbl.interpolate(*dpdTT, st), small);
+            const scalar vC = 1.0/max(rhof[celli], small);
+            const scalar dhdv =
+                Ttab*tbl.interpolate(*dpdTT, st)
+              + vT*tbl.interpolate(*dpdvT_, st);
+            TgF[celli] = Ttab - (dhdv/max(xiT_, small))*(vC - vT);
+        }
+        else if (haveDTdv)
         {
             const scalar vT =
                 (tbl.interpolate(*xiT, st) - tbl.interpolate(*cvT, st))

@@ -32,3 +32,8 @@ testCases/**/[0-9]*e*/
 # example tables in the other FGM cases stay tracked.
 testCases/wang2015_*/constant/fgmProperties
 testCases/wang2015_*/constant/fgmProperties.npz
+tools/fgm_table_gen/FPVgen/
+*/data/fgm4dW_*
+tools/fgm_table_gen/*/data/
+tools/fgm_table_gen/*/out/
+*.bak.2*
