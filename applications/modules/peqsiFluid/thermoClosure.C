@@ -1150,6 +1150,9 @@ void Foam::solvers::peqsiFluid::fgmClosure()
      && frozenOnce;
     frozenOnce = true;
 
+    const scalar vGateTol =
+        pimple.dict().lookupOrDefault<scalar>("peqsiManifoldVtol", 0.02);
+
     const scalar Zdense =
         pimple.dict().lookupOrDefault<scalar>("peqsiZdense", 0.5);
 
@@ -1244,8 +1247,16 @@ void Foam::solvers::peqsiFluid::fgmClosure()
             // evaluation serves those cells instead.
             aTabF[celli] = alphaTab;
             bTabF[celli] = betaTab;   // phase rule already applied above
+            // Reachability gate.  2% in v was chosen to protect beta's
+            // steep v-exponent; measured, it also lets the RAW table
+            // temperature be 131 K off in the hot branch before a cell
+            // is handed to the Newton, so the linear (dT/dv)_h
+            // correction runs out well inside it.  Exposed because
+            // tightening trades speed for accuracy directly: every cell
+            // the gate rejects costs a Newton and gains the exact
+            // inversion.
             useF[celli] =
-                mag(vTab - vCell) < 0.02*max(vCell, small);
+                mag(vTab - vCell) < vGateTol*max(vCell, small);
             if (rb > dBeta)
             {
                 dBeta = rb;
@@ -1299,6 +1310,24 @@ void Foam::solvers::peqsiFluid::fgmClosure()
             TgF[celli] = Ttab;
         }
 
+        // |T_tbl - T| is the gap between the manifold's raw temperature
+        // and the one the solver is using.  It reads like an error
+        // metric and is not one: where the cell is ON the manifold the
+        // solver takes T from the table and the gap is ~0 by
+        // construction, so what the maximum actually reports is how far
+        // the RAW table value would have been wrong on the cells the
+        // tabUsable_ gate rejected -- that is, the benefit of the gate.
+        //
+        // Measured on the 1-D reacting case, the correlation is exact:
+        //     20/20 cells tabulated -> 0.3 K
+        //     18-19/20             -> 131 K
+        // The 131 K belongs entirely to the one or two cells whose
+        // specific volume has left the manifold by more than the gate's
+        // 2%, and those cells are on the Newton, not the table.  It is
+        // steep -- 2% in v costing 131 K in the hot branch says the
+        // linear (dT/dv)_h correction runs out well before the gate
+        // does -- but the fallback catches it, and the cold 2-D case
+        // sits at 4 K.
         const scalar dTc = mag(Ttab - Tf[celli]);
         dT = max(dT, dTc);
 
@@ -1449,7 +1478,7 @@ void Foam::solvers::peqsiFluid::fgmClosure()
 
     Info<< "PEQSI FGM: coeff diag max rel dAlpha = " << dAlpha
         << ", dBeta(v-matched) = " << dBeta
-        << ", |T_tbl - T| max = " << dT
+        << ", |T_tbl - T| max = " << dT   // gate benefit, not error
         << " K, phase gas/dense = " << nGas << "/" << nDense << nl
         << "PEQSI FGM: |dT| by c  ";
     for (label b = 0; b < nBin; b++)
