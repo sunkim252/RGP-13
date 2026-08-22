@@ -693,6 +693,10 @@ void Foam::solvers::peqsiFluid::fgmClosure()
     scalar dAlpha = 0, dBeta = 0, dT = 0;
     label nGas = 0, nDense = 0;
 
+    label dbCell = -1;
+    FGMTable::FGMStencil stDb;
+    scalar dbTab = 0, dbRun = 0, dbAlTab = 0, dbAlRun = 0;
+
     const label nBin = 4;
     FixedList<scalar, nBin> dTbinC(0.0), dTbinT(0.0);
     FixedList<label, nBin> nBinC(0), nBinT(0);
@@ -704,6 +708,12 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         haveCoeffs ? &tbl.optTable("PEQSI_betan") : nullptr;
     const List<scalar>* bT =
         haveCoeffs ? &tbl.optTable("PEQSI_beta") : nullptr;
+    const List<scalar>* xiT =
+        haveCoeffs ? &tbl.optTable("PEQSI_xi") : nullptr;
+    const List<scalar>* cvT =
+        haveCoeffs ? &tbl.optTable("PEQSI_cv") : nullptr;
+    const List<scalar>* dpdTT =
+        haveCoeffs ? &tbl.optTable("PEQSI_dpdT_v") : nullptr;
     const List<scalar>* WT =
         tbl.hasOptTable("W") ? &tbl.optTable("W") : nullptr;
     const List<scalar>& Ttbl = tbl.Ttable();
@@ -761,10 +771,36 @@ void Foam::solvers::peqsiFluid::fgmClosure()
                 max(dAlpha,
                     mag(alphaTab - alpha_[celli])
                    /max(mag(alpha_[celli]), small));
-            dBeta =
-                max(dBeta,
-                    mag(betaTab - beta_[celli])
-                   /max(mag(beta_[celli]), small));
+
+            // Compare beta at MATCHED specific volume.  Raw beta is
+            // steeply v-sensitive in the dense branch (measured power
+            // -7.6 to -14.8 by the tabulation session), so a raw ratio
+            // reports the interpolation error of v amplified by that
+            // exponent, not a disagreement between table and runtime --
+            // verified: the runtime assembly applied to the table's own
+            // raw materials reproduces the table beta to 1.0000 at every
+            // node, and the raw materials themselves agree with an
+            // independent SRK evaluation to 0.6%.  beta*v is flat in v
+            // (exponent -1.005 in the gas branch), so scaling by the
+            // table's own v removes the amplification and leaves the
+            // genuine difference.
+            const scalar vTab =
+                (tbl.interpolate(*xiT, st) - tbl.interpolate(*cvT, st))
+               /max(tbl.interpolate(*dpdTT, st), small);
+            const scalar vCell = 1.0/max(rhof[celli], small);
+            const scalar rb =
+                mag(betaTab*vTab - beta_[celli]*vCell)
+               /max(mag(beta_[celli]*vCell), small);
+            if (rb > dBeta)
+            {
+                dBeta = rb;
+                stDb = st;
+                dbCell = celli;
+                dbTab = betaTab;
+                dbRun = beta_[celli];
+                dbAlTab = alphaTab;
+                dbAlRun = alpha_[celli];
+            }
         }
 
         const scalar dTc = mag(tbl.interpolate(Ttbl, st) - Tf[celli]);
@@ -800,8 +836,58 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         reduce(nBinT[b], sumOp<label>());
     }
 
+    // Worst-beta cell laid out in full: the ratio alone cannot say
+    // whether the table or the runtime assembly is the odd one out, and
+    // the two independently baked tables agreeing to four decimals on
+    // this number says the difference is not in the table.
+    if (dbCell >= 0)
+    {
+        const scalar v = 1.0/max(rhof[dbCell], small);
+        const scalar cTab =
+            sqrt(max(-dbTab/((1.0 - dbAlTab)*rhof[dbCell]), 0.0));
+        const scalar cRun =
+            sqrt(max(-dbRun/((1.0 - dbAlRun)*rhof[dbCell]), 0.0));
+        // Raw materials on both sides.  beta is assembled from cv, psi
+        // and (dp/dT)_v; if the assembled value disagrees while the
+        // state matches, the disagreement lives in one of those three.
+        const scalar cvRun = thermo_.Cv()().primitiveField()[dbCell];
+        const scalar cpRun = thermo_.Cp()().primitiveField()[dbCell];
+        const scalar psiRun = thermo_.psi().primitiveField()[dbCell];
+        const scalar rhoC = rhof[dbCell];
+        const scalar dpdvRun = -sqr(rhoC)/max(psiRun, small);
+        const scalar dpdTRun =
+            rhoC*sqrt(max((cpRun - cvRun)/(Tf[dbCell]*max(psiRun, small)), 0.0));
+        const scalar xiRun = cvRun + (1.0/rhoC)*dpdTRun;
+
+        Pout<< "PEQSI FGM raw: cv_run = " << cvRun
+            << ", cv_tab = " << tbl.interpolate(tbl.optTable("PEQSI_cv"), stDb)
+            << " | xi_run = " << xiRun
+            << ", xi_tab = " << tbl.interpolate(tbl.optTable("PEQSI_xi"), stDb)
+            << " | dpdT_run = " << dpdTRun
+            << ", dpdT_tab = "
+            << tbl.interpolate(tbl.optTable("PEQSI_dpdT_v"), stDb)
+            << " | dpdv_run = " << dpdvRun
+            << ", dpdv_tab = "
+            << tbl.interpolate(tbl.optTable("PEQSI_dpdv_T"), stDb)
+            << " | rho = " << rhoC
+            << ", rho_tab = "
+            << (tbl.interpolate(tbl.optTable("PEQSI_xi"), stDb)
+              - tbl.interpolate(tbl.optTable("PEQSI_cv"), stDb))
+              /max(tbl.interpolate(tbl.optTable("PEQSI_dpdT_v"), stDb), small)
+            << endl;
+
+        Pout<< "PEQSI FGM beta probe: beta_tab = " << dbTab
+            << ", beta_run = " << dbRun
+            << ", ratio = " << dbTab/dbRun
+            << " | alpha_tab = " << dbAlTab
+            << ", alpha_run = " << dbAlRun
+            << " | c_tab = " << cTab << ", c_run = " << cRun
+            << " | T = " << Tf[dbCell] << ", p = " << pfld[dbCell]
+            << ", rho = " << rhof[dbCell] << ", v = " << v << endl;
+    }
+
     Info<< "PEQSI FGM: coeff diag max rel dAlpha = " << dAlpha
-        << ", dBeta = " << dBeta
+        << ", dBeta(v-matched) = " << dBeta
         << ", |T_tbl - T| max = " << dT
         << " K, phase gas/dense = " << nGas << "/" << nDense << nl
         << "PEQSI FGM: |dT| by c  ";
