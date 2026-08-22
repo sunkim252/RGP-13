@@ -293,7 +293,20 @@ void Foam::solvers::peqsiFluid::invertTemperature()
     {
         volScalarField& Tw = const_cast<volScalarField&>(thermo_.T());
 
-        const scalar tol = 1e-6;    // relative, WKK Fig. 3 threshold
+        // Relative temperature tolerance.  WKK Fig. 3 quotes 1e-6, but
+        // that is tighter than this closure can deliver at a cold
+        // transcritical front: the Newton stalls just above it and burns
+        // the 60-pass cap for nothing.  Measured on the 1-D suite, case
+        // A (80 K discontinuity): 16 of 500 steps exit non-converged at
+        // maxRel = 2.70e-6, i.e. 2.7x the tolerance, having spent 60
+        // passes to get there.  At V2's conditions (80 K, 4 MPa, 8.2 um)
+        // the loop caps out from the first step -- T-Newton is 27% of
+        // that run's step against 3% on the 3-D case, which runs at 5
+        // passes.  A relative tolerance of 1e-5 is 1e-3 K at 100 K,
+        // orders below the transported-vs-EOS density drift the closure
+        // already parks (2.55 on V2), so it is not the accuracy limit.
+        const scalar tol =
+            pimple.dict().lookupOrDefault<scalar>("peqsiTNewtonTol", 1e-6);
         const scalar dTmax = 25;    // per-pass step clamp [K]: keeps the
                                     // iterate inside the SRK validity range
                                     // across the interface cells
@@ -619,6 +632,32 @@ void Foam::solvers::peqsiFluid::invertTemperature()
                 }
             }
 
+            // Stagnant-cell parking.
+            //
+            // The active set already drops every cell that converges, so
+            // the only thing holding the loop at its 60-pass cap is a
+            // cell that never will.  At a cold transcritical front the
+            // transported (v, h) pair can sit outside the image of the
+            // equation of state -- no temperature reproduces that
+            // enthalpy -- and such a cell stalls at a FIXED residual:
+            // measured on 1-D case A (80 K discontinuity), the runs that
+            // hit the cap exit at maxRel = 9.67e-4, a thousand times the
+            // tolerance and flat.  It is not a tolerance problem, so no
+            // tol setting reaches it; the cell simply has to be let go.
+            //
+            // Evidence that the extra passes buy nothing: tightening or
+            // relaxing tol between 1e-6 and 1e-5 changes the final field
+            // by EXACTLY zero (max|drho| = 0.000e+00 over a full period)
+            // while changing the mean pass count 7.83 -> 6.47.  Healthy
+            // cells finish in 4-7 passes (3-D case 3 runs at 5), so a
+            // cell still active after nStall passes is stuck, and the
+            // clamp/floor fallback below is where it was always headed.
+            //
+            // peqsiTNewtonStall = 0 restores the old behaviour.
+            const label nStall =
+                pimple.dict().lookupOrDefault<label>("peqsiTNewtonStall", 0);
+            labelField nAct(Tf.size(), 0);
+
             for (; iter < 60 && maxRel > tol; ++iter)
             {
                 maxRel = 0;
@@ -676,6 +715,12 @@ void Foam::solvers::peqsiFluid::invertTemperature()
 
                         Tf[i] = min(max(Tnew, Tmin), Tmax);
                         const scalar rel = mag(dT)/max(Tf[i], small);
+
+                        if (nStall > 0 && ++nAct[i] >= nStall)
+                        {
+                            continue;   // parked: the fallback takes it
+                        }
+
                         if (rel > tol) next.append(i);
                         maxRel = max(maxRel, rel);
                     }
