@@ -25,5 +25,23 @@ wiring, conservation and stability verdict is independent of table
 quality.  Switching the solver onto the tabulated coefficients waits
 for the production bake.
 
+What the case does and does not measure, established by varying it:
+
+  cells ON table nodes      |T_tbl - T| 1.231 K
+  cells BETWEEN nodes       |T_tbl - T| 1.149 K
+
+Interpolation contributes nothing -- so the residual ~1.2 K is a
+genuine difference between the table's temperature and the one the
+solver's h(T, v) inversion produces at the same manifold point.  The
+case therefore does measure table quality, in the cold unburnt corner
+(c < 0.25, T < 1200) that its bins report, and both the verification
+bake and the production bake score the same there.  It says nothing
+about the hot core, where the production table's own audit puts p95 at
+68 K.
+
+Two other things it cannot see: the enthalpy-baseline correction (the
+initial condition adds dhRef, which absorbs any baseline offset by
+construction), and anything about reacting states.
+
 Run: needs libWENOEXT.so in controlDict libs (the WENOUpwindFit01
 bounded scheme transports Z).
