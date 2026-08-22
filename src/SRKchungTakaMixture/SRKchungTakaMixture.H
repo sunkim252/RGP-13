@@ -184,7 +184,15 @@ private:
         //  calcMixture interpolates the 16 bracketing corner mixtures instead of
         //  summing the 106-species blend per internal cell. Bit-consistent: by
         //  linearity sum_corner w*nodeMix == sum_species Y*thermo (FP order
-        //  apart), the same identity Tier-2 uses for its coefficients.
+        //  apart).
+        //
+        //  That identity is Opt-1's alone -- it does NOT carry over to Tier-2,
+        //  whose mixing rules are QUADRATIC in composition (the Xi2 / twoXiXj
+        //  pair sums in calculateRealGas).  Interpolating the node-wise pair
+        //  sums is not the pair sum of the interpolated composition, so Tier-2
+        //  is an approximation: exact at the nodes, where the tabulator ran
+        //  calculateRealGas itself, and off between them.  Measured on the
+        //  2-D FGM shear case, relErr(bM) ~ 1.1e-6 per cell.
         mutable PtrList<thermoMixtureType> nodeMixtures_;
 
         //- Per-cell scratch for compositionToX in calcMixture (hoisted out of

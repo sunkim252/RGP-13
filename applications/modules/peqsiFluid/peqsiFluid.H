@@ -191,6 +191,14 @@ protected:
         //  instead of summed over the mixture species)
         bool baseBlendArmed_ = false;
 
+        //- Tier-2 real-gas coefficients per cell, in coeffNames() order.
+        //  Opt-1 removes the base-thermo species sum; this removes the
+        //  O(n^2) calculateRealGas pair sum behind it (11236 pairs per
+        //  cell at 106 species).  Filled by fgmClosure on the stencil it
+        //  already builds; read by the mixture in place of the sum.
+        List<scalarField> RGfields_;
+        bool tier2Armed_ = false;
+
 
     // PEQSI real-gas coefficient fields (evaluated in thermoClosure)
 

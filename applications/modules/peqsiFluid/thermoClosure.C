@@ -859,6 +859,19 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         tabUsable_.reset(new boolList(Zf.size(), false));
         cNormF_.reset(new scalarField(Zf.size(), 0.0));
         dhF_.reset(new scalarField(Zf.size(), 0.0));
+
+        if
+        (
+            tbl.hasRealGasCoeffs()
+         && pimple.dict().lookupOrDefault<Switch>("peqsiTier2", false)
+        )
+        {
+            RGfields_.setSize(tabulatedRealGasMixture::nCoeffs_);
+            forAll(RGfields_, k)
+            {
+                RGfields_[k].setSize(Zf.size(), 0.0);
+            }
+        }
         Tguess_.reset(new scalarField(Zf.size(), 0.0));
     }
     scalarField& aTabF = alphaTab_();
@@ -945,6 +958,11 @@ void Foam::solvers::peqsiFluid::fgmClosure()
 
         FGMTable::FGMStencil st;
         tbl.makeStencil(Zcl, gz, Ccl, dh, st);
+
+        forAll(RGfields_, k)
+        {
+            RGfields_[k][celli] = tbl.interpolate(tbl.RGtable(k), st);
+        }
 
         forAll(spn, k)
         {
@@ -1254,6 +1272,45 @@ void Foam::solvers::peqsiFluid::fgmClosure()
                 (
                     nodeY, tbl, Zf, gZf, cNormF_(), dhF_()
                 );
+            }
+
+            // Tier-2.  Opt-1 removed the base-thermo species sum; the
+            // O(n^2) calculateRealGas pair sum behind it is what is left,
+            // and at 106 species that is 11236 pairs per cell.  The
+            // mixture reads the 13 coefficients per cell instead, from
+            // the RG_* blocks the tabulator bakes by running
+            // calculateRealGas once per manifold node -- so this is the
+            // same quantity looked up, not an approximation of it.
+            if
+            (
+                tbl.hasRealGasCoeffs()
+             && pimple.dict().lookupOrDefault<Switch>("peqsiTier2", false)
+            )
+            {
+                const label nC = tabulatedRealGasMixture::nCoeffs_;
+                List<const scalarField*> ptrs(nC);
+                forAll(RGfields_, k)
+                {
+                    ptrs[k] = &RGfields_[k];
+                }
+                hook->armInternalRef(thermo_.Y()[0].primitiveField());
+                hook->enableCoeffTabulation
+                (
+                    thermo_.Y()[0].primitiveField(), ptrs
+                );
+                tier2Armed_ = true;
+                Info<< "PEQSI Tier-2: " << nC << " real-gas coefficients "
+                    << "looked up per cell; the O(n^2) calculateRealGas "
+                    << "pair sum is skipped on internal cells" << endl;
+            }
+            else if
+            (
+                !tbl.hasRealGasCoeffs()
+             && pimple.dict().lookupOrDefault<Switch>("peqsiTier2", false)
+            )
+            {
+                Info<< "PEQSI Tier-2: table carries no RG_* coefficients"
+                    << " -> live pair sum retained" << endl;
             }
             baseBlendArmed_ = true;
         }
