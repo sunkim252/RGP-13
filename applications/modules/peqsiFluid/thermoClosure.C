@@ -161,7 +161,26 @@ void Foam::solvers::peqsiFluid::invertTemperature()
             updateSegregation();
         }
 
+        // Snapshot the EOS response BEFORE the manifold moves Y, at the
+        // current (p, T).  The pair before/after differs in composition
+        // ALONE -- T is still T^n here, the inversion runs later -- so
+        // the difference is exactly the composition's contribution, with
+        // no pressure or temperature response mixed in.
+        const bool wantSY =
+            pimple.dict().lookupOrDefault<Switch>("peqsiCompSource", false);
+        scalarField rhoOld, hOld;
+        if (wantSY)
+        {
+            rhoOld = thermo_.rho()().primitiveField();
+            hOld = thermo_.he(p_, thermo_.T())().primitiveField();
+        }
+
         fgmClosure();
+
+        if (wantSY)
+        {
+            updateCompositionSource(rhoOld, hOld);
+        }
 
         // Seeding the inversion from the manifold: available, OFF, and
         // measured to be a pessimisation on the cases tried.
@@ -1633,5 +1652,133 @@ void Foam::solvers::peqsiFluid::updateSegregation()
                    sumOp<label>()
                )
             << endl;
+    }
+}
+
+
+void Foam::solvers::peqsiFluid::updateCompositionSource
+(
+    const scalarField& rhoOld,
+    const scalarField& hOld
+)
+{
+    // S_Y, the term the pressure substep is missing under FPV.
+    //
+    // WKK eliminate DT/Dt between h(T,v) and p(T,v) to reach alpha and
+    // beta.  Under FPV the composition is a THIRD independent variable --
+    // Y = Y(Z, Zvar, c, dh), and the manifold moves it every step -- so
+    // the same elimination leaves one more source:
+    //
+    //   Dp/Dt (1-alpha) = rho alpha L_h + beta div(u) + S_Y
+    //   S_Y = sum_k [ (dp/dY_k)_{T,v} - rho alpha (dh/dY_k)_{T,v} ] DY_k/Dt
+    //
+    // alpha and beta are fixed-composition coefficients and cannot carry
+    // it.  Without it heat release produces no dilatation whatever: on
+    // the 1-D reacting gate the mixture burns 2659 K -> 3688 K with
+    // U == 0 and dp == 0 for the entire run.
+    //
+    // Both sums are evaluated from the EOS response at fixed (p, T),
+    // which is what the thermo can supply directly, using
+    //
+    //   sum_k (dp/dY_k)_{T,v} dY_k = -(dp/dv)_T dv|_{T,p}
+    //                              =  (dp/dv)_T drho_Y / rho^2
+    //   (dh/dY_k)_{T,v} = (dh/dY_k)_{T,p} + (dh/dp)_T (dp/dY_k)_{T,v}
+    //
+    // with (dh/dp)_T = v + T (dp/dT)_v / (dp/dv)_T, the identity already
+    // used by the constant-v closure.  drho_Y and dh_Y are the before/
+    // after differences taken at the same (p, T).
+    //
+    // Precedent: the composition contribution to the volumetric
+    // constraint is standard in low-Mach reacting formulations -- Day &
+    // Bell (Combust. Theory Modelling 4:535, 2000) Eq. (7) carries it as
+    // the (W/W_m) omega_m term for an ideal gas, after Majda & Sethian
+    // (1985) and Najm, Wyckoff & Knio (JCP 143:381, 1998).  The real-gas
+    // generalisation replaces the ideal-gas molecular-weight algebra with
+    // the EOS derivatives used here (cf. Kotturshettar, Alcobia, Boldini,
+    // Pecnik & Costa, arXiv:2607.29224, who build the same constraint
+    // from beta and chi but for a single-component fluid, explicitly
+    // without composition terms).  What is assembled here is those two
+    // published pieces put together, not a new closure.
+    const scalar dt = mesh.time().deltaTValue();
+
+    if (!sourceP_.valid())
+    {
+        sourceP_.reset
+        (
+            new volScalarField
+            (
+                IOobject
+                (
+                    "PEQSI:sourceP",
+                    mesh.time().name(),
+                    mesh,
+                    IOobject::NO_READ,
+                    IOobject::NO_WRITE
+                ),
+                mesh,
+                dimensionedScalar(p_.dimensions()/dimTime, 0)
+            )
+        );
+    }
+
+    const scalarField& rhoNew = thermo_.rho()().primitiveField();
+    const tmp<volScalarField> thNew(thermo_.he(p_, thermo_.T()));
+    const scalarField& hNew = thNew().primitiveField();
+
+    const scalarField& aF = alpha_.primitiveField();
+    const scalarField& rf = rho_.primitiveField();
+    const scalarField& Tf = thermo_.T().primitiveField();
+
+    // (dp/dv)_T and (dp/dT)_v: the manifold's where it is reachable,
+    // the runtime SRK assembly elsewhere -- same split the coefficients
+    // already use.
+    const scalarField& psiF = thermo_.psi().primitiveField();
+    const tmp<volScalarField> tCv(thermo_.Cv());
+    const scalarField& cvF = tCv().primitiveField();
+
+    scalarField& S = sourceP_().primitiveFieldRef();
+
+    scalar sMax = 0;
+    forAll(S, i)
+    {
+        const scalar rho = max(rf[i], small);
+        const scalar v = 1.0/rho;
+
+        // (dp/dv)_T = -1/(v^2 chi rho) ... psi = rho*chi = drho/dp|_T,
+        // so (dp/dv)_T = -rho^2/psi.
+        const scalar dpdv = -sqr(rho)/max(psiF[i], vSmall);
+
+        const scalar dRho = (rhoNew[i] - rhoOld[i])/dt;   // at fixed (p,T)
+        const scalar dh = (hNew[i] - hOld[i])/dt;         // at fixed (p,T)
+
+        // sum_k (dp/dY_k)_{T,v} DY_k/Dt
+        const scalar A = dpdv*dRho/sqr(rho);
+
+        // (dh/dp)_T = v + T (dp/dT)_v / (dp/dv)_T.
+        // xi is not stored, but it closes on Cv: xi = (dh/dT)_v =
+        // Cv + v (dp/dT)_v and (dp/dT)_v = rho alpha xi with v rho = 1
+        // give xi = Cv/(1 - alpha).  Hence (dp/dT)_v = rho alpha Cv/(1-alpha)
+        // and (dh/dp)_T = v - T alpha Cv psi / (rho (1 - alpha)).
+        const scalar oneMa = max(1.0 - aF[i], small);
+        const scalar dhdp =
+            v - Tf[i]*aF[i]*cvF[i]*psiF[i]/(rho*oneMa);
+
+        // sum_k (dh/dY_k)_{T,v} DY_k/Dt
+        const scalar B = dh + dhdp*A;
+
+        S[i] = A - rho*aF[i]*B;
+        sMax = max(sMax, mag(S[i]));
+    }
+
+    sourceP_().correctBoundaryConditions();
+
+    reduce(sMax, maxOp<scalar>());
+    const label every =
+        pimple.dict().lookupOrDefault<label>("peqsiDiagInterval", 10);
+    static label n = 0;
+    if (every > 0 && (n++ % every) == 0)
+    {
+        Info<< "PEQSI composition source: max |S_Y| = " << sMax
+            << " Pa/s (dt*S_Y = " << sMax*dt << " Pa)" << endl;
     }
 }

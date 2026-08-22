@@ -551,6 +551,15 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
             const scalarField& Lhi = Lh.primitiveField();
             const scalarField& aLi = aL.primitiveField();
             const scalarField& iLi = iL.primitiveField();
+            // FPV composition source S_Y: alpha and beta are
+            // fixed-composition coefficients, so without this the
+            // pressure equation never learns that the manifold moved Y
+            // and heat release produces no dilatation at all.  Null
+            // whenever the manifold is inactive (single-species), and
+            // the branch below then adds nothing -- byte-for-byte the
+            // previous arithmetic.
+            const scalarField* sYi =
+                sourceP_.valid() ? &sourceP_().primitiveField() : nullptr;
             const vectorField& dTi = divTau.primitiveField();
             const scalarField& rhoNi = rhoN_().primitiveField();
             const vectorField& UNi = UN_().primitiveField();
@@ -571,7 +580,8 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
                 const symmTensor& l = LQi[i];
 
                 scalar Lr = l.xx();
-                const scalar Lp = l.xy() + aLi[i]*Lhi[i];
+                scalar Lp = l.xy() + aLi[i]*Lhi[i];
+                if (sYi) Lp += iLi[i]*(*sYi)[i];
                 scalar Lrh = l.xz() + iLi[i]*Lhi[i];
                 vector Lru
                 (
@@ -616,6 +626,10 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
                 tRhArt.valid()
               ? &tRhArt().boundaryField()[patchi] : nullptr;
 
+            const scalarField* sYb =
+                sourceP_.valid()
+              ? &sourceP_().boundaryField()[patchi] : nullptr;
+
             fvPatchScalarField& rb = r.boundaryFieldRef()[patchi];
             fvPatchVectorField& rub = ru.boundaryFieldRef()[patchi];
             fvPatchScalarField& pwb = pw.boundaryFieldRef()[patchi];
@@ -626,7 +640,8 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
                 const symmTensor& l = LQb[i];
 
                 scalar Lr = l.xx();
-                const scalar Lp = l.xy() + aLb[i]*Lhb[i];
+                scalar Lp = l.xy() + aLb[i]*Lhb[i];
+                if (sYb) Lp += iLb[i]*(*sYb)[i];
                 scalar Lrh = l.xz() + iLb[i]*Lhb[i];
                 vector Lru
                 (

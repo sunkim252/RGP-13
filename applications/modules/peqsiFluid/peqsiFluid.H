@@ -221,6 +221,14 @@ protected:
         //  clean failure.  The cell count alone misses an equal-count
         //  redistribution, which moves the data pointer without changing
         //  the size, so the species-0 data pointer is tracked too.
+        //- FPV composition source for the pressure substep, S_Y.
+        //  alpha and beta are derived at FIXED composition (WKK Eq. 9,
+        //  11, 12), so nothing in the pressure equation knows that the
+        //  manifold moves Y.  Measured consequence: heat release produces
+        //  no dilatation at all.  Filled by updateCompositionSource(),
+        //  consumed by the p* stage.
+        autoPtr<volScalarField> sourceP_;
+
         label armedNCells_ = -1;
         const scalar* armedYData_ = nullptr;
 
@@ -362,6 +370,13 @@ protected:
         //- Fill the segregation factor gZ (stored in Zvar_) from the
         //  algebraic variance closure
         void updateSegregation();
+
+        //- Assemble S_Y from the EOS response to the composition change
+        void updateCompositionSource
+        (
+            const scalarField& rhoOld,
+            const scalarField& hOld
+        );
 
         //- Bounding artificial diffusivity for a [0,1] scalar, after
         //  Terashima & Koshi 2012 Eq. (27):
