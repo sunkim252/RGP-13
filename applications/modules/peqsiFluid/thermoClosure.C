@@ -926,10 +926,51 @@ void Foam::solvers::peqsiFluid::invertTemperature()
     // mass ledger is untouched (a uniform shift adds no flux), and it is
     // the one degree of freedom that can absorb a mean EOS mismatch.
     //
-    // Off by default: with any pressure-setting boundary the level is
-    // already determined and this must not run.
+    // ------------------------------------------------------------------
+    // SUPERSEDED by peqsiCompSource, and NOT thermodynamically innocent.
+    //
+    // This shifts p uniformly to satisfy the EOS in the mean, and does
+    // not touch h.  Since e = h - p/rho, that changes the internal
+    // energy by -dp0/rho with nothing on the other side of the ledger.
+    // Measured on the closed reacting gate, energy audit de/e:
+    //
+    //     S_Y only         +5.8e-09      drift 0.027   p 7.337 MPa
+    //     this only        -1.57e-01     drift 0       p 7.192 MPa
+    //     both             -1.64e-02     drift 1.5e-16
+    //
+    // It buys an exactly consistent EOS by breaking a conservation law.
+    // S_Y buys the same pressure rise with energy exact to machine
+    // precision, because it drives p and h together (the Lp/Lrh pair).
+    //
+    // This was written before S_Y existed, when the uniform mode was the
+    // only way to get any pressure response at all out of a closed
+    // domain, and it was the right patch then.  With the composition
+    // source in place it is strictly worse.  Kept switchable for the A/B
+    // above and for a non-reacting closed case, where S_Y is identically
+    // zero and this is the only mechanism there is -- but never with
+    // peqsiCompSource, and the warning below says so.
+    //
+    // Off by default; with any pressure-setting boundary the level is
+    // already determined and it must not run either way.
+    // ------------------------------------------------------------------
     if (pimple.dict().lookupOrDefault<Switch>("peqsiClosedDomain", false))
     {
+        if (pimple.dict().lookupOrDefault<Switch>("peqsiCompSource", false))
+        {
+            static bool warned = false;
+            if (!warned)
+            {
+                WarningInFunction
+                    << "peqsiClosedDomain with peqsiCompSource: the "
+                    << "composition source already supplies the pressure "
+                    << "response, and this shifts p without a matching "
+                    << "enthalpy change, so it removes energy (-1.6e-2 "
+                    << "measured together, -1.6e-1 alone, against 5.8e-9 "
+                    << "for the source by itself).  Turn one off." << endl;
+                warned = true;
+            }
+        }
+
         const scalarField& V = mesh.V();
         const scalarField& rt = rho_.primitiveField();
         const tmp<volScalarField> trhoE(thermo_.rho());
