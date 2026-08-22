@@ -1249,6 +1249,8 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         haveCoeffs ? &tbl.optTable("PEQSI_cv") : nullptr;
     const List<scalar>* dpdTT =
         haveCoeffs ? &tbl.optTable("PEQSI_dpdT_v") : nullptr;
+    const List<scalar>* rhoTabOpt =
+        tbl.hasOptTable("PEQSI_rho") ? &tbl.optTable("PEQSI_rho") : nullptr;
     const List<scalar>* dpdvnT =
         haveCoeffs && tbl.hasOptTable("PEQSI_dpdvn")
       ? &tbl.optTable("PEQSI_dpdvn") : nullptr;
@@ -1308,6 +1310,15 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         forAll(RGfields_, k)
         {
             RGfields_[k][celli] = tbl.interpolate(tbl.RGtable(k), st);
+        }
+
+        // Base-state table density on the stencil this loop already
+        // built.  The composition-source block used to rebuild the same
+        // stencil to fetch it.
+        if (rhoTabF_.valid())
+        {
+            rhoTabF_()[celli] =
+                rhoTabOpt ? tbl.interpolate(*rhoTabOpt, st) : 0.0;
         }
 
         if (!freezeY)
