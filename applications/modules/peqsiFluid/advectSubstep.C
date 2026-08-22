@@ -386,13 +386,24 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
                 {
                     // Implicit: no explicit-stability constraint, so dt is
                     // left to the Courant bound and the dt-DEPENDENT cap
-                    // must not be used -- at the 3.3x larger dt it would
-                    // clip normal LAD operation (cap ~ 1/dt).  The
-                    // pathological-cell guard stays, at the dt-independent
-                    // Dsane ceiling.
+                    // (0.45 dmin^2/dt) must not be used -- it scales as
+                    // 1/dt, so at the larger dt it would clip normal LAD
+                    // operation.  The pathological-cell guard is kept, but
+                    // expressed on a dt-INDEPENDENT, grid-aware scale:
+                    // an acoustic cell diffusivity c*dmin.  (An absolute
+                    // ceiling such as peqsiLadDtDemandMax cannot serve --
+                    // it is a fixed number, so on a 1-cm 1-D mesh where
+                    // normal operation is O(1) m2/s it would clip by 500x,
+                    // while on the 45-um 3-D mesh it never binds.)
+                    const scalar fCap =
+                        pimple.dict().lookupOrDefault<scalar>
+                        (
+                            "peqsiLadImplicitCap", 1.0
+                        );
+                    const scalarField& ci = c.primitiveField();
                     forAll(D, i)
                     {
-                        D[i] = min(D[i], Dsane);
+                        D[i] = min(D[i], fCap*ci[i]*deltaMin[i]);
                     }
                     ladDtLimit_ = great;
                 }
@@ -746,11 +757,29 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
     {
         const dimensionedScalar rdtD("rdt", dimless/dimTime, 1.0/dt.value());
 
+        // theta weighting of the split diffusion.  Default backward
+        // Euler.  theta = 0.5 (Crank-Nicolson) was tried and is WORSE
+        // here, which locates the residual discrepancy: measured on the
+        // Mayer-scale 1-D interface at dt 1e-6, L1(implicit - explicit)
+        // went 5.33e-3 (theta 1) -> 7.70e-3 (theta 0.5) and the 10-90
+        // width stayed 55 against the explicit branch's 53 either way.
+        // The gap is therefore not the diffusion's time order but the
+        // SPLITTING: the explicit branch applies LAD inside each RK
+        // stage, so it interacts with the advection within the substep,
+        // while this branch applies it once at the end.  Both converge
+        // to the same solution -- the width difference is gone by
+        // dt 1e-7 -- so the cost is a dt-truncation effect at the
+        // operating point, not a change of model.
+        const scalar theta =
+            pimple.dict().lookupOrDefault<scalar>("peqsiLadTheta", 1.0);
+
         const volScalarField rStar("PEQSI:rStarLAD", r);
 
         fvScalarMatrix rEqn
         (
-            fvm::Sp(rdtD, r) - fvm::laplacian(tDart(), r) == rdtD*rStar
+            fvm::Sp(rdtD, r) - theta*fvm::laplacian(tDart(), r)
+         ==
+            rdtD*rStar + (1.0 - theta)*fvc::laplacian(tDart(), rStar)
         );
         rEqn.solve(mesh.solution().solverDict("rhoLAD"));
 
@@ -758,7 +787,9 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
 
         fvScalarMatrix rhEqn
         (
-            fvm::Sp(rdtD, rh) - fvm::laplacian(tDart(), rh) == rdtD*rhStar
+            fvm::Sp(rdtD, rh) - theta*fvm::laplacian(tDart(), rh)
+         ==
+            rdtD*rhStar + (1.0 - theta)*fvc::laplacian(tDart(), rhStar)
         );
         rhEqn.solve(mesh.solution().solverDict("rhoLAD"));
 
