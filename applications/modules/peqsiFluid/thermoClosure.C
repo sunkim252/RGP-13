@@ -1231,6 +1231,9 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         haveCoeffs ? &tbl.optTable("PEQSI_cv") : nullptr;
     const List<scalar>* dpdTT =
         haveCoeffs ? &tbl.optTable("PEQSI_dpdT_v") : nullptr;
+    const List<scalar>* dpdvnT =
+        haveCoeffs && tbl.hasOptTable("PEQSI_dpdvn")
+      ? &tbl.optTable("PEQSI_dpdvn") : nullptr;
     const List<scalar>* dpdvT_ =
         haveCoeffs && tbl.hasOptTable("PEQSI_dpdv_T")
       ? &tbl.optTable("PEQSI_dpdv_T") : nullptr;
@@ -1386,8 +1389,26 @@ void Foam::solvers::peqsiFluid::fgmClosure()
             // 0.30% in the gas phase where the raw value moves 19-43%,
             // and in the liquid fuel below ~400 K it reverses -- the
             // normalised form is 15-22% off where the raw is 2-3%.
-            const scalar vTabP =
-                gasCell ? vTab*(pTbl/max(pfld[celli], vSmall)) : vTab;
+            // v(p) by the tabulated compressibility rather than the
+            // ideal-gas limit.  PEQSI_dpdvn = (dp/dv)_T v/P is
+            // dimensionless and identically -1 for an ideal gas, so
+            // holding it constant and integrating
+            //     d(ln v)/d(ln p) = 1/dpdvn
+            // gives  v = vTab (p/pTbl)^(1/dpdvn),  which collapses to
+            // vTab*pTbl/p at dpdvn = -1.  Treating the exponent as
+            // constant is exactly the assumption the normalisation was
+            // built on -- the tabulator measured it holding to 0.30%
+            // over +-19% in pressure.
+            scalar vTabP = vTab;
+            if (gasCell)
+            {
+                const scalar dpdvn =
+                    dpdvnT ? tbl.interpolate(*dpdvnT, st) : -1.0;
+                // dpdvn must be negative for a stable fluid; anything
+                // else is a table artefact, so fall back to ideal.
+                const scalar e = (dpdvn < -small) ? 1.0/dpdvn : -1.0;
+                vTabP = vTab*pow(max(pfld[celli], vSmall)/pTbl, e);
+            }
 
             useF[celli] =
                 mag(vTabP - vCell) < vGateTol*max(vCell, small);
