@@ -29,6 +29,8 @@ License
 #include "fvcGrad.H"
 #include "fvcFlux.H"
 #include "fvcLaplacian.H"
+#include "fvmSup.H"
+#include "fvmLaplacian.H"
 #include "fvcSurfaceIntegrate.H"
 
 // * * * * * * * * * * * * * * * Local Functions * * * * * * * * * * * * * * //
@@ -227,6 +229,17 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
         )
     );
 
+    // IMEX: treat the Eq.22/24 artificial MASS diffusion implicitly in a
+    // split step after the RK3 stages.  The explicit form caps dt at
+    // 0.45 dmin^2/D (measured 3.0e-7 s on the 3-D case, 3.3x below the
+    // Courant/maxDeltaT bound), and that cap cannot be relaxed by
+    // lowering C_rho: the interface sharpens until |d4rho| ~ 1/(n dx)^4
+    // restores the same D (measured C 2.5x down -> D 1.26x UP).
+    const Switch ladImplicit
+    (
+        pimple.dict().lookupOrDefault<Switch>("peqsiLadImplicit", false)
+    );
+
     tmp<volScalarField> tDart;      // rho_art [m2/s]
     tmp<volScalarField> tKappaArt;  // kappa_art [W/(m K)]
 
@@ -369,19 +382,36 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
                         "peqsiLadDtSafety", 0.8
                     );
 
-                scalar dtLim = great;
-                forAll(D, i)
+                if (ladImplicit)
                 {
-                    const scalar Duse = min(D[i], Dsane);
-                    if (Duse > vSmall)
+                    // Implicit: no explicit-stability constraint, so dt is
+                    // left to the Courant bound and the dt-DEPENDENT cap
+                    // must not be used -- at the 3.3x larger dt it would
+                    // clip normal LAD operation (cap ~ 1/dt).  The
+                    // pathological-cell guard stays, at the dt-independent
+                    // Dsane ceiling.
+                    forAll(D, i)
                     {
-                        dtLim =
-                            min(dtLim, 0.45*sqr(deltaMin[i])/Duse);
+                        D[i] = min(D[i], Dsane);
                     }
-                    D[i] = min(D[i], rdt*sqr(deltaMin[i]));
+                    ladDtLimit_ = great;
                 }
-                reduce(dtLim, minOp<scalar>());
-                ladDtLimit_ = fSafe*dtLim;
+                else
+                {
+                    scalar dtLim = great;
+                    forAll(D, i)
+                    {
+                        const scalar Duse = min(D[i], Dsane);
+                        if (Duse > vSmall)
+                        {
+                            dtLim =
+                                min(dtLim, 0.45*sqr(deltaMin[i])/Duse);
+                        }
+                        D[i] = min(D[i], rdt*sqr(deltaMin[i]));
+                    }
+                    reduce(dtLim, minOp<scalar>());
+                    ladDtLimit_ = fSafe*dtLim;
+                }
             }
 
             Info<< "PEQSI LAD: rho_art max = "
@@ -539,7 +569,7 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
         // LAD mass/energy diffusion increments (TK Eqs. 22, 24, 31 --
         // see the comment block above)
         tmp<volScalarField> tMassArt, tRhArt;
-        if (tDart.valid())
+        if (tDart.valid() && !ladImplicit)
         {
             tMassArt = fvc::laplacian(tDart(), r);
             tRhArt = fvc::laplacian(tDart(), rh);
@@ -694,6 +724,60 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
             (rhoN_()/6.0 + r1/6.0 + 2.0*r2/3.0)*divPhiv
         )
     );
+
+    // ---- IMEX split step: implicit Eq. 22/24 artificial mass diffusion
+    //
+    //     (r - r*)/dt = div(D grad r),    solved implicitly for r
+    //     ru += u^n (r - r*)              <- Eq. 24, SAME increment
+    //     (rh - rh*)/dt = div(D grad rh)
+    //
+    // Placed AFTER sComp_ on purpose: sComp is the RK3 quadrature of the
+    // COMPRESSION term rho div(phiv), and the acoustic substep relies on
+    // it to cancel the Eq. 22 density increment exactly.  LAD is a pure
+    // divergence with Dart == 0 on every boundary, so it moves no net
+    // mass (verified: the substep mass ledger is unchanged) and must not
+    // enter that quadrature.
+    //
+    // Eq. 24 uses u^n, exactly as the explicit branch does inside the
+    // stages (UNi there, UN_() here): under velocity equilibrium the
+    // momentum increment is then u times the mass increment, which is
+    // the invariance Eq. 24 exists to preserve.
+    if (tDart.valid() && ladImplicit)
+    {
+        const dimensionedScalar rdtD("rdt", dimless/dimTime, 1.0/dt.value());
+
+        const volScalarField rStar("PEQSI:rStarLAD", r);
+
+        fvScalarMatrix rEqn
+        (
+            fvm::Sp(rdtD, r) - fvm::laplacian(tDart(), r) == rdtD*rStar
+        );
+        rEqn.solve(mesh.solution().solverDict("rhoLAD"));
+
+        const volScalarField rhStar("PEQSI:rhStarLAD", rh);
+
+        fvScalarMatrix rhEqn
+        (
+            fvm::Sp(rdtD, rh) - fvm::laplacian(tDart(), rh) == rdtD*rhStar
+        );
+        rhEqn.solve(mesh.solution().solverDict("rhoLAD"));
+
+        // Eq. 24 momentum increment, from the SAME mass increment
+        {
+            const scalarField& rNew = r.primitiveField();
+            const scalarField& rOld = rStar.primitiveField();
+            const vectorField& UNi = UN_().primitiveField();
+            vectorField& rui = ru.primitiveFieldRef();
+            forAll(rui, i)
+            {
+                rui[i] += UNi[i]*(rNew[i] - rOld[i]);
+            }
+        }
+
+        r.correctBoundaryConditions();
+        rh.correctBoundaryConditions();
+        ru.correctBoundaryConditions();
+    }
 
     // Publish the starred state into the solver fields (BCs from the
     // registered fields' own conditions)
