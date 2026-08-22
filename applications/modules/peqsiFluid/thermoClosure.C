@@ -802,6 +802,83 @@ void Foam::solvers::peqsiFluid::invertTemperature()
         }
     }
 
+    // ------------------------------------------------------------------
+    // Closed-domain uniform pressure mode (peqsiClosedDomain).
+    //
+    // In a domain with no pressure-setting boundary -- fully periodic, or
+    // all-wall -- the SPATIALLY UNIFORM part of the pressure is in the
+    // null space of the Helmholtz operator, so the acoustic substep
+    // cannot set it.  Measured directly on the 1-D reacting gate: the
+    // mixture burns from 2659 K to 3688 K and dp stays identically 0 for
+    // the whole run, while the EOS and transported densities part by 27%.
+    // The gas has nowhere to put its expansion.
+    //
+    // The low-Mach literature has the constraint this needs.  Splitting
+    // p = p0(t) + p1(x,t), the uniform p0 is fixed by a GLOBAL
+    // thermodynamic constraint, not by the Poisson/Helmholtz solve:
+    // constant for an open system (Cook & Riley, Phys. Fluids 8:2868,
+    // 1996) and, for a closed one, by requiring the total mass to hold
+    // (Nicoud, JCP 158:71, 2000; Nicoud & Poinsot 1999).  Kotturshettar,
+    // Alcobia, Boldini, Pecnik & Costa (arXiv:2607.29224) write the
+    // real-gas version as an inverse problem, Eq. (11),
+    //     M0 = int rho(p0(t), T) dV = const,
+    // solved by Newton with the isothermal compressibility
+    // chi = (1/rho) drho/dp|_T, which they note may come from tabulated
+    // data as well as from an analytic EOS.
+    //
+    // PEQSI needs that constraint with a DIFFERENT right-hand side.  In
+    // the low-Mach formulation rho is evaluated from the EOS, so pinning
+    // the mass pins p0.  Here rho is TRANSPORTED and its mass is already
+    // exact by construction -- that is the whole point of the scheme --
+    // so mass carries no information about p0.  What the uniform mode
+    // must do instead is make the EOS hold IN THE MEAN:
+    //
+    //     p0 <- p0 + (int rho dV - int rhoEOS(p,T,Y) dV) / int rho*chi dV
+    //
+    // Same Newton step, same chi, target changed from the initial mass
+    // to the transported mass.  It moves only the uniform mode, so the
+    // mass ledger is untouched (a uniform shift adds no flux), and it is
+    // the one degree of freedom that can absorb a mean EOS mismatch.
+    //
+    // Off by default: with any pressure-setting boundary the level is
+    // already determined and this must not run.
+    if (pimple.dict().lookupOrDefault<Switch>("peqsiClosedDomain", false))
+    {
+        const scalarField& V = mesh.V();
+        const scalarField& rt = rho_.primitiveField();
+        const tmp<volScalarField> trhoE(thermo_.rho());
+        const scalarField& re = trhoE().primitiveField();
+        const scalarField& psiF = thermo_.psi().primitiveField();
+
+        scalar mT = 0, mE = 0, den = 0;
+        forAll(rt, i)
+        {
+            mT += rt[i]*V[i];
+            mE += re[i]*V[i];
+            den += psiF[i]*V[i];        // rho*chi == psi == drho/dp|_T
+        }
+        reduce(mT, sumOp<scalar>());
+        reduce(mE, sumOp<scalar>());
+        reduce(den, sumOp<scalar>());
+
+        if (mag(den) > vSmall)
+        {
+            const scalar dp0 = (mT - mE)/den;
+            p_ += dimensionedScalar(p_.dimensions(), dp0);
+            p_.correctBoundaryConditions();
+
+            const label every =
+                pimple.dict().lookupOrDefault<label>("peqsiDiagInterval", 10);
+            static label n = 0;
+            if (every > 0 && (n++ % every) == 0)
+            {
+                Info<< "PEQSI closed domain: mean EOS residual "
+                    << (mT - mE)/max(mT, vSmall)
+                    << " -> dp0 = " << dp0 << " Pa" << endl;
+            }
+        }
+    }
+
     Info<< "PEQSI thermo closure: T = ["
         << gMin(thermo_.T().primitiveField()) << ", "
         << gMax(thermo_.T().primitiveField())
@@ -968,6 +1045,24 @@ void Foam::solvers::peqsiFluid::fgmClosure()
     const List<scalar>& Ttbl = tbl.Ttable();
 
 
+    // Discriminating test for the density-drift hypothesis
+    // (peqsiFreezeY).  The claim under test is that the drift is the
+    // composition's contribution to Drho/Dt, which the pressure equation
+    // does not carry: alpha and beta are derived at FIXED composition,
+    // so a manifold that moves Y produces a density change the flow
+    // never sees.  Freezing Y after the first pass zeroes dY/dt while
+    // leaving EVERYTHING else identical -- same manifold, same
+    // coefficients, same temperature inversion -- so the difference
+    // against the live run isolates exactly that one term.
+    //
+    // This is a diagnostic, not a model: with Y frozen the manifold no
+    // longer closes the thermodynamics.
+    static bool frozenOnce = false;
+    const bool freezeY =
+        pimple.dict().lookupOrDefault<Switch>("peqsiFreezeY", false)
+     && frozenOnce;
+    frozenOnce = true;
+
     const scalar Zdense =
         pimple.dict().lookupOrDefault<scalar>("peqsiZdense", 0.5);
 
@@ -996,9 +1091,12 @@ void Foam::solvers::peqsiFluid::fgmClosure()
             RGfields_[k][celli] = tbl.interpolate(tbl.RGtable(k), st);
         }
 
-        forAll(spn, k)
+        if (!freezeY)
         {
-            (*Yp[k])[celli] = tbl.interpolate(tbl.Ytable(spn[k]), st);
+            forAll(spn, k)
+            {
+                (*Yp[k])[celli] = tbl.interpolate(tbl.Ytable(spn[k]), st);
+            }
         }
         src[celli] = rhof[celli]*tbl.interpolate(tbl.sourcePVTable(), st);
 
