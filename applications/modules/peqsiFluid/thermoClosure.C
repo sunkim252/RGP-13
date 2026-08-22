@@ -27,6 +27,8 @@ License
 #include "tabulatedRealGasMixture.H"
 #include "thermodynamicConstants.H"
 #include "fvcLaplacian.H"
+#include "fvcGrad.H"
+#include <algorithm>
 #include "zeroGradientFvPatchFields.H"
 
 // * * * * * * * * * * * * * * * Member Functions  * * * * * * * * * * * * * //
@@ -153,6 +155,12 @@ void Foam::solvers::peqsiFluid::invertTemperature()
     // and every property behind it run on the looked-up mixture.
     if (fgmActive_)
     {
+        if (pimple.dict().lookupOrDefault<word>("peqsiZvar", "algebraic")
+         == "algebraic")
+        {
+            updateSegregation();
+        }
+
         fgmClosure();
 
         // Seeding the inversion from the manifold: available, OFF, and
@@ -1389,3 +1397,116 @@ Foam::solvers::peqsiFluid::boundingArtDiffusivity
 
 
 // ************************************************************************* //
+
+
+void Foam::solvers::peqsiFluid::updateSegregation()
+{
+    // The segregation factor gZ is the table's second axis.  peqsiFluid
+    // was ADVECTING it as a passive scalar with a null source -- so it
+    // simply carried its initial value around and the axis never
+    // responded to the flow.  That is not one of the two published
+    // closures; it is a transport equation missing both of its terms.
+    //
+    // This is the algebraic one, ported from fgmFluid (which runs it in
+    // production) so a single table and a single Cv serve both solvers:
+    //
+    //     Z''^2 = Cv L^2 |grad Z|^2,      gZ = Z''^2 / (Z (1 - Z))
+    //
+    // Cook & Riley (Phys. Fluids 6:2868, 1994) for the scale-similarity
+    // form; Pierce & Moin (JFM 504:73, 2004) for L = Delta at LES
+    // resolution.  Algebraic rather than a transported variance because
+    // it needs no source inside the RK stages -- the fractional step
+    // stays as PEQSI specifies it -- and because the transported form is
+    // the rung above, warranted only once non-equilibrium mixing is
+    // shown to matter.
+    //
+    // The advected Zvar_ is overwritten here rather than removed from
+    // the RK sweep: advectSubstep.C is being edited concurrently for the
+    // LAD IMEX work, and one redundant scalar advection is cheaper than
+    // a merge conflict.
+    if (!Zvar_.valid() || !Z_.valid())
+    {
+        return;
+    }
+
+    if (!varModelReported_)
+    {
+        const word simType(momentumTransport->lookup("simulationType"));
+        if (simType == "LES")
+        {
+            varModel_ = varModel::les;
+        }
+        else if (simType == "laminar")
+        {
+            varModel_ = varModel::laminar;
+        }
+        else
+        {
+            // RAS needs L = k^(3/2)/epsilon and the clip fgmFluid
+            // applies to it.  Not ported: every peqsiFluid case is LES
+            // or laminar, and a silent laminar substitution would report
+            // gZ = 0 for a case that has unresolved mixing.
+            FatalErrorInFunction
+                << "peqsiZvar algebraic closure supports simulationType "
+                << "LES and laminar; got '" << simType << "'.  Port the "
+                << "RAS mixing length from fgmFluid::varianceLengthSqr() "
+                << "or set peqsiZvar transport." << exit(FatalError);
+        }
+
+        Cv_ = fgmTable_->lookupOrDefault<scalar>("Cv", 0.1);
+        Cv_ = pimple.dict().lookupOrDefault<scalar>("peqsiCv", Cv_);
+
+        Info<< "PEQSI variance: algebraic closure, simulationType "
+            << simType << " -> L = "
+            << (varModel_ == varModel::les ? "Delta = V^(1/3)" : "0 (laminar)")
+            << ", Cv = " << Cv_ << endl;
+        varModelReported_ = true;
+    }
+
+    scalarField& gZ = Zvar_().primitiveFieldRef();
+
+    if (varModel_ == varModel::laminar)
+    {
+        gZ = 0.0;
+        Zvar_().correctBoundaryConditions();
+        return;
+    }
+
+    const volScalarField magSqrGradZ(magSqr(fvc::grad(Z_())));
+    const scalarField& g2 = magSqrGradZ.primitiveField();
+    const scalarField& V = mesh.V();
+    const scalarField& Zf = Z_().primitiveField();
+
+    forAll(gZ, celli)
+    {
+        // L^2 = (V^(1/3))^2 = V^(2/3)
+        const scalar Lsqr = sqr(cbrt(V[celli]));
+        const scalar Zvar = Cv_*Lsqr*g2[celli];
+        const scalar Zcl = min(max(Zf[celli], 0.0), 1.0);
+        gZ[celli] =
+            min(max(Zvar/max(Zcl*(1.0 - Zcl), small), 0.0), 1.0);
+    }
+
+    Zvar_().correctBoundaryConditions();
+
+    // gZ is a closure OUTPUT now, not a transported input, so its range
+    // is the thing to watch: pinned at 1 means the manifold is being
+    // read at maximum segregation everywhere (Cv or the filter width is
+    // too large), pinned at 0 means the axis is doing nothing.
+    static label segCount = 0;
+    const label every =
+        pimple.dict().lookupOrDefault<label>("peqsiDiagInterval", 10);
+    if (every > 0 && (segCount++ % every) == 0)
+    {
+        Info<< "PEQSI variance: gZ = [" << gMin(gZ) << ", " << gMax(gZ)
+            << "], mean " << gAverage(gZ)
+            << ", cells at the gZ = 1 clip = "
+            << returnReduce
+               (
+                   label(std::count_if(gZ.begin(), gZ.end(),
+                       [](const scalar v){ return v >= 1.0 - small; })),
+                   sumOp<label>()
+               )
+            << endl;
+    }
+}

@@ -191,6 +191,20 @@ protected:
         //  instead of summed over the mixture species)
         bool baseBlendArmed_ = false;
 
+        //- Algebraic mixture-fraction variance closure.
+        //  Zvar was being ADVECTED with no source at all -- neither of
+        //  the two published families, just an incomplete transport
+        //  equation whose segregation axis never got fed.  This is the
+        //  gradient / scale-similarity closure
+        //      Z''^2 = Cv L^2 |grad Z|^2,   gZ = Z''^2 / (Z (1 - Z))
+        //  (Cook & Riley, Phys. Fluids 6:2868, 1994; filter-width
+        //  mixing length after Pierce & Moin, JFM 504:73, 2004), which
+        //  is what fgmFluid already runs in production.
+        enum class varModel { les, laminar };
+        varModel varModel_ = varModel::laminar;
+        scalar Cv_ = 0.1;
+        bool varModelReported_ = false;
+
         //- Tier-2 real-gas coefficients per cell, in coeffNames() order.
         //  Opt-1 removes the base-thermo species sum; this removes the
         //  O(n^2) calculateRealGas pair sum behind it (11236 pairs per
@@ -333,6 +347,10 @@ protected:
 
         //- Stage 2a: manifold lookup -> composition + diagnostics
         void fgmClosure();
+
+        //- Fill the segregation factor gZ (stored in Zvar_) from the
+        //  algebraic variance closure
+        void updateSegregation();
 
         //- Bounding artificial diffusivity for a [0,1] scalar, after
         //  Terashima & Koshi 2012 Eq. (27):
