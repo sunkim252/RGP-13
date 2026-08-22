@@ -149,6 +149,42 @@ void Foam::solvers::peqsiFluid::invertTemperature()
     if (fgmActive_)
     {
         fgmClosure();
+
+        // Seeding the inversion from the manifold: available, OFF, and
+        // measured to be a pessimisation on the cases tried.
+        //
+        // The reasoning that motivated it was that the temperature
+        // Newton is 84% of the multicomponent step.  It is -- but not
+        // because it iterates many times.  Starting from the previous
+        // step's temperature, which is what the solver already does, an
+        // advecting field converges in 2 iterations; the manifold guess
+        // lands |T_tbl - T| ~ 1.2 K away from that and costs 5.  On the
+        // gate case: T-Newton 12.23 s -> 20.60 s, 68% worse.
+        //
+        // The 84% is the cost of ONE iteration -- thirty-species janaf
+        // and SRK departure functions over the whole field -- so it
+        // yields to cheaper evaluation, not to fewer iterations.  Kept
+        // switchable because a restart, or a case where the state moves
+        // far per step, has no good previous temperature to start from,
+        // and there the ordering may reverse.
+        if
+        (
+            Tguess_.valid()
+         && pimple.dict().lookupOrDefault<Switch>("peqsiTseed", false)
+        )
+        {
+            volScalarField& Tw0 = const_cast<volScalarField&>(thermo_.T());
+            scalarField& Tf0 = Tw0.primitiveFieldRef();
+            const scalarField& Tg = Tguess_();
+            forAll(Tf0, i)
+            {
+                if (Tg[i] > 0)
+                {
+                    Tf0[i] = min(max(Tg[i], scalar(50)), scalar(4000));
+                }
+            }
+            Tw0.correctBoundaryConditions();
+        }
     }
 
     // ------------------------------------------------------------------
@@ -534,6 +570,13 @@ void Foam::solvers::peqsiFluid::invertTemperature()
             }
         }
 
+        {
+            label it2 = iter;
+            reduce(it2, maxOp<label>());
+            Info<< "PEQSI thermo closure: T-Newton iterations = " << it2
+                << endl;
+        }
+
         if (nSaturated_ > 0)
         {
             reduce(nSaturated_, sumOp<label>());
@@ -720,10 +763,15 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         alphaTab_.reset(new scalarField(Zf.size(), 0.0));
         betaTab_.reset(new scalarField(Zf.size(), 0.0));
         tabUsable_.reset(new boolList(Zf.size(), false));
+        Tguess_.reset(new scalarField(Zf.size(), 0.0));
     }
     scalarField& aTabF = alphaTab_();
     scalarField& bTabF = betaTab_();
     boolList& useF = tabUsable_();
+    scalarField& TgF = Tguess_();
+
+    const bool haveDTdv = tbl.hasOptTable("dTdv_h");
+    const List<scalar>* dTdvT = haveDTdv ? &tbl.optTable("dTdv_h") : nullptr;
 
     const wordList& spn = tbl.speciesNames();
     PtrList<volScalarField>& Yall = thermo_.Y();
@@ -871,7 +919,31 @@ void Foam::solvers::peqsiFluid::fgmClosure()
             }
         }
 
-        const scalar dTc = mag(tbl.interpolate(Ttbl, st) - Tf[celli]);
+        // Newton seed.  The manifold temperature is the answer at the
+        // TABLE's specific volume; the cell sits at its own, so the
+        // table's (dT/dv)_h carries the guess the rest of the way.  The
+        // Newton still runs and still decides -- this only changes where
+        // it starts, which is worth doing because the temperature
+        // inversion and the property sweeps behind it are 84% of the
+        // step on the multicomponent path (2.1% for a single species):
+        // thirty-species janaf and SRK departure functions, per cell,
+        // per iteration.
+        const scalar Ttab = tbl.interpolate(Ttbl, st);
+        if (haveDTdv)
+        {
+            const scalar vT =
+                (tbl.interpolate(*xiT, st) - tbl.interpolate(*cvT, st))
+               /max(tbl.interpolate(*dpdTT, st), small);
+            const scalar vC = 1.0/max(rhof[celli], small);
+            TgF[celli] =
+                Ttab + tbl.interpolate(*dTdvT, st)*(vC - vT);
+        }
+        else
+        {
+            TgF[celli] = Ttab;
+        }
+
+        const scalar dTc = mag(Ttab - Tf[celli]);
         dT = max(dT, dTc);
 
         // c bins [0,.25,.5,.75,1], T bins [<600, <1200, <2000, >=2000]

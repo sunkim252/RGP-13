@@ -174,6 +174,12 @@ protected:
         autoPtr<scalarField> betaTab_;
         autoPtr<boolList> tabUsable_;
 
+        //- Manifold temperature guess for the Newton inversion, with
+        //  the table's own (dT/dv)_h correcting it to the cell's
+        //  specific volume.  Written by fgmClosure, consumed by
+        //  invertTemperature.
+        autoPtr<scalarField> Tguess_;
+
 
     // PEQSI real-gas coefficient fields (evaluated in thermoClosure)
 
