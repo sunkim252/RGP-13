@@ -229,6 +229,17 @@ protected:
         //  consumed by the p* stage.
         autoPtr<volScalarField> sourceP_;
 
+        //- (drho/dc) and (dh/dc) at fixed (p, T), differenced along the
+        //  MANIFOLD rather than in time -- an Eulerian time difference
+        //  would carry u.grad(Y) into what must be a material rate.
+        autoPtr<scalarField> dYdcRho_;
+        autoPtr<scalarField> dYdcH_;
+
+        //- Cnorm(Z), the progress-variable normalisation.  Distinct from
+        //  cNormF_, which holds the already-normalised c -- S_Y needs the
+        //  normalisation itself to turn dYc/dt into Dc/Dt.
+        autoPtr<scalarField> cnormZ_;
+
         label armedNCells_ = -1;
         const scalar* armedYData_ = nullptr;
 
@@ -371,12 +382,9 @@ protected:
         //  algebraic variance closure
         void updateSegregation();
 
-        //- Assemble S_Y from the EOS response to the composition change
-        void updateCompositionSource
-        (
-            const scalarField& rhoOld,
-            const scalarField& hOld
-        );
+        //- Assemble S_Y from the manifold-direction composition
+        //  derivatives and the reaction rate
+        void updateCompositionSource();
 
         //- Bounding artificial diffusivity for a [0,1] scalar, after
         //  Terashima & Koshi 2012 Eq. (27):

@@ -161,25 +161,14 @@ void Foam::solvers::peqsiFluid::invertTemperature()
             updateSegregation();
         }
 
-        // Snapshot the EOS response BEFORE the manifold moves Y, at the
-        // current (p, T).  The pair before/after differs in composition
-        // ALONE -- T is still T^n here, the inversion runs later -- so
-        // the difference is exactly the composition's contribution, with
-        // no pressure or temperature response mixed in.
         const bool wantSY =
             pimple.dict().lookupOrDefault<Switch>("peqsiCompSource", false);
-        scalarField rhoOld, hOld;
-        if (wantSY)
-        {
-            rhoOld = thermo_.rho()().primitiveField();
-            hOld = thermo_.he(p_, thermo_.T())().primitiveField();
-        }
 
         fgmClosure();
 
         if (wantSY)
         {
-            updateCompositionSource(rhoOld, hOld);
+            updateCompositionSource();
         }
 
         // Seeding the inversion from the manifold: available, OFF, and
@@ -987,6 +976,7 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         tabUsable_.reset(new boolList(Zf.size(), false));
         cNormF_.reset(new scalarField(Zf.size(), 0.0));
         dhF_.reset(new scalarField(Zf.size(), 0.0));
+        cnormZ_.reset(new scalarField(Zf.size(), 1.0));
 
         if
         (
@@ -1100,6 +1090,7 @@ void Foam::solvers::peqsiFluid::fgmClosure()
             hfld[celli] - hMix - (tbl.hasDhRef() ? tbl.interpolateDhRef(Zcl, gz, Ccl) : 0.0);
 
         cNormF_()[celli] = Ccl;
+        cnormZ_()[celli] = Cn;
         dhF_()[celli] = dh;
 
         FGMTable::FGMStencil st;
@@ -1241,6 +1232,66 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         const label it =
             Tc2 < 600 ? 0 : (Tc2 < 1200 ? 1 : (Tc2 < 2000 ? 2 : 3));
         dTbinT[it] = max(dTbinT[it], dTc); nBinT[it]++;
+    }
+
+    // Manifold-direction composition derivatives for S_Y: evaluate the
+    // EOS at Y(c) and at Y(c + dc), same cell and same instant, so the
+    // difference is a pure composition derivative with no time and
+    // therefore no advection in it.  Costs two extra field evaluations
+    // and two Y writes per step; affordable since Opt-1/Tier-2.
+    if (pimple.dict().lookupOrDefault<Switch>("peqsiCompSource", false))
+    {
+        const scalar dc =
+            pimple.dict().lookupOrDefault<scalar>("peqsiCompSourceDc", 0.01);
+
+        if (!dYdcRho_.valid())
+        {
+            dYdcRho_.reset(new scalarField(Zf.size(), 0.0));
+            dYdcH_.reset(new scalarField(Zf.size(), 0.0));
+        }
+
+        const scalarField rho0(thermo_.rho()().primitiveField());
+        const scalarField h0(thermo_.he(p_, thermo_.T())().primitiveField());
+
+        // rewrite Y at c + dc on the same stencil coordinates
+        forAll(Zf, celli)
+        {
+            const scalar Zcl = min(max(Zf[celli], 0.0), 1.0);
+            const scalar gz = max(gZf[celli], 0.0);
+            const scalar Ccl = min(max(cNormF_()[celli] + dc, 0.0), 1.0);
+
+            FGMTable::FGMStencil st2;
+            tbl.makeStencil(Zcl, gz, Ccl, dhF_()[celli], st2);
+            forAll(spn, k)
+            {
+                (*Yp[k])[celli] = tbl.interpolate(tbl.Ytable(spn[k]), st2);
+            }
+        }
+
+        const scalarField rho1(thermo_.rho()().primitiveField());
+        const scalarField h1(thermo_.he(p_, thermo_.T())().primitiveField());
+
+        forAll(Zf, celli)
+        {
+            const scalar step =
+                min(max(cNormF_()[celli] + dc, 0.0), 1.0) - cNormF_()[celli];
+            const scalar inv = mag(step) > small ? 1.0/step : 0.0;
+            dYdcRho_()[celli] = (rho1[celli] - rho0[celli])*inv;
+            dYdcH_()[celli] = (h1[celli] - h0[celli])*inv;
+        }
+
+        // restore the manifold composition
+        forAll(Zf, celli)
+        {
+            const scalar Zcl = min(max(Zf[celli], 0.0), 1.0);
+            const scalar gz = max(gZf[celli], 0.0);
+            FGMTable::FGMStencil st0;
+            tbl.makeStencil(Zcl, gz, cNormF_()[celli], dhF_()[celli], st0);
+            forAll(spn, k)
+            {
+                (*Yp[k])[celli] = tbl.interpolate(tbl.Ytable(spn[k]), st0);
+            }
+        }
     }
 
     forAll(spn, k)
@@ -1656,51 +1707,56 @@ void Foam::solvers::peqsiFluid::updateSegregation()
 }
 
 
-void Foam::solvers::peqsiFluid::updateCompositionSource
-(
-    const scalarField& rhoOld,
-    const scalarField& hOld
-)
+void Foam::solvers::peqsiFluid::updateCompositionSource()
 {
     // S_Y, the term the pressure substep is missing under FPV.
     //
     // WKK eliminate DT/Dt between h(T,v) and p(T,v) to reach alpha and
-    // beta.  Under FPV the composition is a THIRD independent variable --
-    // Y = Y(Z, Zvar, c, dh), and the manifold moves it every step -- so
-    // the same elimination leaves one more source:
+    // beta.  Under FPV the composition is a THIRD independent variable,
+    // so the same elimination leaves one more source:
     //
     //   Dp/Dt (1-alpha) = rho alpha L_h + beta div(u) + S_Y
     //   S_Y = sum_k [ (dp/dY_k)_{T,v} - rho alpha (dh/dY_k)_{T,v} ] DY_k/Dt
     //
-    // alpha and beta are fixed-composition coefficients and cannot carry
-    // it.  Without it heat release produces no dilatation whatever: on
-    // the 1-D reacting gate the mixture burns 2659 K -> 3688 K with
-    // U == 0 and dp == 0 for the entire run.
+    // ---------------------------------------------------------------
+    // The rate is a MATERIAL derivative, and getting that wrong is the
+    // trap.  A first version formed DY/Dt from the difference between
+    // consecutive manifold lookups in the same cell.  That is the
+    // EULERIAN rate dY/dt|_x, which differs from DY/Dt by u.grad(Y) --
+    // and in an advecting flow that difference is the whole signal.  The
+    // 1-D reacting gate did not catch it because u == 0 there, so the
+    // two coincide; on the 2-D shear case the spurious advective part
+    // drove the density drift from 0.388 to 8.03, a factor of 20.
     //
-    // Both sums are evaluated from the EOS response at fixed (p, T),
-    // which is what the thermo can supply directly, using
+    // So the rate is taken from the TRANSPORT EQUATIONS instead, where
+    // the material derivatives are what is actually solved for.  Under
+    // FPV, Y = Y(Z, Zvar, c, dh), so
     //
-    //   sum_k (dp/dY_k)_{T,v} dY_k = -(dp/dv)_T dv|_{T,p}
-    //                              =  (dp/dv)_T drho_Y / rho^2
-    //   (dh/dY_k)_{T,v} = (dh/dY_k)_{T,p} + (dh/dp)_T (dp/dY_k)_{T,v}
+    //   DY_k/Dt = (dY_k/dc) Dc/Dt + (dY_k/dZ) DZ/Dt + ...
     //
-    // with (dh/dp)_T = v + T (dp/dT)_v / (dp/dv)_T, the identity already
-    // used by the constant-v closure.  drho_Y and dh_Y are the before/
-    // after differences taken at the same (p, T).
+    // and for the reacting problem Dc/Dt = sourcePV/Cnorm is the
+    // dominant term -- it is the only one carrying a SOURCE.  The Z and
+    // gZ directions move by advection and diffusion alone: pure
+    // advection contributes nothing to a material derivative, and with
+    // speciesDiffusion off there is no diffusive source either, so those
+    // directions are dropped.  That is also what makes the non-reacting
+    // case come out at exactly zero, as it must.
+    //
+    // The composition derivative is then a MANIFOLD-DIRECTION difference
+    // -- Y at c versus Y at c + dc, same cell, same instant -- so no
+    // time and no advection enter it at all.
     //
     // Precedent: the composition contribution to the volumetric
-    // constraint is standard in low-Mach reacting formulations -- Day &
+    // constraint is standard in low-Mach reacting formulations.  Day &
     // Bell (Combust. Theory Modelling 4:535, 2000) Eq. (7) carries it as
-    // the (W/W_m) omega_m term for an ideal gas, after Majda & Sethian
-    // (1985) and Najm, Wyckoff & Knio (JCP 143:381, 1998).  The real-gas
-    // generalisation replaces the ideal-gas molecular-weight algebra with
-    // the EOS derivatives used here (cf. Kotturshettar, Alcobia, Boldini,
+    // the (W/W_m) omega_m term for an ideal gas -- note it is driven by
+    // omega_m, the reaction rate, exactly as here -- after Majda &
+    // Sethian (1985) and Najm, Wyckoff & Knio (JCP 143:381, 1998).  The
+    // real-gas generalisation replaces the ideal-gas molecular-weight
+    // algebra with EOS derivatives (cf. Kotturshettar, Alcobia, Boldini,
     // Pecnik & Costa, arXiv:2607.29224, who build the same constraint
     // from beta and chi but for a single-component fluid, explicitly
-    // without composition terms).  What is assembled here is those two
-    // published pieces put together, not a new closure.
-    const scalar dt = mesh.time().deltaTValue();
-
+    // without composition terms).
     if (!sourceP_.valid())
     {
         sourceP_.reset
@@ -1721,22 +1777,26 @@ void Foam::solvers::peqsiFluid::updateCompositionSource
         );
     }
 
-    const scalarField& rhoNew = thermo_.rho()().primitiveField();
-    const tmp<volScalarField> thNew(thermo_.he(p_, thermo_.T()));
-    const scalarField& hNew = thNew().primitiveField();
+    scalarField& S = sourceP_().primitiveFieldRef();
+    S = 0.0;
+
+    if (!dYdcRho_.valid() || !sourceYc_.valid() || !cnormZ_.valid())
+    {
+        sourceP_().correctBoundaryConditions();
+        return;
+    }
+
+    const scalarField& dRdc = dYdcRho_();     // (drho/dc)_{p,T} on the manifold
+    const scalarField& dHdc = dYdcH_();       // (dh/dc)_{p,T}
+    const scalarField& src = sourceYc_().primitiveField();   // rho * dYc/dt
+    const scalarField& cn = cnormZ_();     // Cnorm(Z), not the normalised c
 
     const scalarField& aF = alpha_.primitiveField();
     const scalarField& rf = rho_.primitiveField();
     const scalarField& Tf = thermo_.T().primitiveField();
-
-    // (dp/dv)_T and (dp/dT)_v: the manifold's where it is reachable,
-    // the runtime SRK assembly elsewhere -- same split the coefficients
-    // already use.
     const scalarField& psiF = thermo_.psi().primitiveField();
     const tmp<volScalarField> tCv(thermo_.Cv());
     const scalarField& cvF = tCv().primitiveField();
-
-    scalarField& S = sourceP_().primitiveFieldRef();
 
     scalar sMax = 0;
     forAll(S, i)
@@ -1744,26 +1804,27 @@ void Foam::solvers::peqsiFluid::updateCompositionSource
         const scalar rho = max(rf[i], small);
         const scalar v = 1.0/rho;
 
-        // (dp/dv)_T = -1/(v^2 chi rho) ... psi = rho*chi = drho/dp|_T,
-        // so (dp/dv)_T = -rho^2/psi.
+        // Dc/Dt.  sourceYc_ is rho * dYc/dt and c = Yc/Cnorm(Z), so
+        // Dc/Dt = sourceYc/(rho Cnorm).  Zero wherever the manifold's
+        // progress-variable source is zero, which is the whole
+        // non-reacting field.
+        const scalar DcDt = src[i]/(rho*max(cn[i], small));
+
+        // Composition rates at fixed (p, T), from the manifold direction
+        const scalar dRho = dRdc[i]*DcDt;
+        const scalar dh = dHdc[i]*DcDt;
+
+        // (dp/dv)_T = -rho^2/psi, and
+        //   sum_k (dp/dY_k)_{T,v} dY_k = -(dp/dv)_T dv|_{T,p}
+        //                              =  (dp/dv)_T drho / rho^2
         const scalar dpdv = -sqr(rho)/max(psiF[i], vSmall);
-
-        const scalar dRho = (rhoNew[i] - rhoOld[i])/dt;   // at fixed (p,T)
-        const scalar dh = (hNew[i] - hOld[i])/dt;         // at fixed (p,T)
-
-        // sum_k (dp/dY_k)_{T,v} DY_k/Dt
         const scalar A = dpdv*dRho/sqr(rho);
 
-        // (dh/dp)_T = v + T (dp/dT)_v / (dp/dv)_T.
-        // xi is not stored, but it closes on Cv: xi = (dh/dT)_v =
-        // Cv + v (dp/dT)_v and (dp/dT)_v = rho alpha xi with v rho = 1
-        // give xi = Cv/(1 - alpha).  Hence (dp/dT)_v = rho alpha Cv/(1-alpha)
-        // and (dh/dp)_T = v - T alpha Cv psi / (rho (1 - alpha)).
+        // (dh/dp)_T = v + T (dp/dT)_v/(dp/dv)_T, with xi = Cv/(1-alpha)
+        // from xi = Cv + v (dp/dT)_v and (dp/dT)_v = rho alpha xi.
         const scalar oneMa = max(1.0 - aF[i], small);
-        const scalar dhdp =
-            v - Tf[i]*aF[i]*cvF[i]*psiF[i]/(rho*oneMa);
+        const scalar dhdp = v - Tf[i]*aF[i]*cvF[i]*psiF[i]/(rho*oneMa);
 
-        // sum_k (dh/dY_k)_{T,v} DY_k/Dt
         const scalar B = dh + dhdp*A;
 
         S[i] = A - rho*aF[i]*B;
@@ -1779,6 +1840,7 @@ void Foam::solvers::peqsiFluid::updateCompositionSource
     if (every > 0 && (n++ % every) == 0)
     {
         Info<< "PEQSI composition source: max |S_Y| = " << sMax
-            << " Pa/s (dt*S_Y = " << sMax*dt << " Pa)" << endl;
+            << " Pa/s (dt*S_Y = " << sMax*mesh.time().deltaTValue()
+            << " Pa)" << endl;
     }
 }
