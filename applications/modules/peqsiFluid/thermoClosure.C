@@ -24,6 +24,7 @@ License
 \*---------------------------------------------------------------------------*/
 
 #include "peqsiFluid.H"
+#include "tabulatedRealGasMixture.H"
 #include "thermodynamicConstants.H"
 #include "fvcLaplacian.H"
 #include "zeroGradientFvPatchFields.H"
@@ -856,6 +857,8 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         alphaTab_.reset(new scalarField(Zf.size(), 0.0));
         betaTab_.reset(new scalarField(Zf.size(), 0.0));
         tabUsable_.reset(new boolList(Zf.size(), false));
+        cNormF_.reset(new scalarField(Zf.size(), 0.0));
+        dhF_.reset(new scalarField(Zf.size(), 0.0));
         Tguess_.reset(new scalarField(Zf.size(), 0.0));
     }
     scalarField& aTabF = alphaTab_();
@@ -919,6 +922,7 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         tbl.hasOptTable("W") ? &tbl.optTable("W") : nullptr;
     const List<scalar>& Ttbl = tbl.Ttable();
 
+
     const scalar Zdense =
         pimple.dict().lookupOrDefault<scalar>("peqsiZdense", 0.5);
 
@@ -935,6 +939,9 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         const scalar hMix = (1.0 - Zcl)*hOx + Zcl*hFuel;
         const scalar dh =
             hfld[celli] - hMix - (tbl.hasDhRef() ? tbl.interpolateDhRef(Zcl, gz, Ccl) : 0.0);
+
+        cNormF_()[celli] = Ccl;
+        dhF_()[celli] = dh;
 
         FGMTable::FGMStencil st;
         tbl.makeStencil(Zcl, gz, Ccl, dh, st);
@@ -1166,6 +1173,91 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         }
     }
     Info<< endl;
+
+    // Opt-1.  thermo_.correct() rebuilds a 106-species base-thermo blend per
+    // cell; under FPV the cell composition IS the table's node composition
+    // interpolated on this same 16-corner stencil, so by linearity
+    //   sum_corner w * nodeMix  ==  sum_species Y * thermo
+    // and the blend can be read off pre-blended manifold nodes instead
+    // (floating-point summation order apart).  This is the mixture-side
+    // machinery fgmFluid already runs in production; peqsiFluid never armed
+    // it.  Deferred to here, after the first pass has filled the stencil
+    // coordinate fields, so the very first lookup sees valid coordinates.
+    //
+    // Armed independently of Tier-2: that path needs RG_* coefficient blocks
+    // which this table does not carry, but Opt-1 needs only the internal-cell
+    // recovery reference.
+    if
+    (
+        !baseBlendArmed_
+     && pimple.dict().lookupOrDefault<Switch>("peqsiBaseBlend", false)
+    )
+    {
+        const tabulatedRealGasMixture* hook =
+            dynamic_cast<const tabulatedRealGasMixture*>(&thermo_);
+
+        if (!hook)
+        {
+            Info<< "PEQSI Opt-1: mixture does not implement "
+                << "tabulatedRealGasMixture -> live species blend retained"
+                << endl;
+            baseBlendArmed_ = true;   // do not retry every step
+        }
+        else
+        {
+            // The manifold tabulates a subset of the mixture's species (30
+            // of 106 here) and fgmClosure writes ONLY those; the rest are
+            // never touched, so their node value is whatever they were
+            // initialised to.  Zero is the physically right answer -- the
+            // manifold defines the composition and a species off it is
+            // absent -- but that is a claim about the case, not the table,
+            // so it is checked rather than assumed.
+            const wordList& sp = thermo_.species();
+            const PtrList<volScalarField>& Yall = thermo_.Y();
+            scalar Yoff = 0;
+            label nOff = 0;
+            forAll(sp, s)
+            {
+                if (!tbl.hasY(sp[s]))
+                {
+                    nOff++;
+                    Yoff = max(Yoff, max(mag(Yall[s].primitiveField())));
+                }
+            }
+            reduce(Yoff, maxOp<scalar>());
+
+            if (Yoff > 1e-10)
+            {
+                Info<< "PEQSI Opt-1: " << nOff << " mixture species are not "
+                    << "on the manifold and carry max |Y| = " << Yoff
+                    << " -> live species blend retained" << endl;
+            }
+            else
+            {
+                if (nOff > 0)
+                {
+                    Info<< "PEQSI Opt-1: " << nOff << " of " << sp.size()
+                        << " mixture species are off the manifold and"
+                        << " identically zero (max |Y| = " << Yoff
+                        << "); their node blend is exact" << endl;
+                }
+                List<List<scalar>> nodeY(sp.size());
+                forAll(sp, s)
+                {
+                    nodeY[s] =
+                        tbl.hasY(sp[s])
+                      ? tbl.Ynodes(sp[s])
+                      : List<scalar>(tbl.nTot(), scalar(0));
+                }
+                hook->armInternalRef(thermo_.Y()[0].primitiveField());
+                hook->enableBaseBlendTabulation
+                (
+                    nodeY, tbl, Zf, gZf, cNormF_(), dhF_()
+                );
+            }
+            baseBlendArmed_ = true;
+        }
+    }
 }
 
 

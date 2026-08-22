@@ -232,7 +232,16 @@ Foam::FGMTable::FGMTable
             "PEQSI_cv", "PEQSI_dpdT_v", "PEQSI_dpdv_T",
             "PEQSI_xi", "PEQSI_alpha", "PEQSI_beta",
             "PEQSI_dpdTn", "PEQSI_dpdvn", "PEQSI_betan",
-            "W"
+            "W",
+            // Chung/Takahashi transport as the tabulator baked it.
+            // NOT a substitute for the runtime mu/kappa: measured against
+            // the live mixture on the 2-D shear case they agree at the
+            // gas end (1.49e-5 vs 1.56e-5 Pa.s) and diverge by two orders
+            // at the cold dense end (0.284 vs 0.00133 Pa.s), where Z = 1
+            // decane sits below its freezing point and the two Chung
+            // implementations extrapolate differently.  Read for that
+            // comparison, not for consumption.
+            "mu", "kappa"
         };
         const label nNode = nZ_*nGz_*nC_*max(nChi_, 1);
 

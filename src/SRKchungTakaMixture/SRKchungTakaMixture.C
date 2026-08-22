@@ -1157,6 +1157,16 @@ void Foam::SRKchungTakaMixture<ThermoType>::enablePatchCoeffTabulation
 
 
 template<class ThermoType>
+void Foam::SRKchungTakaMixture<ThermoType>::armInternalRef
+(
+    const scalarField& refInternal
+) const
+{
+    refInternalField_ = &refInternal;
+}
+
+
+template<class ThermoType>
 void Foam::SRKchungTakaMixture<ThermoType>::enableBaseBlendTabulation
 (
     const List<List<scalar>>& nodeY,

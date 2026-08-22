@@ -180,6 +180,17 @@ protected:
         //  invertTemperature.
         autoPtr<scalarField> Tguess_;
 
+        //- Opt-1 stencil coordinates.  The mixture locates the 16 corner
+        //  node mixtures from these, so they must be the SAME values
+        //  fgmClosure feeds makeStencil: c normalised by Cnorm(Z), and
+        //  dh measured from the mixing line and the dhRef slice.
+        autoPtr<scalarField> cNormF_;
+        autoPtr<scalarField> dhF_;
+
+        //- Opt-1 armed (base-thermo blend read off the manifold nodes
+        //  instead of summed over the mixture species)
+        bool baseBlendArmed_ = false;
+
 
     // PEQSI real-gas coefficient fields (evaluated in thermoClosure)
 

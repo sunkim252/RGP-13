@@ -338,6 +338,13 @@ public:
             const List<List<const scalarField*>>& patchCoeffFields
         ) const;
 
+        //- Arm ONLY the internal-cell recovery reference, without enabling
+        //  the Tier-2 coefficient lookup.  Opt-1 keys off the recovered
+        //  cell index too, but a table that carries no RG_* coefficients
+        //  (peqsiFluid's) cannot arm Tier-2, and without this the
+        //  base-blend interpolation would be unreachable on such a table.
+        virtual void armInternalRef(const scalarField& refInternal) const;
+
         //- Opt-1: enable the base-thermo blend node interpolation.
         virtual void enableBaseBlendTabulation
         (

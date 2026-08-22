@@ -124,6 +124,9 @@ public:
         //  fields locate the stencil per recovered internal cell. Replaces the
         //  per-cell 106-species base blend with a 16-corner node blend. Default
         //  no-op: a backend that does not override keeps the live species blend.
+        //- Arm only the internal-cell recovery reference (no Tier-2)
+        virtual void armInternalRef(const scalarField&) const = 0;
+
         virtual void enableBaseBlendTabulation
         (
             const List<List<scalar>>& nodeY,
