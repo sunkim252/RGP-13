@@ -1283,6 +1283,14 @@ void Foam::solvers::peqsiFluid::fgmClosure()
     const scalar vGateTol =
         pimple.dict().lookupOrDefault<scalar>("peqsiManifoldVtol", 0.02);
 
+    const scalar pvMin =
+        pimple.dict().lookupOrDefault<scalar>("peqsiSourcePVMin", 0.0);
+    const scalar pvMax =
+        pimple.dict().lookupOrDefault<scalar>("peqsiSourcePVMax", 0.0);
+    const bool pvClipOn = (pvMin < 0.0 || pvMax > 0.0);
+    label nPvClip = 0;
+    label nTfloor = 0;
+
     const scalar Zdense =
         pimple.dict().lookupOrDefault<scalar>("peqsiZdense", 0.5);
 
@@ -1328,7 +1336,44 @@ void Foam::solvers::peqsiFluid::fgmClosure()
                 (*Yp[k])[celli] = tbl.interpolate(tbl.Ytable(spn[k]), st);
             }
         }
-        src[celli] = rhof[celli]*tbl.interpolate(tbl.sourcePVTable(), st);
+        // Diagnostic bound on the tabulated progress-variable source
+        // (peqsiSourcePVMin/Max, both 0 = off).  NOT a correctness guard
+        // -- binding it suppresses real physics.
+        //
+        // The table stores omega_c = omega_C/Cnorm(Z), because the axis
+        // is c = C/Cnorm(Z).  Cnorm goes to zero with Z, so the SAME
+        // physical reaction rate is amplified by 1/Cnorm, which reaches
+        // 130-630 at the low-Z edge.  Verified directly on both tables --
+        // undoing the normalisation lands every peak back in the physical
+        // range:
+        //
+        //     table          Z      1/Cnorm   max|src|   max|src|*Cnorm
+        //     dp2b      0.2354        1.6     9.40e+04      5.92e+04
+        //     dp6       0.0379       58.6     3.98e+05      6.80e+03
+        //     dp6       0.0735        7.1     2.87e+05      4.05e+04
+        //     dp6       0.2903        1.7     1.05e+05      6.33e+04
+        //
+        // So dp6's large low-Z source is physical.  At Z = 0.0379 dp2b
+        // carries 88.7 against dp6's 6803 unnormalised -- dp2b is
+        // under-representing low-Z reaction by 77x, not dp6 overshooting.
+        //
+        // The stiffness is therefore intrinsic to the normalised progress
+        // variable and cannot be tabulated away.  A CONSTANT bound is the
+        // wrong shape for it: it cuts hardest exactly where 1/Cnorm is
+        // largest and the physics is real.  A bound that had to exist
+        // would scale with 1/Cnorm(Z).
+        //
+        // What the switch is good for is the count below -- how many
+        // cells sit in the amplified low-Z band -- and for the A/B that
+        // established the above.  Off by default.
+        scalar pv = tbl.interpolate(tbl.sourcePVTable(), st);
+        if (pvClipOn)
+        {
+            const scalar pvRaw = pv;
+            pv = min(max(pv, pvMin), pvMax);
+            if (pv != pvRaw) nPvClip++;
+        }
+        src[celli] = rhof[celli]*pv;
 
         if (haveCoeffs && WT)
         {
@@ -1512,6 +1557,23 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         // linear (dT/dv)_h correction runs out well before the gate
         // does -- but the fallback catches it, and the cold 2-D case
         // sits at 4 K.
+        // T_FLOOR contamination counter.  add_enthalpy_axis.py fills
+        // unreachable dh nodes with 80 K on the assumption they are "a
+        // corner the CFD never visits".  The tabulation session measured
+        // that assumption failing: where dhRef is large an ordinary
+        // mixing state looks them up, and interpolating a physical node
+        // against an 80 K one puts T out by 139 K (measured at Z = 0.8).
+        // The defect is in every table built before 2026-08-23.
+        //
+        // A run cannot tell from its own output whether it entered that
+        // corner, so count it.  Anything the manifold returns below 100 K
+        // is either the floor itself or an interpolation against it --
+        // no state in these cases is legitimately that cold.
+        if (Ttab < 100.0)
+        {
+            nTfloor++;
+        }
+
         const scalar dTc = mag(Ttab - Tf[celli]);
         dT = max(dT, dTc);
 
@@ -1631,6 +1693,35 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         Yall[findIndex(thSp, spn[k])].correctBoundaryConditions();
     }
     sourceYc_().correctBoundaryConditions();
+
+    if (pvClipOn)
+    {
+        reduce(nPvClip, sumOp<label>());
+        label nAllPv = Zf.size();
+        reduce(nAllPv, sumOp<label>());
+        const label every =
+            pimple.dict().lookupOrDefault<label>("peqsiDiagInterval", 10);
+        static label nPv = 0;
+        if (every > 0 && (nPv++ % every) == 0)
+        {
+            Info<< "PEQSI sourcePV clip: " << nPvClip << "/" << nAllPv
+                << " cells bound to [" << pvMin << ", " << pvMax << "]"
+                << endl;
+        }
+    }
+
+    reduce(nTfloor, sumOp<label>());
+    if (nTfloor > 0)
+    {
+        label nAllT = Zf.size();
+        reduce(nAllT, sumOp<label>());
+        WarningInFunction
+            << nTfloor << "/" << nAllT << " cells read a manifold "
+            << "temperature below 100 K.  Tables built before 2026-08-23 "
+            << "fill unreachable enthalpy nodes with an 80 K floor, and "
+            << "interpolating against one is worth up to 139 K.  Results "
+            << "from those cells are not trustworthy." << endl;
+    }
 
     reduce(dAlpha, maxOp<scalar>());
     reduce(dBeta, maxOp<scalar>());
