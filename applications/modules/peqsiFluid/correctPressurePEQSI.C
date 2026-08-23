@@ -335,6 +335,46 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
     h_ = (rhoStar*hStar - (coef*hN_() - 1.0)*dp)/rho_;
     h_.correctBoundaryConditions();
 
+    // Where the acoustic step's energy goes.  Subtracting p^{n+1} from
+    // Eq. (24) gives d(rho e) = -coef h^n dp cell by cell, i.e. every
+    // cell's density change carries that cell's OWN enthalpy.  For a
+    // change of state that is right -- h drho is the isentropic answer.
+    // For mass MOVED between cells it is not: the mass leaving A arrives
+    // at B carrying h_B instead of h_A, so a redistribution that is
+    // exactly mass-neutral still books (h_B - h_A) dm of energy.  The
+    // two sums below separate those.  If dM is ~0 while dE is not, the
+    // leak is redistribution and no time-step refinement removes it --
+    // which is what the dt sweep showed (halving dt bought only 0.7x).
+    if (pimple.dict().lookupOrDefault<Switch>("peqsiStiffCensus", false))
+    {
+        const scalarField& dV = mesh.V();
+        const scalarField& cf = coef.primitiveField();
+        const scalarField& dpf = dp.primitiveField();
+        const scalarField& hf = hN_().primitiveField();
+
+        scalar dM = 0, dE = 0, dEabs = 0;
+        forAll(dpf, i)
+        {
+            dM -= cf[i]*dpf[i]*dV[i];
+            dE -= cf[i]*hf[i]*dpf[i]*dV[i];
+            dEabs += mag(cf[i]*hf[i]*dpf[i])*dV[i];
+        }
+        reduce(dM, sumOp<scalar>());
+        reduce(dE, sumOp<scalar>());
+        reduce(dEabs, sumOp<scalar>());
+
+        const label every =
+            pimple.dict().lookupOrDefault<label>("peqsiDiagInterval", 10);
+        static label nAc = 0;
+        if (every > 0 && (nAc++ % every) == 0)
+        {
+            Info<< "PEQSI acoustic ledger: d(mass) = " << dM
+                << " kg, d(rho e) = " << dE
+                << " J, cancellation = " << dE/max(dEabs, vSmall)
+                << endl;
+        }
+    }
+
     // Explicit selective filter on p and U (TK Sec. 2.7 family):
     // kills the 2-cell dp/velocity noise whose Eq. (23) kick otherwise
     // exceeds the local CFL in mature vortex fields (measured: dp 1e6

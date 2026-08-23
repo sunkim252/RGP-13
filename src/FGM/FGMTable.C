@@ -800,6 +800,23 @@ void Foam::FGMTable::interpolateRealGasCoeffs
 }
 
 
+void Foam::FGMTable::cInterval(scalar C, scalar& cLo, scalar& cHi) const
+{
+    if (C_axis_.size() <= 1)
+    {
+        cLo = cHi = (C_axis_.size() == 1 ? C_axis_[0] : C);
+        return;
+    }
+
+    label iC = 0;
+    scalar wC = 0;
+    bracket(C_axis_, C_buck_, C, iC, wC);
+
+    cLo = C_axis_[iC];
+    cHi = C_axis_[iC + 1];
+}
+
+
 // -------- Opt-1 base-blend node interpolation stencil --------
 
 void Foam::FGMTable::interpStencil

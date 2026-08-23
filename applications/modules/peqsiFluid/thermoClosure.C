@@ -382,6 +382,8 @@ void Foam::solvers::peqsiFluid::invertTemperature()
         label iter = 0;
         scalar maxRel = great;
         label nSaturated_ = 0;
+        label nStall_ = 0;
+        scalar stallTLo_ = 0, stallTHi_ = 0;
 
         const Switch constantV
         (
@@ -659,6 +661,17 @@ void Foam::solvers::peqsiFluid::invertTemperature()
             // (the constant-v branch's fallback loop already uses it).
             DynamicList<label> active(Tf.size()/4);
 
+            // Secant memory.  The fixed cp slope stalls exactly where
+            // the closure matters most: measured 2026-08-23, 11 cells at
+            // T = 165-179 K -- near-critical O2, where cp peaks through
+            // pseudo-boiling -- rode the warning for 913 of 1000 steps
+            // (S_Y off: zero).  cp there is both huge and fast-varying,
+            // so a slope evaluated once per step points the step wrong
+            // every iteration.  The secant slope costs nothing: it is
+            // built from the h evaluations the loop already pays for.
+            scalarField Tsec(Tf.size(), great);   // great = no history yet
+            scalarField hsec(Tf.size(), 0.0);
+
             // Take the temperature straight from the manifold wherever
             // the cell's specific volume still matches the table's.
             // Enthalpy is an AXIS of this table, so the tabulated T is
@@ -711,6 +724,9 @@ void Foam::solvers::peqsiFluid::invertTemperature()
 
                 forAll(Tf, i)
                 {
+                    Tsec[i] = Tf[i];
+                    hsec[i] = hkf[i];
+
                     scalar dT = (hf[i] - hkf[i])/max(cpf[i], small);
                     dT = min(max(dT, -dTmax), dTmax);
                     const scalar Tnew = Tf[i] + dT;
@@ -744,7 +760,20 @@ void Foam::solvers::peqsiFluid::invertTemperature()
                     forAll(active, m)
                     {
                         const label i = active[m];
-                        scalar dT = (hf[i] - hkf[m])/max(cpf[i], small);
+
+                        scalar slope = max(cpf[i], small);
+                        if (Tsec[i] < great && mag(Tf[i] - Tsec[i]) > small)
+                        {
+                            const scalar sec =
+                                (hkf[m] - hsec[i])/(Tf[i] - Tsec[i]);
+                            // h(T) rises with T; a non-positive secant is
+                            // table/EOS noise, keep the cp fallback.
+                            if (sec > small) slope = sec;
+                        }
+                        Tsec[i] = Tf[i];
+                        hsec[i] = hkf[m];
+
+                        scalar dT = (hf[i] - hkf[m])/slope;
                         dT = min(max(dT, -dTmax), dTmax);
                         const scalar Tnew = Tf[i] + dT;
 
@@ -764,6 +793,17 @@ void Foam::solvers::peqsiFluid::invertTemperature()
                 }
 
                 reduce(maxRel, maxOp<scalar>());
+            }
+
+            // Stall census for the warning below (active goes out of
+            // scope here): how many cells are still moving and in what
+            // temperature band.
+            nStall_ = active.size();
+            stallTLo_ = great; stallTHi_ = -great;
+            forAll(active, m)
+            {
+                stallTLo_ = min(stallTLo_, Tf[active[m]]);
+                stallTHi_ = max(stallTHi_, Tf[active[m]]);
             }
         }
 
@@ -786,25 +826,23 @@ void Foam::solvers::peqsiFluid::invertTemperature()
 
         if (maxRel > tol)
         {
+            // The bare maxRel cannot distinguish one pathological cell
+            // from a field-wide failure, and the failing runs only ever
+            // showed the number.  Say who is stalled: how many cells and
+            // in what temperature band.  (S_Y off: zero warnings in
+            // 1000 steps; S_Y on: a warning nearly every step -- the
+            // stall is driven by the dp kick moving h between closures.)
+            reduce(nStall_, sumOp<label>());
+            reduce(stallTLo_, minOp<scalar>());
+            reduce(stallTHi_, maxOp<scalar>());
+
             WarningInFunction
                 << "T Newton inversion not converged: maxRel = "
-                << maxRel << " after " << iter << " iterations" << endl;
+                << maxRel << " after " << iter << " iterations on "
+                << nStall_ << " cells, T in [" << stallTLo_ << ", "
+                << stallTHi_ << "] K" << endl;
         }
         Tw.correctBoundaryConditions();
-
-        if (nSaturated_ > 0)
-        {
-            reduce(nSaturated_, sumOp<label>());
-            Info<< "PEQSI thermo closure: " << nSaturated_
-                << " clamp-saturated Newton cell-iterations" << endl;
-        }
-
-        if (maxRel > tol)
-        {
-            WarningInFunction
-                << "T Newton inversion not converged: maxRel = "
-                << maxRel << " after " << iter << " iterations" << endl;
-        }
     }
 
     // The solver's continuity density rho_ is SEPARATE storage from the
@@ -1060,13 +1098,29 @@ void Foam::solvers::peqsiFluid::invertTemperature()
             const scalar eMean = mag(E0_)/max(Vt, vSmall);
             scalar dMax = 0;
             label iMax = -1;
+            // Relative twin of the absolute metric.  |rho e| spans two
+            // orders across the domain (dense fuel 1.45e9 J/m3 against
+            // 8.3e6 at low Z, measured 2026-08-23 on this table), so the
+            // mean-normalised maximum always lands on the fuel side no
+            // matter where the defect is -- a 0.5% error there outranks
+            // 20% at Z_st.  The per-cell relative maximum is the one
+            // that can actually point somewhere.
+            scalar rMax = 0;
+            label iRel = -1;
             forAll(re, i)
             {
                 const scalar d = mag(re[i] - reInit_()[i])/max(eMean, vSmall);
                 if (d > dMax) { dMax = d; iMax = i; }
+
+                const scalar r =
+                    mag(re[i] - reInit_()[i])
+                   /max(mag(reInit_()[i]), small*eMean);
+                if (r > rMax) { rMax = r; iRel = i; }
             }
             const scalar dMaxL = dMax;
+            const scalar rMaxL = rMax;
             reduce(dMax, maxOp<scalar>());
+            reduce(rMax, maxOp<scalar>());
 
             const label every =
                 pimple.dict().lookupOrDefault<label>("peqsiDiagInterval", 10);
@@ -1080,6 +1134,13 @@ void Foam::solvers::peqsiFluid::invertTemperature()
                 {
                     Pout<< "    worst at " << mesh.C()[iMax]
                         << "  rho e " << reInit_()[iMax] << " -> " << re[iMax]
+                        << endl;
+                }
+                if (iRel >= 0 && rMaxL == rMax)
+                {
+                    Pout<< "    worst relative " << rMax << " at "
+                        << mesh.C()[iRel]
+                        << "  rho e " << reInit_()[iRel] << " -> " << re[iRel]
                         << endl;
                 }
             }
@@ -1283,6 +1344,9 @@ void Foam::solvers::peqsiFluid::fgmClosure()
     const scalar vGateTol =
         pimple.dict().lookupOrDefault<scalar>("peqsiManifoldVtol", 0.02);
 
+    const scalar sinkScale =
+        pimple.dict().lookupOrDefault<scalar>("peqsiSinkScale", 1.0);
+
     const scalar pvMin =
         pimple.dict().lookupOrDefault<scalar>("peqsiSourcePVMin", 0.0);
     const scalar pvMax =
@@ -1290,9 +1354,43 @@ void Foam::solvers::peqsiFluid::fgmClosure()
     const bool pvClipOn = (pvMin < 0.0 || pvMax > 0.0);
     label nPvClip = 0;
     label nTfloor = 0;
+    label nStiff1 = 0, nStiff2 = 0, nStiff3 = 0;
+    scalar subMax = 0;
+    const scalar dtChem = mesh.time().deltaTValue();
 
     const scalar Zdense =
         pimple.dict().lookupOrDefault<scalar>("peqsiZdense", 0.5);
+
+    // Progress-variable clamp census.  The table builder was found on
+    // 2026-08-23 to have wiped omega_c to exactly zero over c >~ 0.94 (a
+    // window MAX that admitted the c=1 zero row as a candidate), deleting
+    // the near-equilibrium SINK that pulls c back down.  Without it c has
+    // nothing to stop it piling up against the c=1 clamp, which is an
+    // ACCUMULATING failure -- invisible early, violent late.  That matches
+    // this solver's divergence shape (step 1 dp +-0.4 Pa, step 176 +-6.5
+    // kPa, then runaway) better than any instantaneous stiffness does.
+    //
+    // Outcome alone cannot confirm the mechanism: a new table that simply
+    // runs is consistent with several stories.  The pile-up is the part
+    // that is specific to this one, so measure it directly -- the count
+    // above the wiped band and the count actually hitting the clamp.
+    label nHiC = 0, nClampC = 0;
+    label nNegPv = 0, nHiBand = 0, nHiNegPv = 0;
+    // Where the highest c sits.  The restored sink's strength varies
+    // with Z, so the plateau height should too -- a global max alone
+    // cannot show that, and the Z-dependence is what makes the sink
+    // the explanation rather than a coincidence.
+    scalar zAtCmax = 0, cMaxLoZ = 0, cMaxHiZ = 0;
+    // Bin by c, not by a single c >= 0.94 lump.  The restored sink lives
+    // in [0.94, 1) -- at c = 1 the source is zero by construction, that
+    // row being equilibrium.  A cell whose raw c has passed 1 is clamped
+    // onto that row and therefore CANNOT be pulled back: it no longer
+    // looks up the sink that would decelerate it.  So the lump count
+    // conflates two opposite situations -- a cell sitting in the sink
+    // and a cell that escaped past it -- and only the split says whether
+    // the fix is reaching cells at all or merely reaching them too late.
+    label nBand1 = 0, nBand1Neg = 0, nBand2 = 0, nOver = 0;
+    scalar cRawMax = 0;
 
     forAll(Zf, celli)
     {
@@ -1300,8 +1398,17 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         const scalar gz = max(gZf[celli], 0.0);
 
         const scalar Cn = tbl.hasCnorm() ? tbl.interpolateCnorm(Zcl) : 1.0;
-        const scalar Ccl =
-            min(max(Ycf[celli]/max(Cn, small), 0.0), 1.0);
+        const scalar cRaw = Ycf[celli]/max(Cn, small);
+        const scalar Ccl = min(max(cRaw, 0.0), 1.0);
+
+        if (cRaw >= 0.94) nHiC++;
+        if (cRaw > 1.0) nClampC++;
+        if (cRaw > cRawMax) { cRawMax = cRaw; zAtCmax = Zcl; }
+        if (cRaw >= 0.94 && cRaw < 0.99) nBand1++;
+        else if (cRaw >= 0.99 && cRaw <= 1.0) nBand2++;
+        else if (cRaw > 1.0) nOver++;
+        if (Zcl < 0.31) { if (cRaw > cMaxLoZ) cMaxLoZ = cRaw; }
+        else            { if (cRaw > cMaxHiZ) cMaxHiZ = cRaw; }
 
         // dh with the dh = 0 slice reference (see FGMTable.H)
         const scalar hMix = (1.0 - Zcl)*hOx + Zcl*hFuel;
@@ -1367,6 +1474,19 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         // cells sit in the amplified low-Z band -- and for the A/B that
         // established the above.  Off by default.
         scalar pv = tbl.interpolate(tbl.sourcePVTable(), st);
+
+        // DIAGNOSTIC ONLY -- never for production.  The table builder picks
+        // the combustion branch by taking the MAX over a window, which is
+        // right for a positive source but selects the WEAKEST sink once the
+        // whole window is negative.  Measured 2026-08-23: the near-
+        // equilibrium sink is tabulated 40-390x weaker than the flamelet
+        // median over Z = 0.031-0.066.  Rebuilding the table to fix that
+        // costs a bake, so scale the negative branch here first and see
+        // whether a sink of the right ORDER actually stops c -- if it does
+        // not, the table is exonerated and the bake would have been wasted.
+        // Default 1 leaves the table untouched.
+        if (pv < 0 && sinkScale != 1.0) pv *= sinkScale;
+
         if (pvClipOn)
         {
             const scalar pvRaw = pv;
@@ -1374,6 +1494,33 @@ void Foam::solvers::peqsiFluid::fgmClosure()
             if (pv != pvRaw) nPvClip++;
         }
         src[celli] = rhof[celli]*pv;
+
+        // Chemical-stiffness census.  Dc/Dt = sourcePV/Cnorm is a
+        // POINTWISE ODE -- no spatial coupling -- so how many cells are
+        // under-resolved, and by how much, decides whether the fix has to
+        // be global (a dt limit everyone pays for) or local (sub-cycling
+        // only the stiff cells).
+        {
+            const scalar DcDt = pv/max(Cn, small);
+            const scalar frac = mag(DcDt)*dtChem/max(Ccl, 1e-3);
+            if (frac > 0.1) nStiff1++;
+            if (frac > 1.0) nStiff2++;
+            if (frac > 10.0) nStiff3++;
+            subMax = max(subMax, frac);
+
+            // Near-equilibrium SINK census.  The pile-up at the c=1 clamp
+            // is a missing sink, so counting cells that actually receive
+            // one separates "c cannot come back" from "c is not being
+            // pushed".  Split at c >= 0.94 because that is the band the
+            // builder's window MAX wiped to exactly zero.
+            if (pv < 0) nNegPv++;
+            if (pv < 0 && Ccl >= 0.94 && Ccl < 0.99) nBand1Neg++;
+            if (Ccl >= 0.94)
+            {
+                nHiBand++;
+                if (pv < 0) nHiNegPv++;
+            }
+        }
 
         if (haveCoeffs && WT)
         {
@@ -1594,8 +1741,13 @@ void Foam::solvers::peqsiFluid::fgmClosure()
     // and two Y writes per step; affordable since Opt-1/Tier-2.
     if (pimple.dict().lookupOrDefault<Switch>("peqsiCompSource", false))
     {
+        // A POSITIVE value here restores the old fixed-step difference and
+        // is kept only to re-run the convergence diagnostic that condemned
+        // it (see FGMTable::cInterval).  The default 0 means "difference
+        // across the c node interval", which is the interpolant's exact
+        // local slope and cannot depend on a step the user picked.
         const scalar dc =
-            pimple.dict().lookupOrDefault<scalar>("peqsiCompSourceDc", 0.01);
+            pimple.dict().lookupOrDefault<scalar>("peqsiCompSourceDc", 0.0);
 
         if (!dYdcRho_.valid())
         {
@@ -1653,7 +1805,23 @@ void Foam::solvers::peqsiFluid::fgmClosure()
 
         forAll(Zf, celli)
         {
-            cNormF_()[celli] = min(max(cSave[celli] + dc, 0.0), 1.0);
+            if (dc > 0)
+            {
+                cNormF_()[celli] = min(max(cSave[celli] + dc, 0.0), 1.0);
+                continue;
+            }
+
+            // Land on the far end of this cell's own c node interval.  Both
+            // ends and the cell's c lie in one linear piece, so the slope
+            // measured from c to that end equals the slope across the whole
+            // interval -- no need to re-evaluate the low end.  When c sits
+            // exactly on the upper node the step would vanish, so step down
+            // instead; the interpolant is continuous, only its slope jumps.
+            scalar cLo, cHi;
+            tbl.cInterval(cSave[celli], cLo, cHi);
+            const scalar cPert =
+                (cHi - cSave[celli] > small) ? cHi : cLo;
+            cNormF_()[celli] = min(max(cPert, 0.0), 1.0);
         }
 
         if (needH) h1 = thermo_.he(p_, thermo_.T())().primitiveField();
@@ -1707,6 +1875,49 @@ void Foam::solvers::peqsiFluid::fgmClosure()
             Info<< "PEQSI sourcePV clip: " << nPvClip << "/" << nAllPv
                 << " cells bound to [" << pvMin << ", " << pvMax << "]"
                 << endl;
+        }
+    }
+
+    if (pimple.dict().lookupOrDefault<Switch>("peqsiStiffCensus", false))
+    {
+        reduce(nStiff1, sumOp<label>());
+        reduce(nStiff2, sumOp<label>());
+        reduce(nStiff3, sumOp<label>());
+        reduce(subMax, maxOp<scalar>());
+        label nAllS = Zf.size();
+        reduce(nAllS, sumOp<label>());
+        const label every =
+            pimple.dict().lookupOrDefault<label>("peqsiDiagInterval", 10);
+        static label nS = 0;
+        if (every > 0 && (nS++ % every) == 0)
+        {
+            reduce(nHiC, sumOp<label>());
+            reduce(nClampC, sumOp<label>());
+            reduce(cRawMax, maxOp<scalar>());
+            reduce(cMaxLoZ, maxOp<scalar>());
+            reduce(cMaxHiZ, maxOp<scalar>());
+            reduce(nNegPv, sumOp<label>());
+            reduce(nHiBand, sumOp<label>());
+            reduce(nHiNegPv, sumOp<label>());
+            reduce(nBand1, sumOp<label>());
+            reduce(nBand1Neg, sumOp<label>());
+            reduce(nBand2, sumOp<label>());
+            reduce(nOver, sumOp<label>());
+            Info<< "PEQSI c bins: [0.94,0.99) " << nBand1
+                << " (sink on " << nBand1Neg << "), [0.99,1] " << nBand2
+                << ", >1 " << nOver << endl;
+            Info<< "PEQSI sink census: omega_c < 0 on " << nNegPv
+                << "/" << nAllS << " cells; within c >= 0.94 band "
+                << nHiNegPv << "/" << nHiBand << endl;
+            Info<< "PEQSI c census: c >= 0.94 on " << nHiC
+                << ", clamped (c > 1) on " << nClampC << "/" << nAllS
+                << ", max raw c = " << cRawMax
+                << " at Z = " << zAtCmax
+                << " | max c: Z<0.31 " << cMaxLoZ
+                << ", Z>=0.31 " << cMaxHiZ << endl;
+            Info<< "PEQSI stiffness: |Dc/Dt| dt / c  > 0.1 on " << nStiff1
+                << ", > 1 on " << nStiff2 << ", > 10 on " << nStiff3
+                << " of " << nAllS << " cells; worst " << subMax << endl;
         }
     }
 
@@ -2286,6 +2497,20 @@ void Foam::solvers::peqsiFluid::updateCompositionSource()
 
     scalar sMax = 0;
     scalar aPk = 0, bPk = 0, hPk = 0, dpk = 0, rPk = 0;
+    label nSy1 = 0, nSy10 = 0, nSy100 = 0;
+    scalar sFracMax = 0;
+    const scalar dtCs = mesh.time().deltaTValue();
+    const scalarField& pF = p_.primitiveField();
+    // Cnorm cancellation probe.  c = Yc/Cnorm(Z), so dRdc = Cnorm dRho/dYc
+    // and DcDt = (dYc/dt)/Cnorm: the product that enters A is Cnorm-free by
+    // construction.  If the peak of |S_Y| nonetheless sits at low Z -- where
+    // Cnorm is smallest -- then the cancellation is NOT happening and the
+    // normalisation is amplifying the source rather than dividing out.
+    // Reporting Cnorm and dRdc/Cnorm at the peak settles which it is: the
+    // ratio is the physical dRho/dYc and should be O(1) across Z.
+    const scalarField& Zpk = Z_().primitiveField();
+    scalar zPk = 0, cnPk = 0, dcPk = 0;
+    scalar rhoPk = 0, TPk = 0, psiPk = 0;
     forAll(S, i)
     {
         const scalar rho = max(rf[i], small);
@@ -2322,27 +2547,64 @@ void Foam::solvers::peqsiFluid::updateCompositionSource()
         // the (dh/dY)_{T,v} evaluation; if it is not, the problem is that
         // a source this stiff does not belong in an explicit RK stage.
         S[i] = pressureOnly ? A : (A - rho*aF[i]*B);
+
+        // How much of the LOCAL pressure one step of this source asks
+        // for.  The peak alone cannot say whether the scheme is being
+        // asked something unreasonable in one cell or everywhere, and
+        // that is the difference between a local pathology and a step
+        // size that does not fit the physics.
+        {
+            const scalar frac = mag(S[i])*dtCs/max(pF[i], vSmall);
+            if (frac > 0.01) nSy1++;
+            if (frac > 0.10) nSy10++;
+            if (frac > 1.00) nSy100++;
+            sFracMax = max(sFracMax, frac);
+        }
+
         if (mag(S[i]) > sMax)
         {
             sMax = mag(S[i]);
-            aPk = A; bPk = -rho*aF[i]*B; hPk = dh; dpk = dhdp; rPk = dRho;
+            aPk = A; bPk = -rho*aF[i]*B; hPk = dh; dpk = dhdp;
+            rPk = dRdc[i];
+            zPk = Zpk[i]; cnPk = cn[i]; dcPk = DcDt;
+            rhoPk = rho; TPk = Tf[i]; psiPk = psiF[i];
         }
     }
 
     sourceP_().correctBoundaryConditions();
 
     reduce(sMax, maxOp<scalar>());
+    reduce(nSy1, sumOp<label>());
+    reduce(nSy10, sumOp<label>());
+    reduce(nSy100, sumOp<label>());
+    reduce(sFracMax, maxOp<scalar>());
     const label every =
         pimple.dict().lookupOrDefault<label>("peqsiDiagInterval", 10);
     static label n = 0;
     if (every > 0 && (n++ % every) == 0)
     {
-        Info<< "PEQSI composition source: max |S_Y| = " << sMax
+        Info<< "PEQSI S_Y vs p: dt|S_Y|/p > 1% on " << nSy1
+            << ", > 10% on " << nSy10
+            << ", > 100% on " << nSy100
+            << " of " << returnReduce(S.size(), sumOp<label>())
+            << " cells; worst " << sFracMax << nl
+            << "PEQSI composition source: max |S_Y| = " << sMax
             << " Pa/s (dt*S_Y = " << sMax*mesh.time().deltaTValue()
             << " Pa)" << nl
             << "PEQSI S_Y split: A(pressure) = " << aPk
             << ", -rho*alpha*B(enthalpy) = " << bPk
             << " | dh/dt = " << hPk << ", dh/dp|T = " << dpk
-            << ", drho/dt = " << rPk << endl;
+            << ", drho/dt = " << rPk << nl
+            << "PEQSI S_Y peak cell: Z = " << zPk
+            << ", Cnorm = " << cnPk
+            << ", Dc/Dt = " << dcPk
+            << ", drho/dc = " << rPk
+            << " | drho/dYc = drho/dc/Cnorm = "
+            << rPk/max(cnPk, vSmall) << nl
+            << "PEQSI S_Y peak EOS: rho = " << rhoPk
+            << ", T = " << TPk
+            << ", psi = " << psiPk
+            << ", c_sound = " << sqrt(1.0/max(rhoPk*psiPk, vSmall))
+            << " m/s" << endl;
     }
 }

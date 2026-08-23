@@ -790,6 +790,64 @@ void Foam::solvers::peqsiFluid::advectManifoldStage
     stageOne(Zvar_(), ZvarN_(), "div(phiv,Zvar)", nullptr);
     stageOne(Yc_(), YcN_(), "div(phiv,Yc)", &sourceYc_());
 
+    // Realizability on Yc, not on c.  The table axis is c = Yc/Cnorm(Z),
+    // and Cnorm falls to 1.59e-3 at Z = 0, so an absolute Yc error of
+    // 1e-4 -- ordinary transport noise -- lands as dc = 0.063 there
+    // against dc = 4e-4 at Z = 0.1.  Clamping c does the arithmetic in
+    // that ill-conditioned variable and, worse, leaves the transported
+    // Yc infeasible: measured 2026-08-23 on dp8lo, a pure-oxidiser cell
+    // reached c = 4.31, i.e. Yc = 6.9e-3 of combustion products in a
+    // cell holding no fuel, and the run died there.  Yc <= Cnorm(Z) is
+    // the same set of states expressed in the well-conditioned
+    // variable, and it leaves the c axis definition untouched so every
+    // existing table stays valid.
+    if
+    (
+        pimple.dict().lookupOrDefault<Switch>("peqsiBoundYc", true)
+     && fgmTable_.valid() && fgmTable_().hasCnorm()
+    )
+    {
+        const scalarField& Zf = Z_().primitiveField();
+        scalarField& Ycf = Yc_().primitiveFieldRef();
+        label nLo = 0, nHi = 0;
+        scalar worst = 0;
+
+        forAll(Ycf, i)
+        {
+            const scalar Cn =
+                fgmTable_().interpolateCnorm(min(max(Zf[i], 0.0), 1.0));
+
+            if (Ycf[i] < 0) nLo++;
+            if (Ycf[i] > Cn)
+            {
+                nHi++;
+                worst = max(worst, Ycf[i]/max(Cn, small));
+            }
+            Ycf[i] = min(max(Ycf[i], 0.0), Cn);
+        }
+        Yc_().correctBoundaryConditions();
+
+        // Once this clamp is on, the c census can no longer report c > 1
+        // -- it is the same bound seen from the other side -- so the
+        // violation count has to be reported from here or it goes dark.
+        if (pimple.dict().lookupOrDefault<Switch>("peqsiStiffCensus", false))
+        {
+            reduce(nLo, sumOp<label>());
+            reduce(nHi, sumOp<label>());
+            reduce(worst, maxOp<scalar>());
+
+            const label every =
+                pimple.dict().lookupOrDefault<label>("peqsiDiagInterval", 10);
+            static label nYc = 0;
+            if (every > 0 && (nYc++ % every) == 0 && (nLo || nHi))
+            {
+                Info<< "PEQSI Yc realizability: below 0 on " << nLo
+                    << ", above Cnorm(Z) on " << nHi
+                    << " cells; worst Yc/Cnorm = " << worst << endl;
+            }
+        }
+    }
+
     // Bounding diffusivity on Z (explicit, inside the stage): inactive
     // on a bounded field, O(dx) strength where an excursion exists
     if (pimple.dict().lookupOrDefault<Switch>("peqsiBoundZ", true))

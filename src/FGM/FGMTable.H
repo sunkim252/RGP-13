@@ -362,6 +362,25 @@ public:
             //- The 4th-axis coordinate a legacy 3-D query collapses to.
             inline scalar chi0() const { return chi_axis_[0]; }
 
+            //- The c-axis node interval bracketing C: [cLo, cHi].
+            //  The manifold is piecewise-linear in c between two nodes, so a
+            //  difference taken across this interval IS the interpolant's
+            //  local slope -- exactly, not approximately.  A free-parameter
+            //  step is not equivalent: where the table is steep in c the
+            //  slope jumps at the nodes, and a step small enough to sit
+            //  inside one interval measures a different number than one that
+            //  spans several.  Measured 2026-08-23 at a matched state,
+            //  shrinking a fixed step from 0.02 to 0.00125 moved the
+            //  derivative by ~8% -- small, but it is 8% of arbitrariness
+            //  that no one can defend a value for.  (An earlier reading of
+            //  the same sweep claimed the derivative diverged as 1/dc; that
+            //  compared max|S_Y| over whole runs which had already drifted
+            //  to different states, so it compared different flows, not
+            //  different steps.)  The node interval is the finest structure
+            //  the table actually carries, so asking for a slope below it
+            //  asks for information that is not there.
+            void cInterval(scalar C, scalar& cLo, scalar& cHi) const;
+
             //- Opt-1 (base-blend node interpolation): return the 16 surrounding
             //  manifold node flat indices and their quadrilinear weights for
             //  (Z,gZ,C,chi). nodes[m] and weights[m], m=0..15; sum(weights)=1.
