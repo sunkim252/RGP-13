@@ -25,7 +25,254 @@ License
 
 #include "FGMTable.H"
 #include <cmath>
+#include <cstdlib>
+#include <cstdint>
+#include <fstream>
 #include "tabulatedRealGasMixture.H"
+#include "IFstream.H"
+#include "OFstream.H"
+#include "OSspecific.H"
+#include "Pstream.H"
+
+// * * * * * * * * * * * * Binary sidecar cache  * * * * * * * * * * * * * * //
+
+namespace
+{
+    // Bump on any format change: an old-format .bin must read as invalid.
+    const char fgmBinMagic[8] = {'F','G','M','B','I','N','0','1'};
+
+    struct FGMBinHeader
+    {
+        char magic[8];
+        int64_t srcSize;
+        int64_t srcMTime;
+        int32_t nBlocks;
+    };
+
+    bool readBinHeader(const Foam::fileName& bin, FGMBinHeader& h)
+    {
+        std::ifstream is(bin.c_str(), std::ios::binary);
+        if (!is) return false;
+        is.read(reinterpret_cast<char*>(&h), sizeof(h));
+        return bool(is);
+    }
+}
+
+
+Foam::fileName Foam::FGMTable::resolvedDictPath
+(
+    const fvMesh& mesh,
+    const word& dictName
+)
+{
+    // In a decomposed run Time::path() is <case>/processorN while the
+    // table lives in the undecomposed <case>/constant -- try both.
+    for
+    (
+        const fileName& p :
+        {
+            mesh.time().path()/mesh.time().constant()/dictName,
+            mesh.time().path()/".."/mesh.time().constant()/dictName
+        }
+    )
+    {
+        char buf[4096];
+        if (::realpath(p.c_str(), buf))
+        {
+            return fileName(buf);
+        }
+    }
+    return mesh.time().path()/mesh.time().constant()/dictName;
+}
+
+
+bool Foam::FGMTable::probeCache(const fileName& src)
+{
+    if (!isFile(src) || !isFile(src + ".stub") || !isFile(src + ".bin"))
+    {
+        return false;
+    }
+
+    FGMBinHeader h;
+    if (!readBinHeader(src + ".bin", h)) return false;
+
+    return
+        memcmp(h.magic, fgmBinMagic, 8) == 0
+     && h.srcSize == int64_t(Foam::fileSize(src))
+     && h.srcMTime == int64_t(Foam::lastModified(src))
+     && h.nBlocks >= 0;
+}
+
+
+void Foam::FGMTable::loadCacheBin()
+{
+    const fileName bin(cacheSrc_ + ".bin");
+    std::ifstream is(bin.c_str(), std::ios::binary);
+
+    FGMBinHeader h;
+    is.read(reinterpret_cast<char*>(&h), sizeof(h));
+
+    for (int32_t b = 0; b < h.nBlocks && is; b++)
+    {
+        int32_t klen = 0;
+        is.read(reinterpret_cast<char*>(&klen), sizeof(klen));
+        if (!is || klen <= 0 || klen > 256) break;
+        std::string k(klen, '\0');
+        is.read(&k[0], klen);
+        int64_t n = 0;
+        is.read(reinterpret_cast<char*>(&n), sizeof(n));
+        if (!is || n < 0) break;
+        List<scalar> block(static_cast<label>(n));
+        is.read
+        (
+            reinterpret_cast<char*>(block.begin()),
+            std::streamsize(n)*std::streamsize(sizeof(scalar))
+        );
+        if (!is) break;
+        cacheBlocks_.insert(word(k), move(block));
+    }
+
+    if (!is || cacheBlocks_.size() != label(h.nBlocks))
+    {
+        // A truncated bin must not half-load: fall back to the parse.
+        FatalErrorInFunction
+            << "binary table cache " << bin << " is truncated ("
+            << cacheBlocks_.size() << " of " << h.nBlocks
+            << " blocks) -- delete it and rerun" << exit(FatalError);
+    }
+
+    Info<< "    binary table cache HIT: " << bin.name() << " ("
+        << h.nBlocks << " blocks)" << endl;
+}
+
+
+Foam::List<Foam::scalar> Foam::FGMTable::readBig(const word& key)
+{
+    if (cacheActive_)
+    {
+        auto iter = cacheBlocks_.find(key);
+        if (iter == cacheBlocks_.end())
+        {
+            FatalErrorInFunction
+                << "block '" << key << "' missing from the binary table "
+                << "cache " << cacheSrc_ + ".bin"
+                << " -- delete the .bin/.stub sidecars and rerun"
+                << exit(FatalError);
+        }
+        List<scalar> block(move(iter()));
+        cacheBlocks_.erase(iter);
+        return block;
+    }
+    return List<scalar>(lookup(key));
+}
+
+
+bool Foam::FGMTable::foundBig(const word& key) const
+{
+    return cacheActive_ ? cacheBlocks_.found(key) : found(key);
+}
+
+
+void Foam::FGMTable::writeCache() const
+{
+    if (!Pstream::master()) return;
+
+    // Every node-count-length array, enumerated from the MEMBERS the
+    // parse filled -- by construction exactly the set readBig serves.
+    DynamicList<word> keys;
+    DynamicList<const List<scalar>*> blocks;
+    auto add = [&](const word& k, const List<scalar>& b)
+    {
+        if (b.size()) { keys.append(k); blocks.append(&b); }
+    };
+    add("sourcePV", sourcePV_);
+    add("T", T_table_);
+    add("psisTab", psis_table_);
+    add("dhRef", dhRef_table_);
+    forAllConstIter(HashTable<List<scalar>>, optTables_, iter)
+    {
+        add(iter.key(), iter());
+    }
+    forAllConstIter(HashTable<List<scalar>>, Y_tables_, iter)
+    {
+        add("Y_" + iter.key(), iter());
+    }
+    if (RGcoeff_.size())
+    {
+        const wordList& cn = tabulatedRealGasMixture::coeffNames();
+        forAll(RGcoeff_, k) add("RG_" + cn[k], RGcoeff_[k]);
+    }
+    forAllConstIter(HashTable<List<scalar>>, Le_tables_, iter)
+    {
+        add("Le_" + iter.key(), iter());
+    }
+
+    // --- <src>.bin : header + raw blocks, written to .tmp then renamed
+    {
+        const fileName tmp(cacheSrc_ + ".bin.tmp");
+        std::ofstream os(tmp.c_str(), std::ios::binary);
+        if (!os)
+        {
+            WarningInFunction
+                << "cannot write " << tmp << " -- table cache disabled "
+                << "(directory not writable?)" << endl;
+            return;
+        }
+
+        FGMBinHeader h;
+        memcpy(h.magic, fgmBinMagic, 8);
+        h.srcSize = int64_t(Foam::fileSize(cacheSrc_));
+        h.srcMTime = int64_t(Foam::lastModified(cacheSrc_));
+        h.nBlocks = int32_t(keys.size());
+        os.write(reinterpret_cast<const char*>(&h), sizeof(h));
+
+        forAll(keys, b)
+        {
+            const int32_t klen = int32_t(keys[b].size());
+            os.write(reinterpret_cast<const char*>(&klen), sizeof(klen));
+            os.write(keys[b].c_str(), klen);
+            const int64_t n = int64_t(blocks[b]->size());
+            os.write(reinterpret_cast<const char*>(&n), sizeof(n));
+            os.write
+            (
+                reinterpret_cast<const char*>(blocks[b]->begin()),
+                std::streamsize(n)*std::streamsize(sizeof(scalar))
+            );
+        }
+        if (!os) { WarningInFunction << "short write on " << tmp << endl; return; }
+        os.close();
+        Foam::mv(tmp, cacheSrc_ + ".bin");
+    }
+
+    // --- <src>.stub : the dictionary minus the big blocks
+    {
+        wordHashSet big;
+        forAll(keys, b) big.insert(keys[b]);
+
+        dictionary stub;
+        forAllConstIter(dictionary, *this, iter)
+        {
+            if (!big.found(iter().keyword()))
+            {
+                stub.add(iter());
+            }
+        }
+
+        const fileName tmp(cacheSrc_ + ".stub.tmp");
+        OFstream os(tmp);
+        stub.write(os, false);
+        if (!os.good())
+        {
+            WarningInFunction << "short write on " << tmp << endl;
+            return;
+        }
+        Foam::mv(tmp, cacheSrc_ + ".stub");
+    }
+
+    Info<< "    binary table cache written: " << cacheSrc_.name()
+        << ".bin/.stub (" << keys.size() << " blocks)" << endl;
+}
+
 
 // * * * * * * * * * * * * * * * * Constructors  * * * * * * * * * * * * * * //
 
@@ -51,27 +298,45 @@ Foam::FGMTable::FGMTable
             dictName,
             mesh.time().constant(),
             mesh,
-            IOobject::MUST_READ_IF_MODIFIED,
+            // With a valid sidecar cache the 388 MB parse is skipped
+            // entirely: the base reads nothing, and the body merges the
+            // small .stub dictionary before any lookup runs.
+            probeCache(resolvedDictPath(mesh, dictName))
+              ? IOobject::NO_READ
+              : IOobject::MUST_READ_IF_MODIFIED,
             IOobject::NO_WRITE
         )
     ),
     mesh_(mesh),
-    nZ_(readLabel(lookup("nZ"))),
-    nGz_(readLabel(lookup("nGz"))),
-    nC_(readLabel(lookup("nC"))),
     nChi_(1),
     hasChi_(false),
     useEnthalpy_(false),
     useDilution_(false),
     hOx_(0),
     hFuel_(0),
-    Z_axis_(lookup("Z")),
-    gZ_axis_(lookup("gZ")),
-    C_axis_(lookup("C")),
     chi_axis_(1, scalar(0))
 {
     Info<< "\nFGM (FPV + beta-PDF) table initialisation [" << dictName
         << "]" << endl;
+
+    // Sidecar cache: probe again (cheap -- two stats and a 24-byte
+    // header) and, on a hit, merge the stub so every dictionary lookup
+    // below and in the consumers behaves exactly as after a full parse.
+    cacheSrc_ = resolvedDictPath(mesh, dictName);
+    cacheActive_ = probeCache(cacheSrc_);
+    if (cacheActive_)
+    {
+        IFstream is(cacheSrc_ + ".stub");
+        merge(dictionary(is));
+        loadCacheBin();
+    }
+
+    nZ_ = readLabel(lookup("nZ"));
+    nGz_ = readLabel(lookup("nGz"));
+    nC_ = readLabel(lookup("nC"));
+    Z_axis_ = List<scalar>(lookup("Z"));
+    gZ_axis_ = List<scalar>(lookup("gZ"));
+    C_axis_ = List<scalar>(lookup("C"));
 
     // -------- optional chi (scalar-dissipation) axis --------
     if (found("nChi"))
@@ -123,9 +388,9 @@ Foam::FGMTable::FGMTable
         // Adiabatic-enthalpy offset (optional; see FGMTable.H). Without it the
         // solver keeps the legacy mixing-line reference, which is exact only
         // for a unity-Lewis manifold.
-        if (found("dhRef"))
+        if (foundBig("dhRef"))
         {
-            dhRef_table_ = List<scalar>(lookup("dhRef"));
+            dhRef_table_ = readBig("dhRef");
             const label nTot = nZ_*nGz_*nC_*nChi_;
             if (dhRef_table_.size() != nTot)
             {
@@ -253,9 +518,9 @@ Foam::FGMTable::FGMTable
 
         for (const char* nm : optNames)
         {
-            if (found(nm))
+            if (foundBig(nm))
             {
-                List<scalar> tbl(lookup(nm));
+                List<scalar> tbl(readBig(nm));
                 if (tbl.size() != nNode)
                 {
                     FatalErrorInFunction
@@ -273,7 +538,7 @@ Foam::FGMTable::FGMTable
 
     pRef_ = lookupOrDefault<scalar>("pressure", 0);
 
-    sourcePV_ = List<scalar>(lookup("sourcePV"));
+    sourcePV_ = readBig("sourcePV");
     const label nTot = nZ_*nGz_*nC_*nChi_;
     Info<< "    sourcePV entries: " << sourcePV_.size()
         << " (expected " << nTot << ")" << nl << endl;
@@ -286,9 +551,9 @@ Foam::FGMTable::FGMTable
     }
 
     // -------- optional temperature table --------
-    if (found("T"))
+    if (foundBig("T"))
     {
-        T_table_ = List<scalar>(lookup("T"));
+        T_table_ = readBig("T");
         if (T_table_.size() != nTot)
         {
             FatalErrorInFunction
@@ -305,9 +570,9 @@ Foam::FGMTable::FGMTable
     // psisCapRatio neighbour-average patch -- see build_psis_table_v2.py and
     // Obsidian "PEP and LAD Spike Suppression" 2026-07-24. Default absent
     // (psisTabulated switch in pressureCorrector.C falls back if not found).
-    if (found("psisTab"))
+    if (foundBig("psisTab"))
     {
-        psis_table_ = List<scalar>(lookup("psisTab"));
+        psis_table_ = readBig("psisTab");
         if (psis_table_.size() != nTot)
         {
             FatalErrorInFunction
@@ -324,7 +589,7 @@ Foam::FGMTable::FGMTable
         forAll(speciesNames_, i)
         {
             const word key("Y_" + speciesNames_[i]);
-            List<scalar> tbl(lookup(key));
+            List<scalar> tbl(readBig(key));
             if (tbl.size() != nTot)
             {
                 FatalErrorInFunction
@@ -346,7 +611,7 @@ Foam::FGMTable::FGMTable
         bool hasAll = true;
         forAll(cn, k)
         {
-            if (!found("RG_" + cn[k])) { hasAll = false; break; }
+            if (!foundBig("RG_" + cn[k])) { hasAll = false; break; }
         }
 
         if (hasAll)
@@ -355,7 +620,7 @@ Foam::FGMTable::FGMTable
             forAll(cn, k)
             {
                 const word key("RG_" + cn[k]);
-                List<scalar> tbl(lookup(key));
+                List<scalar> tbl(readBig(key));
                 if (tbl.size() != nTot)
                 {
                     FatalErrorInFunction
@@ -380,9 +645,9 @@ Foam::FGMTable::FGMTable
         forAll(leVars, k)
         {
             const word key("Le_" + leVars[k]);
-            if (found(key))
+            if (foundBig(key))
             {
-                List<scalar> tbl(lookup(key));
+                List<scalar> tbl(readBig(key));
                 if (tbl.size() != nTot)
                 {
                     FatalErrorInFunction
@@ -425,6 +690,15 @@ Foam::FGMTable::FGMTable
                 << endl;
         }
     }
+
+    // A full parse just happened: leave the sidecars behind so the next
+    // construction -- this case or any case symlinking the same table --
+    // skips it.  A cache-hit construction leaves them untouched.
+    if (!cacheActive_)
+    {
+        writeCache();
+    }
+    cacheBlocks_.clear();
 }
 
 

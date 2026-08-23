@@ -184,6 +184,51 @@ class FGMTable
         HashTable<List<scalar>> Le_tables_;
 
 
+    // Binary sidecar cache (constructor cost).  Parsing the ASCII dict is
+    // the whole startup: 7.7 s at 388 MB, ~30 s at 1.5 GB, paid by EVERY
+    // rank on EVERY run.  After one full parse the constructor writes two
+    // sidecars next to the RESOLVED dict file (so cases that symlink the
+    // same table share one cache):
+    //   <dict>.stub  every entry EXCEPT the node-count-length arrays --
+    //                axes, scalars, species, anything a consumer may
+    //                lookup() on the dictionary -- so the dictionary
+    //                interface stays complete;
+    //   <dict>.bin   the big arrays, raw doubles with a header recording
+    //                the source file's size and mtime.
+    // A later construction whose probe matches loads stub + bin instead
+    // of parsing.  A stale cache cannot be read silently: the header is
+    // checked against the CURRENT source file (realpath'd, so replacing
+    // the symlink target invalidates), and a mismatch falls back to the
+    // full parse and rewrites both sidecars.  Delete the .bin to opt out.
+
+        bool cacheActive_ = false;
+        fileName cacheSrc_;
+        HashTable<List<scalar>> cacheBlocks_;
+
+        //- The dict file the case actually points at (symlinks resolved)
+        static fileName resolvedDictPath
+        (
+            const fvMesh& mesh,
+            const word& dictName
+        );
+
+        //- True if <src>.stub and <src>.bin exist and the bin header
+        //  matches the current source file
+        static bool probeCache(const fileName& src);
+
+        //- Read every block of <src>.bin into cacheBlocks_
+        void loadCacheBin();
+
+        //- Write the sidecars (master rank only; best-effort)
+        void writeCache() const;
+
+        //- One big block: from the cache when active, else lookup()
+        List<scalar> readBig(const word& key);
+
+        //- Presence of a big block: cache when active, else found()
+        bool foundBig(const word& key) const;
+
+
     // Private Member Functions
 
         //- Quadrilinear interpolation of an arbitrary flat 4-D table.
