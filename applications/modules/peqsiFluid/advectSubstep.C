@@ -36,6 +36,16 @@ License
 namespace Foam
 {
 
+// Between-substep (outer machinery) CPU time: set at the end of the
+// acoustic substep, read at the start of the next advective substep.
+// Defined in Foam::solvers -- the extern declarations sit inside member
+// functions of that namespace and resolve there.
+namespace solvers
+{
+    scalar peqsiOuterMark = -1;
+    scalar peqsiOuterAcc = 0;
+}
+
 // Advective (non-conservative) operator  u . grad q  in flux form
 // div(phiv q) - q div(phiv), with the frozen n-state volumetric flux.
 // The scheme name keys the case fvSchemes entry (e.g. "div(phiv,rho)").
@@ -104,7 +114,30 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
         }
     };
 
+    // The phase timers cover the two substeps; everything BETWEEN a
+    // step's acoustic end and the next step's advective start (Courant,
+    // deltaT logic, writes, function objects, log I/O) was invisible --
+    // and it measured 5.2 of 17.8 s on the 2-D case, too big to leave
+    // unattributed.
+    if (timers)
+    {
+        extern scalar peqsiOuterMark, peqsiOuterAcc;
+        if (peqsiOuterMark > 0)
+        {
+            peqsiOuterAcc += runTime.elapsedCpuTime() - peqsiOuterMark;
+        }
+    }
+
     const dimensionedScalar& dt = runTime.deltaT();
+
+    if (rhoN_.valid())
+    {
+        FatalErrorInFunction
+            << "advective substep entered twice without an acoustic substep "
+            << "in between -- PEQSI is a fractional step, not an iterated "
+            << "corrector: set nOuterCorrectors 1"
+            << exit(FatalError);
+    }
 
     // Snapshot the n-state (consumed by the acoustic substep)
     rhoN_.set(new volScalarField("PEQSI:rhoN", rho_));
@@ -330,8 +363,14 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
             // pressure collapse (4 -> 1.7 MPa by step 5) and T
             // undershoot to the Newton floor, blow-up by step ~15; with
             // the boundary flux removed the startup is smooth.
+            // Domain boundaries only.  A processor or cyclic patch is an
+            // INTERIOR face of the global domain: zeroing the exchanged
+            // neighbour values there makes the face diffusivity depend
+            // on the decomposition -- serial and parallel runs diverge
+            // at every processor boundary the LAD crosses.
             forAll(tDart.ref().boundaryFieldRef(), patchi)
             {
+                if (tDart.ref().boundaryField()[patchi].coupled()) continue;
                 tDart.ref().boundaryFieldRef()[patchi] == 0.0;
             }
 
@@ -404,8 +443,13 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
 
             // Interior regularisation only (same rationale as Dart):
             // the molecular kappa keeps its boundary flux
+            // Domain boundaries only (see the Dart loop above).
             forAll(tKappaArt.ref().boundaryFieldRef(), patchi)
             {
+                if (tKappaArt.ref().boundaryField()[patchi].coupled())
+                {
+                    continue;
+                }
                 tKappaArt.ref().boundaryFieldRef()[patchi] == 0.0;
             }
 

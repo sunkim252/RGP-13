@@ -230,6 +230,10 @@ void Foam::solvers::peqsiFluid::invertTemperature()
 {
     static cpuTime clk;
     static scalar tNewtLoop_ = 0, tNewtCorrect_ = 0;
+    // The "loop" figure lumped the manifold closure in with the Newton
+    // (the increment ran from function entry) -- it read as "the Newton
+    // is slow" when most of it was the closure.  Split them.
+    static scalar tClosure_ = 0, tSY_ = 0;
     clk.cpuTimeIncrement();
 
     // Stage 2a: composition (and the coefficient diagnostics) from the
@@ -257,11 +261,13 @@ void Foam::solvers::peqsiFluid::invertTemperature()
             pimple.dict().lookupOrDefault<Switch>("peqsiCompSource", false);
 
         fgmClosure();
+        tClosure_ += clk.cpuTimeIncrement();
 
         if (wantSY)
         {
             updateCompositionSource();
         }
+        tSY_ += clk.cpuTimeIncrement();
 
         // Seeding the inversion from the manifold: available, OFF, and
         // measured to be a pessimisation on the cases tried.
@@ -813,7 +819,8 @@ void Foam::solvers::peqsiFluid::invertTemperature()
             label it2 = iter;
             reduce(it2, maxOp<label>());
             Info<< "PEQSI thermo closure: T-Newton iterations = " << it2
-                << ", loop " << tNewtLoop_ << " s, correct() "
+                << ", closure " << tClosure_ << " s, S_Y " << tSY_
+                << " s, newton " << tNewtLoop_ << " s, correct() "
                 << tNewtCorrect_ << " s" << endl;
         }
 
@@ -899,6 +906,17 @@ void Foam::solvers::peqsiFluid::invertTemperature()
     label maxCell = -1;
     scalar volAbove10 = 0, volAbove1 = 0, volTot = 0, volWeighted = 0;
     label nAbove10 = 0, nAbove1 = 0;
+    // Interval-gated like the conservation audit, and for the same two
+    // reasons: seven global reductions per step are synchronisation
+    // points at high rank counts, and the per-step Pout below is exactly
+    // the unbounded many-rank pattern the dpExtreme budget was added to
+    // stop (both cirius MPI_ERR_TRUNCATE deaths followed Pout bursts).
+    const label driftDiagN =
+        pimple.dict().lookupOrDefault<label>("peqsiDiagInterval", 10);
+    static label driftCount = 0;
+    const bool driftReport =
+        driftDiagN > 0 && (driftCount++ % driftDiagN) == 0;
+    if (driftReport)
     {
         const scalarField& re = thermo_.rho()().primitiveField();
         const scalarField& rt = rho_.primitiveField();
@@ -1147,14 +1165,17 @@ void Foam::solvers::peqsiFluid::invertTemperature()
         }
     }
 
-    Info<< "PEQSI thermo closure: T = ["
-        << gMin(thermo_.T().primitiveField()) << ", "
-        << gMax(thermo_.T().primitiveField())
-        << "] K, rho drift (EOS vs transported) max = "
-        << maxDrift
-        << ", vol-mean = " << volWeighted/max(volTot, vSmall)
-        << ", vol frac >1% = " << volAbove1/max(volTot, vSmall)
-        << ", >10% = " << volAbove10/max(volTot, vSmall) << endl;
+    if (driftReport)
+    {
+        Info<< "PEQSI thermo closure: T = ["
+            << gMin(thermo_.T().primitiveField()) << ", "
+            << gMax(thermo_.T().primitiveField())
+            << "] K, rho drift (EOS vs transported) max = "
+            << maxDrift
+            << ", vol-mean = " << volWeighted/max(volTot, vSmall)
+            << ", vol frac >1% = " << volAbove1/max(volTot, vSmall)
+            << ", >10% = " << volAbove10/max(volTot, vSmall) << endl;
+    }
 
     // Cell-COUNT fractions as well as volume fractions.  On a strongly
     // graded mesh the two say very different things: the drift lives in
@@ -1162,6 +1183,7 @@ void Foam::solvers::peqsiFluid::invertTemperature()
     // while the volume is dominated by the large quiescent cells far
     // downstream -- so a volume weighting flatters the number by roughly
     // the cell-size ratio.  Reporting both stops that reading.
+    if (driftReport)
     {
         label nTot = rho_.primitiveField().size();
         reduce(nTot, sumOp<label>());
@@ -1268,10 +1290,15 @@ void Foam::solvers::peqsiFluid::fgmClosure()
     PtrList<volScalarField>& Yall = thermo_.Y();
     const wordList& thSp = thermo_.species();
     List<scalarField*> Yp(spn.size());
+    // Table pointers hoisted too: Ytable(word) is a HashTable lookup, and
+    // inside the cell loop it was hashing the same 30 species names once
+    // per cell -- 60k string hashes per step on the 2-D case.
+    List<const List<scalar>*> Ysrc(spn.size());
     forAll(spn, k)
     {
         const label ti = findIndex(thSp, spn[k]);
         Yp[k] = &Yall[ti].primitiveFieldRef();
+        Ysrc[k] = &tbl.Ytable(spn[k]);
     }
 
     const scalar hOx = tbl.hOx();
@@ -1440,7 +1467,7 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         {
             forAll(spn, k)
             {
-                (*Yp[k])[celli] = tbl.interpolate(tbl.Ytable(spn[k]), st);
+                (*Yp[k])[celli] = tbl.interpolate(*Ysrc[k], st);
             }
         }
         // Diagnostic bound on the tabulated progress-variable source
@@ -2491,9 +2518,16 @@ void Foam::solvers::peqsiFluid::updateCompositionSource()
     // rather than with a missing factor.  This is independent of the
     // table lookup that the constant-pressure endpoint check relies on.
     // ---------------------------------------------------------------
-    const bool pressureOnly =
-        pimple.dict().lookupOrDefault<word>("peqsiCompSourceParts", "pressure")
-     != "both";
+    const word syParts =
+        pimple.dict().lookupOrDefault<word>("peqsiCompSourceParts", "pressure");
+    if (syParts != "pressure" && syParts != "both")
+    {
+        FatalErrorInFunction
+            << "peqsiCompSourceParts must be 'pressure' or 'both', got '"
+            << syParts << "'.  A typo would silently drop the enthalpy part."
+            << exit(FatalError);
+    }
+    const bool pressureOnly = syParts != "both";
 
     scalar sMax = 0;
     scalar aPk = 0, bPk = 0, hPk = 0, dpk = 0, rPk = 0;

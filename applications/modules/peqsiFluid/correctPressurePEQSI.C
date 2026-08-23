@@ -206,10 +206,21 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
 
     mark(tPhase_[5]);
 
-    Info<< "PEQSI: dp min/max = "
-        << gMin(dp.primitiveField()) << " / "
-        << gMax(dp.primitiveField()) << " Pa (theta = " << theta << ")"
-        << endl;
+    // Interval-gated: two global reductions and a log line per step add
+    // nothing the interval's last report does not, and at high rank
+    // counts the reductions are synchronisation points.
+    {
+        const label diagN =
+            pimple.dict().lookupOrDefault<label>("peqsiDiagInterval", 10);
+        static label nDp = 0;
+        if (diagN > 0 && (nDp++ % diagN) == 0)
+        {
+            Info<< "PEQSI: dp min/max = "
+                << gMin(dp.primitiveField()) << " / "
+                << gMax(dp.primitiveField()) << " Pa (theta = " << theta
+                << ")" << endl;
+        }
+    }
 
     // S_Y chain instrumentation (peqsiTraceSY).  The composition source
     // delivers a pressure impulse of the right size -- summed over the
@@ -504,7 +515,16 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
                 << " (" << 100*tPhase_[i]/max(tot, small)
                 << "%)  ranks[" << tMin << ", " << tMax << "]" << nl;
         }
-        Info<< "    accounted total = " << tot << endl;
+        extern scalar peqsiOuterAcc;
+        Info<< "    accounted total = " << tot
+            << "  (outer machinery between steps = " << peqsiOuterAcc
+            << ")" << endl;
+    }
+
+    if (timers)
+    {
+        extern scalar peqsiOuterMark;
+        peqsiOuterMark = runTime.elapsedCpuTime();
     }
 
     // Release the substep state
