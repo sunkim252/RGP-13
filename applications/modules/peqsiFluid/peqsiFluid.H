@@ -244,6 +244,17 @@ protected:
         //  fgmClosure already builds
         autoPtr<scalarField> rhoTabF_;
 
+        //- Packed-lookup slots into FGMTable::interpolatePacked's value
+        //  vector (fgmClosure; -1 = that table absent).  The slot order
+        //  IS the key order fgmClosure armed the table with.
+        label pkSrc_ = -1, pkT_ = -1, pkRho_ = -1, pkW_ = -1,
+              pkA_ = -1, pkB_ = -1, pkBn_ = -1, pkXi_ = -1, pkCv_ = -1,
+              pkDpdT_ = -1, pkDpdvT_ = -1, pkDpdvn_ = -1, pkDTdv_ = -1;
+        labelList pkY_;
+        labelList pkRG_;
+        scalarField pkVals_;
+        bool packedArmed_ = false;
+
         //- Reference internal-energy field for peqsiEnergyAudit
         autoPtr<scalarField> reInit_;
         scalar E0_ = 0;

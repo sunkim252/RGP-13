@@ -229,6 +229,42 @@ class FGMTable
         bool foundBig(const word& key) const;
 
 
+    // Packed hot-table block.  The closure reads ~50 tables per cell at
+    // one shared stencil; as separate arrays that is ~424 scattered
+    // cache lines per DISTINCT stencil (16 corners x 53 arrays, h-pairs
+    // sharing lines).  Interleaving the hot tables node-major makes each
+    // corner one contiguous 53-value read: 16 x 7 = 112 lines, ~3.8x
+    // fewer.  Invisible on a small case whose visited stencils fit L3;
+    // the target is the production-scale run whose visited-node set does
+    // not (the table itself is 231 MB at 506k nodes).  Costs a full
+    // duplicate of the packed tables in memory.
+
+        //- Interleaved copy: packedTables_[node*nPackedT_ + t]
+        List<scalar> packedTables_;
+
+        //- Keys in slot order (t of the layout above)
+        wordList packedKeys_;
+
+        label nPackedT_ = 0;
+
+        //- Resolve a big-table key to member storage (nullptr if absent)
+        const List<scalar>* tablePtr(const word& key) const;
+
+public:
+
+        //- Build the interleaved copy of the named tables.  A name that
+        //  resolves to no table is a FatalError -- the caller's slot
+        //  indices are positions in THIS list, so a silent skip would
+        //  shift every later slot.
+        void armPacked(const UList<word>& keys);
+
+        inline bool packedArmed() const { return nPackedT_ > 0; }
+
+        inline label nPackedTables() const { return nPackedT_; }
+
+private:
+
+
     // Private Member Functions
 
         //- Quadrilinear interpolation of an arbitrary flat 4-D table.
@@ -382,6 +418,12 @@ public:
                 const List<scalar>& table,
                 const FGMStencil& st
             ) const;
+
+            //- Evaluate ALL packed tables at one stencil into
+            //  vals[0..nPackedTables()-1], slot order = armPacked key
+            //  order.  Same nested blend, same floating-point order as
+            //  interpolate(): bit-identical values.
+            void interpolatePacked(const FGMStencil& st, scalar* vals) const;
 
             //- Direct table access for hoisting out of cell loops.
             inline const List<scalar>& sourcePVTable() const

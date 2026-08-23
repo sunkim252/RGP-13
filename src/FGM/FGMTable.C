@@ -173,6 +173,137 @@ bool Foam::FGMTable::foundBig(const word& key) const
 }
 
 
+// * * * * * * * * * * * * Packed hot-table block  * * * * * * * * * * * * * //
+
+const Foam::List<Foam::scalar>* Foam::FGMTable::tablePtr(const word& key) const
+{
+    if (key == "sourcePV") return &sourcePV_;
+    if (key == "T") return T_table_.size() ? &T_table_ : nullptr;
+    if (key == "psisTab") return psis_table_.size() ? &psis_table_ : nullptr;
+    if (key == "dhRef") return dhRef_table_.size() ? &dhRef_table_ : nullptr;
+
+    if (key.size() > 2 && key.compare(0, 2, "Y_") == 0)
+    {
+        const word sp(key.substr(2));
+        return Y_tables_.found(sp) ? &Y_tables_[sp] : nullptr;
+    }
+    if (key.size() > 3 && key.compare(0, 3, "RG_") == 0 && RGcoeff_.size())
+    {
+        const label k =
+            findIndex
+            (
+                tabulatedRealGasMixture::coeffNames(),
+                word(key.substr(3))
+            );
+        return k >= 0 ? &RGcoeff_[k] : nullptr;
+    }
+    if (key.size() > 3 && key.compare(0, 3, "Le_") == 0)
+    {
+        const word v(key.substr(3));
+        return Le_tables_.found(v) ? &Le_tables_[v] : nullptr;
+    }
+
+    return optTables_.found(key) ? &optTables_[key] : nullptr;
+}
+
+
+void Foam::FGMTable::armPacked(const UList<word>& keys)
+{
+    const label nT = keys.size();
+    const label nNode = sourcePV_.size();
+
+    packedKeys_ = keys;
+    packedTables_.setSize(nNode*nT);
+
+    forAll(keys, t)
+    {
+        const List<scalar>* src = tablePtr(keys[t]);
+        if (!src)
+        {
+            FatalErrorInFunction
+                << "armPacked: no table for key '" << keys[t]
+                << "' -- the caller's slot indices are positions in the "
+                << "key list, so skipping would shift every later slot"
+                << exit(FatalError);
+        }
+        if (src->size() != nNode)
+        {
+            FatalErrorInFunction
+                << "armPacked: table '" << keys[t] << "' has "
+                << src->size() << " nodes, expected " << nNode
+                << exit(FatalError);
+        }
+
+        const scalar* sp = src->begin();
+        scalar* dp = packedTables_.begin() + t;
+        for (label n = 0; n < nNode; n++)
+        {
+            dp[n*nT] = sp[n];
+        }
+    }
+
+    nPackedT_ = nT;
+
+    Info<< "FGM packed lookup: " << nT << " tables x " << nNode
+        << " nodes interleaved ("
+        << scalar(nNode)*nT*sizeof(scalar)/1.0e6 << " MB duplicate)"
+        << endl;
+}
+
+
+void Foam::FGMTable::interpolatePacked
+(
+    const FGMStencil& st,
+    scalar* vals
+) const
+{
+    const scalar wZ = st.wZ, wG = st.wG, wC = st.wC, wK = st.wK;
+    const label nT = nPackedT_;
+    const scalar* p = packedTables_.begin();
+
+    // One contiguous nT-value block per corner
+    const scalar* q0000 = p + st.idx[0]*nT;
+    const scalar* q1000 = p + st.idx[1]*nT;
+    const scalar* q0100 = p + st.idx[2]*nT;
+    const scalar* q1100 = p + st.idx[3]*nT;
+    const scalar* q0010 = p + st.idx[4]*nT;
+    const scalar* q1010 = p + st.idx[5]*nT;
+    const scalar* q0110 = p + st.idx[6]*nT;
+    const scalar* q1110 = p + st.idx[7]*nT;
+    const scalar* q0001 = p + st.idx[8]*nT;
+    const scalar* q1001 = p + st.idx[9]*nT;
+    const scalar* q0101 = p + st.idx[10]*nT;
+    const scalar* q1101 = p + st.idx[11]*nT;
+    const scalar* q0011 = p + st.idx[12]*nT;
+    const scalar* q1011 = p + st.idx[13]*nT;
+    const scalar* q0111 = p + st.idx[14]*nT;
+    const scalar* q1111 = p + st.idx[15]*nT;
+
+    for (label t = 0; t < nT; t++)
+    {
+        // Nested blend VERBATIM from interpolate() -- same values, same
+        // floating-point order, hence bit-identical results.
+        const scalar a00 = q0000[t]*(1 - wZ) + q1000[t]*wZ;
+        const scalar a10 = q0100[t]*(1 - wZ) + q1100[t]*wZ;
+        const scalar a01 = q0010[t]*(1 - wZ) + q1010[t]*wZ;
+        const scalar a11 = q0110[t]*(1 - wZ) + q1110[t]*wZ;
+        const scalar a0  = a00*(1 - wG) + a10*wG;
+        const scalar a1  = a01*(1 - wG) + a11*wG;
+        const scalar A   = a0 *(1 - wC) + a1 *wC;
+
+        const scalar b00 = q0001[t]*(1 - wZ) + q1001[t]*wZ;
+        const scalar b10 = q0101[t]*(1 - wZ) + q1101[t]*wZ;
+        const scalar b01 = q0011[t]*(1 - wZ) + q1011[t]*wZ;
+        const scalar b11 = q0111[t]*(1 - wZ) + q1111[t]*wZ;
+        const scalar b0  = b00*(1 - wG) + b10*wG;
+        const scalar b1  = b01*(1 - wG) + b11*wG;
+        const scalar B   = b0 *(1 - wC) + b1 *wC;
+
+        vals[t] = A*(1 - wK) + B*wK;
+    }
+}
+
+
 void Foam::FGMTable::writeCache() const
 {
     if (!Pstream::master()) return;

@@ -1349,6 +1349,49 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         tbl.hasOptTable("W") ? &tbl.optTable("W") : nullptr;
     const List<scalar>& Ttbl = tbl.Ttable();
 
+    // ---- packed lookup arming (once) ----
+    // One interleaved gather per cell instead of ~50 scattered table
+    // reads at the same stencil.  Bit-identical (see interpolatePacked);
+    // costs a duplicate of the packed tables in memory, so switchable.
+    const bool usePk =
+        pimple.dict().lookupOrDefault<Switch>("peqsiPackedLookup", true);
+
+    if (usePk && !packedArmed_)
+    {
+        DynamicList<word> pkKeys;
+        auto slot = [&](const word& k) -> label
+        {
+            pkKeys.append(k);
+            return pkKeys.size() - 1;
+        };
+
+        pkSrc_ = slot("sourcePV");
+        pkT_ = slot("T");
+        pkY_.setSize(spn.size());
+        forAll(spn, k) pkY_[k] = slot("Y_" + spn[k]);
+        pkRG_.setSize(RGfields_.size());
+        forAll(RGfields_, k)
+        {
+            pkRG_[k] = slot("RG_" + tabulatedRealGasMixture::coeffNames()[k]);
+        }
+        if (rhoTabOpt) pkRho_ = slot("PEQSI_rho");
+        if (WT) pkW_ = slot("W");
+        if (aT) pkA_ = slot("PEQSI_alpha");
+        if (bT) pkB_ = slot("PEQSI_beta");
+        if (bnT) pkBn_ = slot("PEQSI_betan");
+        if (xiT) pkXi_ = slot("PEQSI_xi");
+        if (cvT) pkCv_ = slot("PEQSI_cv");
+        if (dpdTT) pkDpdT_ = slot("PEQSI_dpdT_v");
+        if (dpdvT_) pkDpdvT_ = slot("PEQSI_dpdv_T");
+        if (dpdvnT) pkDpdvn_ = slot("PEQSI_dpdvn");
+        if (dTdvT) pkDTdv_ = slot("dTdv_h");
+
+        tbl.armPacked(pkKeys);
+        pkVals_.setSize(pkKeys.size());
+        packedArmed_ = true;
+    }
+    const bool pkOn = usePk && packedArmed_;
+
 
     // Discriminating test for the density-drift hypothesis
     // (peqsiFreezeY).  The claim under test is that the drift is the
@@ -1449,9 +1492,18 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         FGMTable::FGMStencil st;
         tbl.makeStencil(Zcl, gz, Ccl, dh, st);
 
+        if (pkOn)
+        {
+            tbl.interpolatePacked(st, pkVals_.begin());
+        }
+        auto pk = [&](const label sl, const List<scalar>& t) -> scalar
+        {
+            return pkOn ? pkVals_[sl] : tbl.interpolate(t, st);
+        };
+
         forAll(RGfields_, k)
         {
-            RGfields_[k][celli] = tbl.interpolate(tbl.RGtable(k), st);
+            RGfields_[k][celli] = pk(pkRG_[k], tbl.RGtable(k));
         }
 
         // Base-state table density on the stencil this loop already
@@ -1460,14 +1512,14 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         if (rhoTabF_.valid())
         {
             rhoTabF_()[celli] =
-                rhoTabOpt ? tbl.interpolate(*rhoTabOpt, st) : 0.0;
+                rhoTabOpt ? pk(pkRho_, *rhoTabOpt) : 0.0;
         }
 
         if (!freezeY)
         {
             forAll(spn, k)
             {
-                (*Yp[k])[celli] = tbl.interpolate(*Ysrc[k], st);
+                (*Yp[k])[celli] = pk(pkY_[k], *Ysrc[k]);
             }
         }
         // Diagnostic bound on the tabulated progress-variable source
@@ -1500,7 +1552,7 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         // What the switch is good for is the count below -- how many
         // cells sit in the amplified low-Z band -- and for the A/B that
         // established the above.  Off by default.
-        scalar pv = tbl.interpolate(tbl.sourcePVTable(), st);
+        scalar pv = pk(pkSrc_, tbl.sourcePVTable());
 
         // DIAGNOSTIC ONLY -- never for production.  The table builder picks
         // the combustion branch by taking the MAX over a window, which is
@@ -1551,7 +1603,7 @@ void Foam::solvers::peqsiFluid::fgmClosure()
 
         if (haveCoeffs && WT)
         {
-            const scalar Wc = tbl.interpolate(*WT, st);
+            const scalar Wc = pk(pkW_, *WT);
             const scalar v = 1.0/max(rhof[celli], small);
             const scalar Zcomp =
                 pfld[celli]*v*Wc/(RR*max(Tf[celli], small));
@@ -1563,15 +1615,15 @@ void Foam::solvers::peqsiFluid::fgmClosure()
             const bool gasCell = (Zcomp > Zdense);
             if (gasCell)
             {
-                betaTab = tbl.interpolate(*bnT, st)*pfld[celli];
+                betaTab = pk(pkBn_, *bnT)*pfld[celli];
                 nGas++;
             }
             else
             {
-                betaTab = tbl.interpolate(*bT, st);
+                betaTab = pk(pkB_, *bT);
                 nDense++;
             }
-            const scalar alphaTab = tbl.interpolate(*aT, st);
+            const scalar alphaTab = pk(pkA_, *aT);
 
 
             dAlpha =
@@ -1592,8 +1644,8 @@ void Foam::solvers::peqsiFluid::fgmClosure()
             // table's own v removes the amplification and leaves the
             // genuine difference.
             const scalar vTab =
-                (tbl.interpolate(*xiT, st) - tbl.interpolate(*cvT, st))
-               /max(tbl.interpolate(*dpdTT, st), small);
+                (pk(pkXi_, *xiT) - pk(pkCv_, *cvT))
+               /max(pk(pkDpdT_, *dpdTT), small);
             const scalar vCell = 1.0/max(rhof[celli], small);
             const scalar rb =
                 mag(betaTab*vTab - beta_[celli]*vCell)
@@ -1651,7 +1703,7 @@ void Foam::solvers::peqsiFluid::fgmClosure()
             if (gasCell)
             {
                 const scalar dpdvn =
-                    dpdvnT ? tbl.interpolate(*dpdvnT, st) : -1.0;
+                    dpdvnT ? pk(pkDpdvn_, *dpdvnT) : -1.0;
                 // dpdvn must be negative for a stable fluid; anything
                 // else is a table artefact, so fall back to ideal.
                 const scalar e = (dpdvn < -small) ? 1.0/dpdvn : -1.0;
@@ -1681,7 +1733,7 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         // step on the multicomponent path (2.1% for a single species):
         // thirty-species janaf and SRK departure functions, per cell,
         // per iteration.
-        const scalar Ttab = tbl.interpolate(Ttbl, st);
+        const scalar Ttab = pk(pkT_, Ttbl);
         if (!haveDTdv && haveCoeffs && dpdvT_)
         {
             // (dT/dv)_h = -(dh/dv)_T / (dh/dT)_v, and
@@ -1689,24 +1741,24 @@ void Foam::solvers::peqsiFluid::fgmClosure()
             // Every factor is already tabulated, so the derivative needs
             // no extra bake: a dedicated dTdv_h block would only be this
             // same product, evaluated at the same nodes.
-            const scalar xiT_ = tbl.interpolate(*xiT, st);
+            const scalar xiT_ = pk(pkXi_, *xiT);
             const scalar vT =
-                (xiT_ - tbl.interpolate(*cvT, st))
-               /max(tbl.interpolate(*dpdTT, st), small);
+                (xiT_ - pk(pkCv_, *cvT))
+               /max(pk(pkDpdT_, *dpdTT), small);
             const scalar vC = 1.0/max(rhof[celli], small);
             const scalar dhdv =
-                Ttab*tbl.interpolate(*dpdTT, st)
-              + vT*tbl.interpolate(*dpdvT_, st);
+                Ttab*pk(pkDpdT_, *dpdTT)
+              + vT*pk(pkDpdvT_, *dpdvT_);
             TgF[celli] = Ttab - (dhdv/max(xiT_, small))*(vC - vT);
         }
         else if (haveDTdv)
         {
             const scalar vT =
-                (tbl.interpolate(*xiT, st) - tbl.interpolate(*cvT, st))
-               /max(tbl.interpolate(*dpdTT, st), small);
+                (pk(pkXi_, *xiT) - pk(pkCv_, *cvT))
+               /max(pk(pkDpdT_, *dpdTT), small);
             const scalar vC = 1.0/max(rhof[celli], small);
             TgF[celli] =
-                Ttab + tbl.interpolate(*dTdvT, st)*(vC - vT);
+                Ttab + pk(pkDTdv_, *dTdvT)*(vC - vT);
         }
         else
         {
