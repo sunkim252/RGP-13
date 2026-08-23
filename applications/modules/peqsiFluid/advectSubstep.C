@@ -423,8 +423,20 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
                 ladDtLimit_ = fSafe*dtLim;
             }
 
-            Info<< "PEQSI LAD: rho_art max = "
-                << gMax(tDart().primitiveField()) << " m^2/s" << endl;
+            {
+                const label every =
+                    pimple.dict().lookupOrDefault<label>
+                    (
+                        "peqsiDiagInterval", 10
+                    );
+                static label n = 0;
+                if (every > 0 && (n++ % every) == 0)
+                {
+                    Info<< "PEQSI LAD: rho_art max = "
+                        << gMax(tDart().primitiveField()) << " m^2/s"
+                        << endl;
+                }
+            }
         }
 
         if (ladKappaCoeff > 0)
@@ -468,8 +480,20 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
                 }
             }
 
-            Info<< "PEQSI LAD: kappa_art max = "
-                << gMax(tKappaArt().primitiveField()) << " W/(m K)" << endl;
+            {
+                const label every =
+                    pimple.dict().lookupOrDefault<label>
+                    (
+                        "peqsiDiagInterval", 10
+                    );
+                static label n = 0;
+                if (every > 0 && (n++ % every) == 0)
+                {
+                    Info<< "PEQSI LAD: kappa_art max = "
+                        << gMax(tKappaArt().primitiveField()) << " W/(m K)"
+                        << endl;
+                }
+            }
         }
     }
 
@@ -896,6 +920,24 @@ void Foam::solvers::peqsiFluid::advectManifoldStage
     // on a bounded field, O(dx) strength where an excursion exists
     if (pimple.dict().lookupOrDefault<Switch>("peqsiBoundZ", true))
     {
+        // Early exit on a bounded field.  D* is identically zero then, so
+        // the whole block below evaluates to Z += lap(0, Z) == Z exactly
+        // -- at the cost of ~6 field constructions and their halo
+        // exchanges, PER RK STAGE.  One local scan + one reduction buys
+        // all of that back on every healthy step (same pattern as the
+        // SC filter's quiet-direction skip; bit-identical by the
+        // zero-flux argument above).
+        scalar violMax = 0;
+        {
+            const scalarField& Zf = Z_().primitiveField();
+            forAll(Zf, i)
+            {
+                violMax = max(violMax, max(Zf[i] - 1.0, -Zf[i]));
+            }
+            reduce(violMax, maxOp<scalar>());
+        }
+        if (violMax > 0)
+        {
         // speed of sound from the App-D identity beta/(1-alpha) = -rho c^2
         // (alpha_/beta_ are refreshed every step by updateCoefficients)
         const volScalarField cSound
@@ -911,10 +953,31 @@ void Foam::solvers::peqsiFluid::advectManifoldStage
                 )
             )
         );
-        const tmp<volScalarField> tD =
+        tmp<volScalarField> tD =
             boundingArtDiffusivity(Z_(), cSound, 100.0);
+
+        // Explicit-stability cap, the SAME 0.45 diffusion-number guard
+        // the LAD mass diffusivity carries -- this term never got one.
+        // Uncapped, the demand D* = 100 c viol Delta crosses the
+        // explicit limit 0.45 dmin^2/dt at a Z overshoot of only ~15%
+        // on the 2-D case's grid, and an explicitly unstable bounding
+        // term AMPLIFIES the violation it exists to remove.  Inactive
+        // on healthy fields (bit-identical there), it only disarms the
+        // pathological cell, exactly like the Dart cap.
+        {
+            ensureDirGeometry();
+            const scalarField& dmin = ladDeltaMin_();
+            scalarField& D = tD.ref().primitiveFieldRef();
+            const scalar rdt = 0.45/runTime.deltaTValue();
+            forAll(D, i)
+            {
+                D[i] = min(D[i], rdt*sqr(dmin[i]));
+            }
+        }
+
         Z_() += runTime.deltaT()*cNew*fvc::laplacian(tD(), Z_());
         Z_().correctBoundaryConditions();
+        }
     }
 }
 

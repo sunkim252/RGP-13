@@ -346,6 +346,12 @@ protected:
         //  sets the LAD explicit-stability cap
         mutable autoPtr<scalarField> ladDeltaMin_;
 
+        //- Cached filter boundary mask (static mesh; was rebuilt --
+        //  two field constructions plus their halo exchanges -- on
+        //  every applyFilter AND applySCFilter call, i.e. twice per
+        //  step with both filters on)
+        mutable autoPtr<surfaceScalarField> filterMask_;
+
         //- Per-phase cumulative CPU-time accounting (peqsiTimers switch):
         //  setup, sgs, lad, rk3, helmAsm, helmSolve, updates, newton,
         //  coeffs
@@ -435,9 +441,22 @@ protected:
         //  verify beta/(1-alpha) against -rho c^2
         void updateCoefficients();
 
-        //- Invert h(T, v, Y) for T at fixed specific volume with Newton
-        //  iterations using xi = (dh/dT)_v (WKK Fig. 3; NOT cp), then
-        //  refresh transport properties at the new state
+        //- Thermodynamic closure: invert the transported enthalpy for T,
+        //  then refresh transport properties at the new state.
+        //
+        //  Two forms.  DEFAULT: h(p, T) at the transported pressure,
+        //  Newton with a cp first slope and a secant thereafter -- the
+        //  multicomponent path, where the manifold supplies T outright
+        //  on gate-passing cells.  peqsiConstantV (single-species only):
+        //  h at fixed specific volume with the analytic SRK p(v, T),
+        //  which is WKK Fig. 3 literally, slope xi = (dh/dT)_v.
+        //
+        //  The default therefore trusts (p, h) and parks the EOS
+        //  mismatch in the transported-vs-EOS density drift the closure
+        //  reports; WKK trust (v, h) and park it in pressure.  Same
+        //  family-level trade, different variable -- see the coeff-drift
+        //  immunity analysis in updateCoefficients for why alpha/beta
+        //  are insensitive to the choice.
         void invertTemperature();
 
 

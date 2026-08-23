@@ -639,8 +639,14 @@ void Foam::solvers::peqsiFluid::applyFilter
     // Conservation and boundary treatment: the face weights are zeroed
     // on all physical boundaries AND on every face of a cell that
     // touches one, so each fvc::laplacian pass telescopes to exactly
-    // zero over the domain (global mass and momentum invariant to
-    // machine precision) and the filter is the IDENTITY in the whole
+    // zero over the domain (global mass invariant to machine precision;
+    // momentum is NOT -- the current set filters the primitive U, and
+    // rho*(dU) does not telescope when rho varies.  That is the
+    // documented Visbal-Gaitonde primitive-variable practice, its
+    // momentum footprint is O(sigma/256) of grid-scale content, but the
+    // old claim of momentum invariance belonged to the rho*u variable
+    // set this filter no longer uses) and the filter is the IDENTITY in
+    // the whole
     // boundary-adjacent cell layer.  The one-sided asymmetric stencil
     // the plain boundary-zeroing left at the inlet lip drove a
     // conservative-recovery feedback there (141451: lip cell T
@@ -655,8 +661,11 @@ void Foam::solvers::peqsiFluid::applyFilter
     const PtrList<surfaceScalarField>& wDir = ladWDir_();
     const PtrList<volScalarField>& DeltaDir = ladDeltaDir_();
 
-    const tmp<surfaceScalarField> tmaskF(filterBoundaryMask());
-    const surfaceScalarField& maskF = tmaskF();
+    if (!filterMask_.valid())
+    {
+        filterMask_.set(filterBoundaryMask().ptr());
+    }
+    const surfaceScalarField& maskF = filterMask_();
 
     // Variable set: the PRIMITIVES p, rho, U.  Filtering the
     // conservative pair rho*u / rho*h and recovering u, h by division
@@ -832,8 +841,11 @@ void Foam::solvers::peqsiFluid::applySCFilter
     const PtrList<surfaceScalarField>& wDir = ladWDir_();
     const PtrList<volScalarField>& DeltaDir = ladDeltaDir_();
 
-    const tmp<surfaceScalarField> tmaskF(filterBoundaryMask());
-    const surfaceScalarField& maskF = tmaskF();
+    if (!filterMask_.valid())
+    {
+        filterMask_.set(filterBoundaryMask().ptr());
+    }
+    const surfaceScalarField& maskF = filterMask_();
 
     const dimensionedScalar rThD(dimless, rTh);
     const dimensionedScalar rFloor(dimless, vSmall);

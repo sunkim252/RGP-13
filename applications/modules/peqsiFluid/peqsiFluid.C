@@ -245,8 +245,10 @@ Foam::solvers::peqsiFluid::peqsiFluid(fvMesh& mesh)
         << "(Wada et al., Phys. Fluids 36 (2024) 116104)" << nl
         << "    advective substep: SSP-RK3, p advected (PEQSI Eq. 10)" << nl
         << "    acoustic substep: consistency-form Helmholtz (Eq. 19)" << nl
-        << "    thermo closure: T from h(T,v) Newton inversion (WKK Fig. 3)"
-        << nl
+        << "    thermo closure: T from h(p, T) inversion at the "
+        << "transported p" << nl
+        << "        (WKK Fig. 3 constant-v form: peqsiConstantV, "
+        << "single-species only)" << nl
         << "    composition: "
         << (fgmActive_
             ? "manifold (FGM stage 2a: wiring verification)"

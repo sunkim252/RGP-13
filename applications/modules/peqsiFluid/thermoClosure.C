@@ -124,20 +124,41 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
                 nTab++;
             }
         }
-        reduce(nTab, sumOp<label>());
-        label nAll = a.size();
-        reduce(nAll, sumOp<label>());
-
-        Info<< "PEQSI coefficients: from manifold on " << nTab << "/"
-            << nAll << " cells (runtime SRK elsewhere)" << endl;
+        {
+            const label every =
+                pimple.dict().lookupOrDefault<label>("peqsiDiagInterval", 10);
+            static label n = 0;
+            if (every > 0 && (n++ % every) == 0)
+            {
+                reduce(nTab, sumOp<label>());
+                label nAll = a.size();
+                reduce(nAll, sumOp<label>());
+                Info<< "PEQSI coefficients: from manifold on " << nTab
+                    << "/" << nAll << " cells (runtime SRK elsewhere)"
+                    << endl;
+            }
+        }
 
         alpha_.correctBoundaryConditions();
         beta_.correctBoundaryConditions();
     }
 
-    reduce(maxDev, maxOp<scalar>());
-    Info<< "PEQSI coefficients: max |beta/(1-alpha) + rho c^2| / (rho c^2) = "
-        << maxDev << endl;
+    // Interval-gated: the identity is structural (assembled from the
+    // same fields it is checked against), so a violation is a CODE
+    // regression, not a flow event -- catching it within diagInterval
+    // steps loses nothing, and the reduction is a per-step sync point.
+    {
+        const label every =
+            pimple.dict().lookupOrDefault<label>("peqsiDiagInterval", 10);
+        static label n = 0;
+        if (every > 0 && (n++ % every) == 0)
+        {
+            reduce(maxDev, maxOp<scalar>());
+            Info<< "PEQSI coefficients: "
+                << "max |beta/(1-alpha) + rho c^2| / (rho c^2) = "
+                << maxDev << endl;
+        }
+    }
 
     // What the density drift actually costs (peqsiCoeffDrift).
     //
@@ -708,11 +729,23 @@ void Foam::solvers::peqsiFluid::invertTemperature()
                         active.append(i);
                     }
                 }
-                reduce(nT, sumOp<label>());
-                label nA = Tf.size();
-                reduce(nA, sumOp<label>());
-                Info<< "PEQSI closure: T from manifold on " << nT << "/"
-                    << nA << " cells (Newton elsewhere)" << endl;
+                {
+                    const label every =
+                        pimple.dict().lookupOrDefault<label>
+                        (
+                            "peqsiDiagInterval", 10
+                        );
+                    static label n = 0;
+                    if (every > 0 && (n++ % every) == 0)
+                    {
+                        reduce(nT, sumOp<label>());
+                        label nA = Tf.size();
+                        reduce(nA, sumOp<label>());
+                        Info<< "PEQSI closure: T from manifold on " << nT
+                            << "/" << nA << " cells (Newton elsewhere)"
+                            << endl;
+                    }
+                }
                 if (returnReduce(active.empty(), andOp<bool>()))
                 {
                     maxRel = 0;
@@ -816,12 +849,18 @@ void Foam::solvers::peqsiFluid::invertTemperature()
         tNewtLoop_ += clk.cpuTimeIncrement();
 
         {
-            label it2 = iter;
-            reduce(it2, maxOp<label>());
-            Info<< "PEQSI thermo closure: T-Newton iterations = " << it2
-                << ", closure " << tClosure_ << " s, S_Y " << tSY_
-                << " s, newton " << tNewtLoop_ << " s, correct() "
-                << tNewtCorrect_ << " s" << endl;
+            const label every =
+                pimple.dict().lookupOrDefault<label>("peqsiDiagInterval", 10);
+            static label n = 0;
+            if (every > 0 && (n++ % every) == 0)
+            {
+                label it2 = iter;
+                reduce(it2, maxOp<label>());
+                Info<< "PEQSI thermo closure: T-Newton iterations = " << it2
+                    << ", closure " << tClosure_ << " s, S_Y " << tSY_
+                    << " s, newton " << tNewtLoop_ << " s, correct() "
+                    << tNewtCorrect_ << " s" << endl;
+            }
         }
 
         if (nSaturated_ > 0)
