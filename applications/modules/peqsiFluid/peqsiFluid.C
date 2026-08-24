@@ -287,23 +287,43 @@ Foam::solvers::peqsiFluid::peqsiFluid(fvMesh& mesh)
         );
     }
 
-    // Restart consistency (peqsiRestartH, default off): a foreign
+    // Restart consistency (peqsiRestartH, default "off"): a foreign
     // restart -- fgmFluid state, or a table-lineage change -- carries an
-    // h that was NOT built against the composition THIS table returns.
-    // The constructor seed above used the case Y; the first closure then
-    // swaps Y to the manifold composition, and cells where the two
-    // lineages disagree are left chasing an enthalpy that he(p, T, Y)
-    // cannot reach (measured on the rd0110 3M bring-up: ~486 injector-
-    // lip cells pinned at the [50, 4000] K clamps, maxRel 0.49, flat
-    // over 28 steps).  Run the closure once so Y is the manifold's, then
-    // reseed h at the case (p, T) against THAT composition -- the same
-    // reference-frame argument as dhRef, which is defined against the
-    // table's own composition, never the case's.
-    if
+    // h that was NOT built against the composition/dh convention THIS
+    // table uses.  Two failure modes, two reseed modes.
+    //
+    // "eos": run the closure once so Y is the manifold's, then reseed
+    // h = he(p, T, Y_manifold) -- the case KEEPS its own T, only the
+    // composition changes.  Fixes a Y-lineage mismatch (measured on the
+    // rd0110 3M bring-up: ~486 injector-lip cells pinned at the
+    // [50, 4000] K clamps, maxRel 0.49, flat over 28 steps).
+    //
+    // "manifold": the case's h encodes a NON-ADIABATIC dh -- e.g. the
+    // per-inlet temperature spread (LOX/fuel streams enter below/above
+    // the adiabatic mixing-line value) -- under a DIFFERENT table's
+    // dhRef/hOx/hFuel convention.  "eos" alone does not fix this: it
+    // keeps the case T, so the reseeded h still encodes the foreign
+    // convention's inlet-temperature offset at THIS table's hOx/hFuel
+    // anchors, which is not the same physical dh at all (measured:
+    // 71.9% of cells sit above this table's dh axis by step 30, and the
+    // upper-slice clamp is self-sustaining -- +517 K, flat).  "manifold"
+    // discards the case dh entirely and lands exactly on THIS table's
+    // own dh = 0 mixing-line state, h = hMix + dhRef(Z, gz, c), at the
+    // case's transported (Z, gz, c).  The true per-inlet dh re-forms
+    // from the boundary conditions themselves (each inlet patch is
+    // fixedValue T) over the inlet residence time; only the INTERIOR
+    // initial state changes.
+    const word restartH
     (
-        fgmActive_
-     && pimple.dict().lookupOrDefault<Switch>("peqsiRestartH", false)
-    )
+        pimple.dict().lookupOrDefault<word>("peqsiRestartH", "off")
+    );
+    if (restartH != "off" && restartH != "eos" && restartH != "manifold")
+    {
+        FatalErrorInFunction
+            << "peqsiRestartH must be 'off', 'eos' or 'manifold', got '"
+            << restartH << "'" << exit(FatalError);
+    }
+    if (fgmActive_ && restartH != "off")
     {
         const word zvarMode
         (
@@ -314,10 +334,43 @@ Foam::solvers::peqsiFluid::peqsiFluid(fvMesh& mesh)
             updateSegregation();
         }
         fgmClosure();
-        h_ = thermo_.he();
+
+        if (restartH == "eos")
+        {
+            h_ = thermo_.he();
+            Info<< "PEQSI restart: h reseeded from he(p, T, Y_manifold) "
+                << "after one closure pass" << endl;
+        }
+        else
+        {
+            FGMTable& tbl = fgmTable_();
+            const scalar hOx = tbl.hOx();
+            const scalar hFuel = tbl.hFuel();
+            const bool haveDhRef = tbl.hasDhRef();
+
+            const scalarField& Zf = Z_().primitiveField();
+            const scalarField& gZf = Zvar_().primitiveField();
+            const scalarField& cF = cNormF_();
+            scalarField& hf = h_.primitiveFieldRef();
+
+            forAll(hf, celli)
+            {
+                const scalar Zcl = min(max(Zf[celli], 0.0), 1.0);
+                const scalar gz = max(gZf[celli], 0.0);
+                const scalar Ccl = cF[celli];
+                const scalar hMix = (1.0 - Zcl)*hOx + Zcl*hFuel;
+                hf[celli] =
+                    hMix
+                  + (haveDhRef
+                      ? tbl.interpolateDhRef(Zcl, gz, Ccl) : 0.0);
+            }
+            Info<< "PEQSI restart: h reseeded to the table's own "
+                << "adiabatic mixing-line state (dh = 0) at the case's "
+                << "(Z, gz, c) -- the case's non-adiabatic dh is "
+                << "discarded, not carried across the table lineage"
+                << endl;
+        }
         h_.correctBoundaryConditions();
-        Info<< "PEQSI restart: h reseeded from he(p, T, Y_manifold) "
-            << "after one closure pass" << endl;
     }
 
     Info<< "peqsiFluid: PEQSI fractional-step solver "
