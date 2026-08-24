@@ -2148,7 +2148,16 @@ void Foam::solvers::peqsiFluid::fgmClosure()
     // whether the table or the runtime assembly is the odd one out, and
     // the two independently baked tables agreeing to four decimals on
     // this number says the difference is not in the table.
-    if (dbCell >= 0)
+    // Interval-gated: the probe's raw-materials comparison evaluates
+    // TWO FULL-FIELD property sweeps (Cv, Cp) for one cell's printout,
+    // and the Pout is per rank per step -- measured 0.9 s/step of
+    // "outer" time on the 48-rank rd0110 case before gating.
+    static label dbTick = 0;
+    const label dbEvery =
+        pimple.dict().lookupOrDefault<label>("peqsiDiagInterval", 10);
+    const bool dbNow = dbEvery > 0 && (dbTick++ % dbEvery) == 0;
+
+    if (dbCell >= 0 && dbNow)
     {
         const scalar v = 1.0/max(rhof[dbCell], small);
         const scalar cTab =
@@ -2194,6 +2203,8 @@ void Foam::solvers::peqsiFluid::fgmClosure()
             << ", rho = " << rhof[dbCell] << ", v = " << v << endl;
     }
 
+    if (dbNow)
+    {
     Info<< "PEQSI FGM: coeff diag max rel dAlpha = " << dAlpha
         << ", dBeta(v-matched) = " << dBeta
         << ", |T_tbl - T| max = " << dT   // gate benefit, not error
@@ -2221,6 +2232,7 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         }
     }
     Info<< endl;
+    }
 
     // Opt-1.  thermo_.correct() rebuilds a 106-species base-thermo blend per
     // cell; under FPV the cell composition IS the table's node composition
