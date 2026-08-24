@@ -796,6 +796,172 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
     h_ = rh/r;
     h_.correctBoundaryConditions();
 
+    // ------------------------------------------------------------------
+    // Mesh-general front regularisation (peqsiAVCoeff > 0 to enable).
+    //
+    // Jameson-type 2nd-order artificial dissipation with a density
+    // front sensor -- the unstructured-FV standard (JST; the AVBP
+    // real-gas LES line applies exactly this sensor/operator family to
+    // transcritical coaxial injection).  Replaces the retired
+    // DIRECTIONAL devices (peqsiLADCoeff shear, peqsiFilterSigma/SC,
+    // peqsiBoundZ), whose grid-aligned stencils were measured hostile
+    // on the 42%-skewed rd0110 mesh: here the operator is the standard
+    // face-based conservative laplacian (non-orthogonal correction and
+    // coupled patches included), so the discretisation is mesh-general
+    // by construction.
+    //
+    //   sensor  psi_P = |sum_f (rho_N - rho_P)| / sum_f (rho_N + rho_P)
+    //           (normalised undivided second difference: ~O(1) across a
+    //           2-cell front, ~0 on smooth fields AND on linear shear,
+    //           so resolved K-H at the lip is not damped)
+    //   coeff   Gamma_f = k2 psi_f (|u_f| + c_f) |d_f|,  c = 1/sqrt(psi_T)
+    //           (isothermal sound speed from the thermo compressibility:
+    //           within sqrt(gamma) of c and positive for any state)
+    //   update  q <- q + dt div(Gamma grad q) on the CONSERVATIVE set
+    //           {rho, rho u, rho h, rho Z, rho Zvar, rho Yc}: at a
+    //           uniform-(u, h, p) contact the same operator on rho and
+    //           rho q leaves u, h, p untouched -- the substep's
+    //           pressure-equilibrium property survives, and the flux
+    //           form conserves every integral (the Helmholtz mass
+    //           telescoping is unaffected).
+    //
+    // p is NOT smoothed: the acoustic substep owns it, and at a front
+    // p is uniform anyway.
+    const scalar k2
+    (
+        pimple.dict().lookupOrDefault<scalar>("peqsiAVCoeff", 0.0)
+    );
+    if (k2 > 0)
+    {
+        // Undivided second difference of rho, accumulated by a plain
+        // face loop (processor/cyclic neighbours through
+        // patchNeighbourField; one-sided physical patches contribute
+        // nothing -- the front never needs sensing ON a wall face)
+        scalarField num(mesh.nCells(), 0.0);
+        scalarField den(mesh.nCells(), 0.0);
+        {
+            const labelUList& own = mesh.owner();
+            const labelUList& nei = mesh.neighbour();
+            const scalarField& rf = rho_.primitiveField();
+            forAll(own, facei)
+            {
+                const scalar d = rf[nei[facei]] - rf[own[facei]];
+                const scalar a = rf[nei[facei]] + rf[own[facei]];
+                num[own[facei]] += d;
+                num[nei[facei]] -= d;
+                den[own[facei]] += a;
+                den[nei[facei]] += a;
+            }
+            forAll(rho_.boundaryField(), patchi)
+            {
+                const fvPatchScalarField& prho =
+                    rho_.boundaryField()[patchi];
+                if (!prho.coupled()) continue;
+                const labelUList& fc = prho.patch().faceCells();
+                const tmp<scalarField> tnf(prho.patchNeighbourField());
+                const scalarField& nf = tnf();
+                forAll(fc, facei)
+                {
+                    num[fc[facei]] += nf[facei] - rf[fc[facei]];
+                    den[fc[facei]] += nf[facei] + rf[fc[facei]];
+                }
+            }
+        }
+        volScalarField psiS
+        (
+            IOobject("PEQSI:avSensor", runTime.name(), mesh),
+            mesh,
+            dimensionedScalar(dimless, 0),
+            zeroGradientFvPatchScalarField::typeName
+        );
+        {
+            scalarField& pf = psiS.primitiveFieldRef();
+            forAll(pf, celli)
+            {
+                pf[celli] =
+                    min(mag(num[celli])/max(den[celli], small), 1.0);
+            }
+        }
+        psiS.correctBoundaryConditions();
+
+        const volScalarField lambda
+        (
+            mag(U_) + sqrt(1.0/max(thermo_.psi(), dimensionedScalar(dimDensity/dimPressure, vSmall)))
+        );
+
+        surfaceScalarField Gamma
+        (
+            "PEQSI:avGamma",
+            k2*fvc::interpolate(psiS)*fvc::interpolate(lambda)
+           /mesh.nonOrthDeltaCoeffs()
+        );
+        // explicit-diffusion stability ceiling: dt Gamma delta^2 <= 1/4
+        Gamma = min
+        (
+            Gamma,
+            0.25/(dt*sqr(mesh.nonOrthDeltaCoeffs()))
+        );
+
+        const volScalarField rho0(rho_);
+        rho_ += dt*fvc::laplacian(Gamma, rho0);
+        rho_.correctBoundaryConditions();
+        const volScalarField rhoSafe
+        (
+            max(rho_, dimensionedScalar(dimDensity, small))
+        );
+
+        auto smooth = [&](volScalarField& q)
+        {
+            const volScalarField rq(rho0*q);
+            q = (rq + dt*fvc::laplacian(Gamma, rq))/rhoSafe;
+            q.correctBoundaryConditions();
+        };
+
+        {
+            const volVectorField rU(rho0*U_);
+            U_ = (rU + dt*fvc::laplacian(Gamma, rU))/rhoSafe;
+            U_.correctBoundaryConditions();
+        }
+        smooth(h_);
+        if (fgmActive_)
+        {
+            smooth(Z_());
+            smooth(Zvar_());
+            smooth(Yc_());
+        }
+
+        if (pimple.dict().lookupOrDefault<Switch>("peqsiStiffCensus", false))
+        {
+            const label every =
+                pimple.dict().lookupOrDefault<label>("peqsiDiagInterval", 10);
+            static label n = 0;
+            if (every > 0 && (n++ % every) == 0)
+            {
+                Info<< "PEQSI AV: sensor max = " << gMax(psiS)
+                    << ", Gamma max = " << gMax(Gamma.primitiveField())
+                    << " m2/s" << endl;
+            }
+        }
+    }
+
+    // h-budget probe (peqsiStiffCensus): who is heating the field?  The
+    // rd0110 restart shows a LINEAR global T rise (~1.7 K/step over 88%
+    // of cells) that survives outlet-BC and LES/laminar bisection; the
+    // remaining suspects are this substep's h equation and the acoustic
+    // Eq. 24 update.  Print the substep's own d(int rho h) so the two
+    // can be told apart.
+    if (pimple.dict().lookupOrDefault<Switch>("peqsiStiffCensus", false))
+    {
+        const scalar rhAfter =
+            gSum(rho_.primitiveField()*h_.primitiveField()
+                *mesh.V().primitiveField());
+        const scalar rhBefore =
+            gSum(rhoN_().primitiveField()*hN_().primitiveField()
+                *mesh.V().primitiveField());
+        Info<< "PEQSI h-budget: advective substep d(int rho h) = "
+            << rhAfter - rhBefore << " J" << endl;
+    }
+
     mark(tPhase_[3]);
 }
 
