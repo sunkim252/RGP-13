@@ -863,9 +863,13 @@ void Foam::solvers::peqsiFluid::invertTemperature()
             }
         }
 
+        // The reduction must be UNCONDITIONAL: gating a collective on a
+        // per-rank count deadlocks the ranks that skip it -- exactly what
+        // hung the first 48-rank rd0110 bring-up (all ranks spinning in
+        // MPI progress, one saturated rank waiting in this reduce).
+        reduce(nSaturated_, sumOp<label>());
         if (nSaturated_ > 0)
         {
-            reduce(nSaturated_, sumOp<label>());
             Info<< "PEQSI thermo closure: " << nSaturated_
                 << " clamp-saturated Newton cell-iterations" << endl;
         }
