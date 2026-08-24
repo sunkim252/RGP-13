@@ -699,25 +699,32 @@ void Foam::solvers::peqsiFluid::invertTemperature()
             scalarField Tsec(Tf.size(), great);   // great = no history yet
             scalarField hsec(Tf.size(), 0.0);
 
-            // Oscillation damping (Illinois-style safeguard on the
-            // secant/cp step).  Near a pseudo-boiling Widom crossing cp
-            // both peaks and varies rapidly with T, so a slope sampled
-            // across one dTmax=25 K span can badly misestimate the
-            // local curvature: the step overshoots, the NEXT slope
-            // sample (now on the other side of the peak) overshoots
-            // back, and the cell oscillates instead of converging --
+            // Safeguarded Newton (Numerical Recipes Sec. 9.4,
+            // "rtsafe": Newton-Raphson combined with bisection inside a
+            // shrinking bracket of known-opposite-sign residual).  Near
+            // a pseudo-boiling Widom crossing cp both peaks and varies
+            // rapidly with T, so a slope sampled across one dTmax=25 K
+            // span can badly misestimate the local curvature and the
+            // secant overshoots back and forth without converging --
             // measured on the rd0110 3M restart (peqsiRestartH manifold
-            // landed ~243k O2-branch cells in [59, 175] K, T_c = 154.6 K
-            // at this pressure): flat at maxRel 0.2-0.4 for 20+ steps,
-            // Newton wall time doubling step to step.  A sign flip in
-            // consecutive dT is exactly the oscillation signature; on
-            // that signal, bisect between the current and the
-            // immediately preceding T instead of trusting the local
-            // slope again -- standard safeguarded-secant practice
-            // (cf. the "Illinois" regula-falsi modification), costs no
-            // extra property evaluations, and is the identity whenever
-            // the plain secant is not oscillating.
-            scalarField dTprev(Tf.size(), 0.0);
+            // landed ~250k O2-branch cells in [50, 175] K, T_c = 154.6 K
+            // at this pressure): flat at maxRel 0.2-0.5 for 10+ steps.
+            // A first attempt (bisect on a dT SIGN flip alone, no
+            // verified bracket) measured ZERO improvement -- a sign
+            // flip proves the SLOPE ESTIMATE reversed, not that the
+            // root lies between the last two T's, so that heuristic
+            // does not actually bound the search.  This version tracks
+            // the true bracket from the residual VALUES: the moment any
+            // two evaluated (T, h) pairs straddle the target (which a
+            // genuinely oscillating cell produces on its own), every
+            // later Newton/secant step is accepted only if it lands
+            // inside that bracket, otherwise the step is bisection --
+            // guaranteed to converge geometrically by monotonicity
+            // (cp > 0), using the SAME evaluations the loop already
+            // pays for.  Cells that are converging monotonically never
+            // form a bracket and are untouched by any of this.
+            scalarField TloF, ThiF;
+            boolList bracketed;
 
             // Take the temperature straight from the manifold wherever
             // the cell's specific volume still matches the table's.
@@ -803,7 +810,6 @@ void Foam::solvers::peqsiFluid::invertTemperature()
                     }
 
                     Tf[i] = min(max(Tnew, Tmin), Tmax);
-                    dTprev[i] = dT;
                     const scalar rel = mag(dT)/max(Tf[i], small);
                     if (rel > tol) active.append(i);
                     maxRel = max(maxRel, rel);
@@ -811,6 +817,13 @@ void Foam::solvers::peqsiFluid::invertTemperature()
                 }
                 else
                 {
+                    if (TloF.empty())
+                    {
+                        TloF.setSize(Tf.size(), 0.0);
+                        ThiF.setSize(Tf.size(), 0.0);
+                        bracketed.setSize(Tf.size(), false);
+                    }
+
                     scalarField Tsub(active.size());
                     forAll(active, m) Tsub[m] = Tf[active[m]];
                     const tmp<scalarField> thk(thermo_.he(Tsub, active));
@@ -820,6 +833,42 @@ void Foam::solvers::peqsiFluid::invertTemperature()
                     forAll(active, m)
                     {
                         const label i = active[m];
+
+                        // Residual at the CURRENT Tf[i] (hkf[m] was just
+                        // evaluated there).  Fold it into the bracket
+                        // before deciding this iteration's step: either
+                        // it completes a not-yet-bracketed cell's first
+                        // sign-changing pair, or it shrinks an existing
+                        // bracket -- both using an evaluation the loop
+                        // needed anyway.
+                        const scalar rCur = hkf[m] - hf[i];
+                        if (!bracketed[i])
+                        {
+                            if
+                            (
+                                Tsec[i] < great
+                             && rCur*(hsec[i] - hf[i]) < 0.0
+                            )
+                            {
+                                if (rCur < 0.0)
+                                {
+                                    TloF[i] = Tf[i]; ThiF[i] = Tsec[i];
+                                }
+                                else
+                                {
+                                    TloF[i] = Tsec[i]; ThiF[i] = Tf[i];
+                                }
+                                bracketed[i] = true;
+                            }
+                        }
+                        else if (rCur < 0.0)
+                        {
+                            TloF[i] = Tf[i];
+                        }
+                        else
+                        {
+                            ThiF[i] = Tf[i];
+                        }
 
                         scalar slope = max(cpf[i], small);
                         if (Tsec[i] < great && mag(Tf[i] - Tsec[i]) > small)
@@ -835,21 +884,22 @@ void Foam::solvers::peqsiFluid::invertTemperature()
 
                         scalar dT = (hf[i] - hkf[m])/slope;
                         dT = min(max(dT, -dTmax), dTmax);
+                        scalar Tnew = Tf[i] + dT;
 
-                        // Oscillation safeguard (see the dTprev comment
-                        // above): a sign flip against the step just
-                        // taken means the local slope estimate sent the
-                        // iterate back past where it came from.  Bisect
-                        // to the midpoint of the last two T's instead --
-                        // it cannot overshoot further, and it converges
-                        // geometrically once triggered.
-                        if (dTprev[i]*dT < 0.0)
+                        // rtsafe safeguard: once bracketed, a step that
+                        // would leave (Tlo, Thi) is untrustworthy --
+                        // bisect instead.  Monotonicity (cp > 0)
+                        // guarantees the bisection point is a strictly
+                        // better bracket, so this cannot diverge.
+                        if
+                        (
+                            bracketed[i]
+                         && (Tnew <= TloF[i] || Tnew >= ThiF[i])
+                        )
                         {
-                            dT = -0.5*dTprev[i];
+                            Tnew = 0.5*(TloF[i] + ThiF[i]);
+                            dT = Tnew - Tf[i];
                         }
-                        dTprev[i] = dT;
-
-                        const scalar Tnew = Tf[i] + dT;
 
                         if ((Tnew <= Tmin && dT < 0) || (Tnew >= Tmax && dT > 0))
                         {
