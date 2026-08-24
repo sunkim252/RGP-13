@@ -926,8 +926,64 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
             0.25/(dt*sqr(mesh.nonOrthDeltaCoeffs()))
         );
 
+        // The five scalar targets (rho, rho h, rho Z, rho Zvar, rho Yc)
+        // ride ONE symmTensor laplacian so the face sweep loads the
+        // geometry and Gamma once instead of five times (same
+        // memory-bandwidth argument as the transport carriers; the
+        // per-component arithmetic is what the per-field calls did).
+        // Dimensions are stripped (dimless carrier) and reapplied on
+        // unpack.  U keeps its own vector call.
         const volScalarField rho0(rho_);
-        rho_ += dt*fvc::laplacian(Gamma, rho0);
+        const bool packScalars = fgmActive_;
+
+        volSymmTensorField Qs
+        (
+            IOobject("PEQSI:avQ", runTime.name(), mesh),
+            mesh,
+            dimensionedSymmTensor(dimless, Zero),
+            zeroGradientFvPatchSymmTensorField::typeName
+        );
+        {
+            symmTensorField& Qf = Qs.primitiveFieldRef();
+            const scalarField& rf = rho0.primitiveField();
+            const scalarField& hf = h_.primitiveField();
+            const scalarField* Zf =
+                packScalars ? &Z_().primitiveField() : nullptr;
+            const scalarField* Zvf =
+                packScalars ? &Zvar_().primitiveField() : nullptr;
+            const scalarField* Ycf =
+                packScalars ? &Yc_().primitiveField() : nullptr;
+            forAll(Qf, i)
+            {
+                Qf[i] = symmTensor
+                (
+                    rf[i],
+                    rf[i]*hf[i],
+                    packScalars ? rf[i]*(*Zf)[i] : 0.0,
+                    packScalars ? rf[i]*(*Zvf)[i] : 0.0,
+                    packScalars ? rf[i]*(*Ycf)[i] : 0.0,
+                    0.0
+                );
+            }
+            // zeroGradient physical patches make the AV flux through
+            // walls and inlets exactly zero -- a regulariser must not
+            // pump mass or energy through a boundary (the per-field
+            // version diffused against fixed boundary values there);
+            // processor/cyclic patches keep their constraint coupling.
+            Qs.correctBoundaryConditions();
+        }
+
+        const volSymmTensorField LQs(fvc::laplacian(Gamma, Qs));
+        const symmTensorField& Lf = LQs.primitiveField();
+        const scalar dtv2 = dt.value();
+
+        {
+            scalarField& rf = rho_.primitiveFieldRef();
+            forAll(rf, i)
+            {
+                rf[i] += dtv2*Lf[i].xx();
+            }
+        }
         rho_.correctBoundaryConditions();
         volScalarField rhoSafe("PEQSI:avRhoDen", rho_);
         {
@@ -942,24 +998,35 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
             rhoSafe.correctBoundaryConditions();
         }
 
-        auto smooth = [&](volScalarField& q)
-        {
-            const volScalarField rq(rho0*q);
-            q = (rq + dt*fvc::laplacian(Gamma, rq))/rhoSafe;
-            q.correctBoundaryConditions();
-        };
-
         {
             const volVectorField rU(rho0*U_);
             U_ = (rU + dt*fvc::laplacian(Gamma, rU))/rhoSafe;
             U_.correctBoundaryConditions();
         }
-        smooth(h_);
-        if (fgmActive_)
         {
-            smooth(Z_());
-            smooth(Zvar_());
-            smooth(Yc_());
+            const scalarField& r0 = rho0.primitiveField();
+            const scalarField& rs = rhoSafe.primitiveField();
+            scalarField& hf = h_.primitiveFieldRef();
+            forAll(hf, i)
+            {
+                hf[i] = (r0[i]*hf[i] + dtv2*Lf[i].xy())/rs[i];
+            }
+            h_.correctBoundaryConditions();
+            if (packScalars)
+            {
+                scalarField& Zf = Z_().primitiveFieldRef();
+                scalarField& Zvf = Zvar_().primitiveFieldRef();
+                scalarField& Ycf = Yc_().primitiveFieldRef();
+                forAll(Zf, i)
+                {
+                    Zf[i]  = (r0[i]*Zf[i]  + dtv2*Lf[i].xz())/rs[i];
+                    Zvf[i] = (r0[i]*Zvf[i] + dtv2*Lf[i].yy())/rs[i];
+                    Ycf[i] = (r0[i]*Ycf[i] + dtv2*Lf[i].yz())/rs[i];
+                }
+                Z_().correctBoundaryConditions();
+                Zvar_().correctBoundaryConditions();
+                Yc_().correctBoundaryConditions();
+            }
         }
 
         if (pimple.dict().lookupOrDefault<Switch>("peqsiStiffCensus", false))
