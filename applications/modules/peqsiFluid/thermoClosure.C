@@ -1388,6 +1388,62 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         tbl.hasOptTable("W") ? &tbl.optTable("W") : nullptr;
     const List<scalar>& Ttbl = tbl.Ttable();
 
+    // ---- native-chi 4th axis (UFPV tables) ----
+    // The 4th stencil coordinate is chi_st instead of the enthalpy
+    // defect, VERBATIM from the validated fgmFluid path (fgmFluid.C
+    // updateManifold): chi_tilde = 2 (D_eff/rho) |grad Z|^2 with
+    // D_eff = mu/Le (+ rho nut/Sct under LES), mapped to the
+    // stoichiometric value with the Pitsch-Steiner polynomial shape
+    // chi_st = chi_tilde Zst(1-Zst)/(Z(1-Z)) -- the Z(1-Z) form, not
+    // the erfc profile, because that is what the reference
+    // implementation runs and validated.  Everything downstream --
+    // dhF_ (which the S_Y perturbation loop and the Opt-1/Tier-2
+    // mixture arming read as "the 4th coordinate"), the shared
+    // stencil, the packed lookup -- is coordinate-agnostic.
+    const bool useChi = tbl.hasChi();
+    scalar shapeZst = 0, chiClampMin = 0, chiClampMax = great;
+    tmp<volScalarField> tG2;
+    const scalarField* g2p = nullptr;
+    tmp<volScalarField> tMuLe;
+    const scalarField* DeffZp = nullptr;
+    if (useChi)
+    {
+        const scalar Zst = tbl.lookupOrDefault<scalar>("Z_st", 0.0625);
+        shapeZst = max(Zst*(1.0 - Zst), small);
+        chiClampMin = tbl.lookupOrDefault<scalar>("chiClampMin", 0.0);
+        chiClampMax = tbl.lookupOrDefault<scalar>("chiClampMax", great);
+
+        tG2 = magSqr(fvc::grad(Z_()));
+        g2p = &tG2().primitiveField();
+
+        // D_eff for Z: mu/Le, unity Le unless the table names one.
+        // (The chi tables to date are unity-Lewis families.)
+        scalar LeZ = 1.0;
+        if (tbl.found("Le") && tbl.isDict("Le"))
+        {
+            LeZ = tbl.subDict("Le").lookupOrDefault<scalar>("Z", 1.0);
+        }
+        tMuLe = tmp<volScalarField>
+        (
+            new volScalarField
+            (
+                IOobject("PEQSI:DeffZ", mesh.time().name(), mesh),
+                mesh,
+                dimensionedScalar(dimMass/dimLength/dimTime, 0),
+                zeroGradientFvPatchScalarField::typeName
+            )
+        );
+        tMuLe.ref().primitiveFieldRef() = thermo_.mu()().primitiveField()/LeZ;
+        if (sgsActive_ > 0)
+        {
+            tMuLe.ref().primitiveFieldRef() +=
+                rho_.primitiveField()
+               *momentumTransport->nut()().primitiveField()
+               /pimple.dict().lookupOrDefault<scalar>("peqsiSct", 0.7);
+        }
+        DeffZp = &tMuLe().primitiveField();
+    }
+
     // ---- packed lookup arming (once) ----
     // One interleaved gather per cell instead of ~50 scattered table
     // reads at the same stencil.  Bit-identical (see interpolatePacked);
@@ -1519,17 +1575,35 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         if (Zcl < 0.31) { if (cRaw > cMaxLoZ) cMaxLoZ = cRaw; }
         else            { if (cRaw > cMaxHiZ) cMaxHiZ = cRaw; }
 
-        // dh with the dh = 0 slice reference (see FGMTable.H)
-        const scalar hMix = (1.0 - Zcl)*hOx + Zcl*hFuel;
-        const scalar dh =
-            hfld[celli] - hMix - (tbl.hasDhRef() ? tbl.interpolateDhRef(Zcl, gz, Ccl) : 0.0);
+        // 4th coordinate: enthalpy defect (dh tables, with the dh = 0
+        // slice reference -- see FGMTable.H) or chi_st (native-chi
+        // tables, mapping above).
+        scalar coord4;
+        if (useChi)
+        {
+            const scalar Dl =
+                (*DeffZp)[celli]/max(rhof[celli], small);
+            const scalar chiT = 2.0*Dl*(*g2p)[celli];
+            const scalar shape = max(Zcl*(1.0 - Zcl), small);
+            coord4 =
+                max(chiClampMin,
+                    min(chiClampMax, chiT*shapeZst/shape));
+        }
+        else
+        {
+            const scalar hMix = (1.0 - Zcl)*hOx + Zcl*hFuel;
+            coord4 =
+                hfld[celli] - hMix
+              - (tbl.hasDhRef()
+                  ? tbl.interpolateDhRef(Zcl, gz, Ccl) : 0.0);
+        }
 
         cNormF_()[celli] = Ccl;
         cnormZ_()[celli] = Cn;
-        dhF_()[celli] = dh;
+        dhF_()[celli] = coord4;
 
         FGMTable::FGMStencil st;
-        tbl.makeStencil(Zcl, gz, Ccl, dh, st);
+        tbl.makeStencil(Zcl, gz, Ccl, coord4, st);
 
         if (pkOn)
         {

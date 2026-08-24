@@ -221,22 +221,14 @@ Foam::solvers::peqsiFluid::peqsiFluid(fvMesh& mesh)
         // ------------------------------------------------------------
         fgmTable_.reset(new FGMTable(mesh, "fgmProperties"));
 
-        // A native-chi table cannot be consumed yet: fgmClosure builds
-        // the 4th stencil coordinate as the enthalpy defect dh,
-        // unconditionally.  Feeding a chi-axis table would put dh on
-        // the chi axis -- a silently wrong lookup, not an error.  Refuse
-        // until the chi branch (chi_local = 2 D |grad Z|^2 + Peters
-        // mapping) is wired.
         if (fgmTable_().hasChi())
         {
-            FatalErrorInFunction
-                << "peqsiFGM: the table carries a native chi axis (nChi = "
-                << fgmTable_().nChi() << ").  peqsiFluid's closure feeds "
-                << "the 4th coordinate as the ENTHALPY DEFECT and has no "
-                << "chi-lookup branch yet -- this table would be read at "
-                << "wrong coordinates.  Use an enthalpy-axis table "
-                << "(fourthAxis enthalpy) until the chi branch is wired."
-                << exit(FatalError);
+            Info<< "peqsiFGM: native chi-axis table (nChi = "
+                << fgmTable_().nChi() << ") -- 4th coordinate is chi_st "
+                << "from 2 (Deff/rho)|grad Z|^2 with the Pitsch-Steiner "
+                << "Z(1-Z) mapping (fgmFluid convention).  ADIABATIC: "
+                << "no dh correction is available from this table."
+                << endl;
         }
 
         // The table must carry the PEQSI coefficient blocks and W;
