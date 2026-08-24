@@ -163,6 +163,42 @@ Foam::solvers::peqsiFluid::peqsiFluid(fvMesh& mesh)
         }
     }
 
+    // Mesh-alignment audit.  The directional devices -- LAD, the
+    // selective and shock-capturing filters, the Z bounding
+    // diffusivity's overbar -- decompose operators with per-face
+    // direction weights (n . e_l)^2, which is a Cartesian-grid
+    // construction: on faces not aligned with a coordinate axis the
+    // "directional" second derivative smears across directions and the
+    // device magnitudes are no longer the TK/Visbal-Gaitonde formulas.
+    // Measure the alignment once and say so, rather than letting an
+    // unstructured run discover it as a mis-scaled artificial term.
+    {
+        const surfaceVectorField nf(mesh.Sf()/mesh.magSf());
+        scalar worst = 0;   // deviation of max |n.e_l| from 1
+        const vectorField& nfi = nf.primitiveField();
+        forAll(nfi, facei)
+        {
+            const vector& n = nfi[facei];
+            const scalar amax =
+                max(mag(n.x()), max(mag(n.y()), mag(n.z())));
+            worst = max(worst, 1.0 - amax);
+        }
+        reduce(worst, maxOp<scalar>());
+        if (worst > 0.01)
+        {
+            WarningInFunction
+                << "mesh faces deviate from axis alignment by up to "
+                << 100*worst << "% (1 - max|n.e_l|).  The directional "
+                << "devices (peqsiLADCoeff, peqsiFilterSigma, "
+                << "peqsiFilterSC, peqsiBoundZ) assume grid-aligned "
+                << "hexes; on this mesh their magnitudes are not the "
+                << "published formulas.  The core scheme (RK3 + "
+                << "Helmholtz + updates) is mesh-general -- set "
+                << "nNonOrthogonalCorrectors as for any p equation."
+                << endl;
+        }
+    }
+
     if (fv::localEulerDdt::enabled(mesh))
     {
         FatalErrorInFunction

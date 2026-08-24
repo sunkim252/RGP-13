@@ -190,21 +190,34 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
         tRhs = (2.0/(theta*dt))*sComp_();
     }
 
-    fvScalarMatrix dpEqn
-    (
-        fvm::laplacian(dp)
-      + fvm::div(Fdp, dp)
-      + fvm::Sp((2.0/theta)*coef/sqr(dt), dp)
-     ==
-      - fvc::laplacian(pStar + pN_())
-      + tRhs()
-    );
+    // Non-orthogonal correction loop, the standard pressure-equation
+    // pattern.  With the 'corrected' laplacian scheme the implicit
+    // operator carries only the ORTHOGONAL part; the cross-diffusion
+    // correction is explicit, evaluated with the current dp -- which on
+    // a single solve is the INITIAL dp = 0, so on a non-orthogonal mesh
+    // the correction was simply missing while the RHS's explicit
+    // laplacian of (p* + p^n) kept its full corrected form.  On an
+    // orthogonal mesh the correction is identically zero and one pass
+    // is bit-identical to the old single solve; on an unstructured mesh
+    // set nNonOrthogonalCorrectors as for any OpenFOAM p equation.
+    while (pimple.correctNonOrthogonal())
+    {
+        fvScalarMatrix dpEqn
+        (
+            fvm::laplacian(dp)
+          + fvm::div(Fdp, dp)
+          + fvm::Sp((2.0/theta)*coef/sqr(dt), dp)
+         ==
+          - fvc::laplacian(pStar + pN_())
+          + tRhs()
+        );
 
-    mark(tPhase_[4]);
+        mark(tPhase_[4]);
 
-    dpEqn.solve();
+        dpEqn.solve();
 
-    mark(tPhase_[5]);
+        mark(tPhase_[5]);
+    }
 
     // Interval-gated: two global reductions and a log line per step add
     // nothing the interval's last report does not, and at high rank
