@@ -936,12 +936,28 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
         const volScalarField rho0(rho_);
         const bool packScalars = fgmActive_;
 
+        // Physical patches are zeroGradient so the AV flux through walls
+        // and inlets is exactly zero -- a regulariser must not pump mass
+        // or energy through a boundary.  CONSTRAINT patches must keep
+        // their own type: a processor patch forced to zeroGradient makes
+        // the carrier blind to its neighbour rank, and the laplacian
+        // then sees a fake zero gradient on every decomposition
+        // boundary (rd0110, 48 ranks: the field was garbage within five
+        // steps).
+        wordList avBcTypes(mesh.boundary().size());
+        forAll(mesh.boundary(), patchi)
+        {
+            avBcTypes[patchi] =
+                mesh.boundary()[patchi].coupled()
+              ? rho_.boundaryField()[patchi].type()
+              : zeroGradientFvPatchScalarField::typeName;
+        }
         volSymmTensorField Qs
         (
             IOobject("PEQSI:avQ", runTime.name(), mesh),
             mesh,
             dimensionedSymmTensor(dimless, Zero),
-            zeroGradientFvPatchSymmTensorField::typeName
+            avBcTypes
         );
         {
             symmTensorField& Qf = Qs.primitiveFieldRef();
