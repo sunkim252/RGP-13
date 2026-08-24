@@ -699,6 +699,26 @@ void Foam::solvers::peqsiFluid::invertTemperature()
             scalarField Tsec(Tf.size(), great);   // great = no history yet
             scalarField hsec(Tf.size(), 0.0);
 
+            // Oscillation damping (Illinois-style safeguard on the
+            // secant/cp step).  Near a pseudo-boiling Widom crossing cp
+            // both peaks and varies rapidly with T, so a slope sampled
+            // across one dTmax=25 K span can badly misestimate the
+            // local curvature: the step overshoots, the NEXT slope
+            // sample (now on the other side of the peak) overshoots
+            // back, and the cell oscillates instead of converging --
+            // measured on the rd0110 3M restart (peqsiRestartH manifold
+            // landed ~243k O2-branch cells in [59, 175] K, T_c = 154.6 K
+            // at this pressure): flat at maxRel 0.2-0.4 for 20+ steps,
+            // Newton wall time doubling step to step.  A sign flip in
+            // consecutive dT is exactly the oscillation signature; on
+            // that signal, bisect between the current and the
+            // immediately preceding T instead of trusting the local
+            // slope again -- standard safeguarded-secant practice
+            // (cf. the "Illinois" regula-falsi modification), costs no
+            // extra property evaluations, and is the identity whenever
+            // the plain secant is not oscillating.
+            scalarField dTprev(Tf.size(), 0.0);
+
             // Take the temperature straight from the manifold wherever
             // the cell's specific volume still matches the table's.
             // Enthalpy is an AXIS of this table, so the tabulated T is
@@ -783,6 +803,7 @@ void Foam::solvers::peqsiFluid::invertTemperature()
                     }
 
                     Tf[i] = min(max(Tnew, Tmin), Tmax);
+                    dTprev[i] = dT;
                     const scalar rel = mag(dT)/max(Tf[i], small);
                     if (rel > tol) active.append(i);
                     maxRel = max(maxRel, rel);
@@ -814,6 +835,20 @@ void Foam::solvers::peqsiFluid::invertTemperature()
 
                         scalar dT = (hf[i] - hkf[m])/slope;
                         dT = min(max(dT, -dTmax), dTmax);
+
+                        // Oscillation safeguard (see the dTprev comment
+                        // above): a sign flip against the step just
+                        // taken means the local slope estimate sent the
+                        // iterate back past where it came from.  Bisect
+                        // to the midpoint of the last two T's instead --
+                        // it cannot overshoot further, and it converges
+                        // geometrically once triggered.
+                        if (dTprev[i]*dT < 0.0)
+                        {
+                            dT = -0.5*dTprev[i];
+                        }
+                        dTprev[i] = dT;
+
                         const scalar Tnew = Tf[i] + dT;
 
                         if ((Tnew <= Tmin && dT < 0) || (Tnew >= Tmax && dT > 0))
