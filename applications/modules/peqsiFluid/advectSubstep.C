@@ -1052,9 +1052,92 @@ void Foam::solvers::peqsiFluid::advectManifoldStage
         q.correctBoundaryConditions();
     };
 
-    stageOne(Z_(), ZN_(), "div(phiv,Z)", nullptr);
-    stageOne(Zvar_(), ZvarN_(), "div(phiv,Zvar)", nullptr);
-    stageOne(Yc_(), YcN_(), "div(phiv,Yc)", &sourceYc_());
+    // Packed carrier (peqsiPackManifold, default on): (Z, Zvar, Yc) as
+    // one vector field so the WENO reconstruction loads each cell's
+    // stencil matrices ONCE per stage instead of three times -- the same
+    // memory-bandwidth argument, and the same per-component weight
+    // computation, as the symmTensor carrier for the conservative set
+    // (WENOCoeff loops nComp inside the stencil loop; the math per
+    // component is identical to the per-field passes).  One scheme
+    // entry, "div(phiv,Zpack)", serves all three components; the
+    // bounded 01 fit is valid for each: Z in [0,1], Zvar in [0, 1/4],
+    // Yc in [0, Cnorm] -- all inside [0, 1].
+    if (pimple.dict().lookupOrDefault<Switch>("peqsiPackManifold", true))
+    {
+        wordList qBcTypes(mesh.boundary().size());
+        forAll(mesh.boundary(), patchi)
+        {
+            const word& pt = mesh.boundaryMesh()[patchi].type();
+            qBcTypes[patchi] =
+                (pt == "patch" || pt == "wall")
+              ? word("calculated")
+              : Z_().boundaryField()[patchi].type();
+        }
+        volVectorField Q3
+        (
+            IOobject("PEQSI:Zpack", mesh.time().name(), mesh),
+            mesh,
+            dimensionedVector(dimless, Zero),
+            qBcTypes
+        );
+        {
+            vectorField& Qf = Q3.primitiveFieldRef();
+            const scalarField& Zf = Z_().primitiveField();
+            const scalarField& Zvf = Zvar_().primitiveField();
+            const scalarField& Ycf = Yc_().primitiveField();
+            forAll(Qf, i)
+            {
+                Qf[i] = vector(Zf[i], Zvf[i], Ycf[i]);
+            }
+            forAll(Q3.boundaryFieldRef(), patchi)
+            {
+                fvPatchVectorField& Qp = Q3.boundaryFieldRef()[patchi];
+                if (Qp.coupled()) continue;
+                const fvPatchScalarField& Zp =
+                    Z_().boundaryField()[patchi];
+                const fvPatchScalarField& Zvp =
+                    Zvar_().boundaryField()[patchi];
+                const fvPatchScalarField& Ycp =
+                    Yc_().boundaryField()[patchi];
+                forAll(Qp, i)
+                {
+                    Qp[i] = vector(Zp[i], Zvp[i], Ycp[i]);
+                }
+            }
+            Q3.correctBoundaryConditions();
+        }
+
+        const volVectorField LQ3
+        (
+            -(fvc::div(phiv, Q3, "div(phiv,Zpack)") - Q3*divPhiv)
+        );
+
+        const vectorField& Lf = LQ3.primitiveField();
+        const scalarField& Sf = sourceYc_().primitiveField();
+        const scalarField& rf = rho_.primitiveField();
+        const scalarField& ZNf = ZN_().primitiveField();
+        const scalarField& ZvNf = ZvarN_().primitiveField();
+        const scalarField& YcNf = YcN_().primitiveField();
+        scalarField& Zf = Z_().primitiveFieldRef();
+        scalarField& Zvf = Zvar_().primitiveFieldRef();
+        scalarField& Ycf = Yc_().primitiveFieldRef();
+        forAll(Zf, i)
+        {
+            Zf[i]  = cOld*ZNf[i]  + cNew*(Zf[i]  + dtv*Lf[i].x());
+            Zvf[i] = cOld*ZvNf[i] + cNew*(Zvf[i] + dtv*Lf[i].y());
+            const scalar LYc = Lf[i].z() + Sf[i]/max(rf[i], small);
+            Ycf[i] = cOld*YcNf[i] + cNew*(Ycf[i] + dtv*LYc);
+        }
+        Z_().correctBoundaryConditions();
+        Zvar_().correctBoundaryConditions();
+        Yc_().correctBoundaryConditions();
+    }
+    else
+    {
+        stageOne(Z_(), ZN_(), "div(phiv,Z)", nullptr);
+        stageOne(Zvar_(), ZvarN_(), "div(phiv,Zvar)", nullptr);
+        stageOne(Yc_(), YcN_(), "div(phiv,Yc)", &sourceYc_());
+    }
 
     // Realizability on Yc, not on c.  The table axis is c = Yc/Cnorm(Z),
     // and Cnorm falls to 1.59e-3 at Z = 0, so an absolute Yc error of
