@@ -108,6 +108,20 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
         {
             dpBcTypes[patchi] = fixedValueFvPatchScalarField::typeName;
         }
+        // A waveTransmissive outlet declares a far-field PRESSURE the
+        // boundary relaxes toward -- for the acoustic correction that is
+        // a pressure-fixed far field, which is exactly the reference's
+        // own outlet treatment (PEQSI Sec. III B: outlet p fixed to the
+        // chamber value).  The old zeroGradient mapping made it a hard
+        // acoustic REFLECTOR instead: on the rd0110 restart the ringing
+        // could never leave, and the non-telescoping h term rectified
+        // the sustained oscillation into a systematic heating (88% of
+        // cells +100 K in 300 ns, global rho e drifting monotonically)
+        // until a boundary EOS evaluation died at step 352.
+        else if (p_.boundaryField()[patchi].type() == "waveTransmissive")
+        {
+            dpBcTypes[patchi] = fixedValueFvPatchScalarField::typeName;
+        }
     }
 
     volScalarField dp
