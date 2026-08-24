@@ -287,6 +287,39 @@ Foam::solvers::peqsiFluid::peqsiFluid(fvMesh& mesh)
         );
     }
 
+    // Restart consistency (peqsiRestartH, default off): a foreign
+    // restart -- fgmFluid state, or a table-lineage change -- carries an
+    // h that was NOT built against the composition THIS table returns.
+    // The constructor seed above used the case Y; the first closure then
+    // swaps Y to the manifold composition, and cells where the two
+    // lineages disagree are left chasing an enthalpy that he(p, T, Y)
+    // cannot reach (measured on the rd0110 3M bring-up: ~486 injector-
+    // lip cells pinned at the [50, 4000] K clamps, maxRel 0.49, flat
+    // over 28 steps).  Run the closure once so Y is the manifold's, then
+    // reseed h at the case (p, T) against THAT composition -- the same
+    // reference-frame argument as dhRef, which is defined against the
+    // table's own composition, never the case's.
+    if
+    (
+        fgmActive_
+     && pimple.dict().lookupOrDefault<Switch>("peqsiRestartH", false)
+    )
+    {
+        const word zvarMode
+        (
+            pimple.dict().lookupOrDefault<word>("peqsiZvar", "algebraic")
+        );
+        if (zvarMode == "algebraic")
+        {
+            updateSegregation();
+        }
+        fgmClosure();
+        h_ = thermo_.he();
+        h_.correctBoundaryConditions();
+        Info<< "PEQSI restart: h reseeded from he(p, T, Y_manifold) "
+            << "after one closure pass" << endl;
+    }
+
     Info<< "peqsiFluid: PEQSI fractional-step solver "
         << "(Wada et al., Phys. Fluids 36 (2024) 116104)" << nl
         << "    advective substep: SSP-RK3, p advected (PEQSI Eq. 10)" << nl
