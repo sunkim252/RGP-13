@@ -30,6 +30,7 @@ License
 #include "fvcFlux.H"
 #include "fvcLaplacian.H"
 #include "fvcSurfaceIntegrate.H"
+#include "localMax.H"
 
 // * * * * * * * * * * * * * * * Local Functions * * * * * * * * * * * * * * //
 
@@ -905,10 +906,17 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
             mag(U_) + sqrt(1.0/max(thermo_.psi(), dimensionedScalar(dimDensity/dimPressure, vSmall)))
         );
 
+        // Face value = MAX of the two sides (the JST/AVBP convention for
+        // both the sensor and the spectral radius), not the linear
+        // average: at a liquid/gas mixed face the liquid side's c ~ 1300
+        // then sets the scale, so the dissipation is strongest exactly at
+        // the transcritical faces where the dp/c^2 feedback lives --
+        // averaging halved it there.
+        const localMax<scalar> maxInterp(mesh);
         surfaceScalarField Gamma
         (
             "PEQSI:avGamma",
-            k2*fvc::interpolate(psiS)*fvc::interpolate(lambda)
+            k2*maxInterp.interpolate(psiS)()*maxInterp.interpolate(lambda)()
            /mesh.nonOrthDeltaCoeffs()
         );
         // explicit-diffusion stability ceiling: dt Gamma delta^2 <= 1/4
