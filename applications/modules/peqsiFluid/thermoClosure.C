@@ -69,22 +69,51 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
 
     scalar maxDev = 0;
 
+    // The sweep's v = 1/rho and every derivative behind it are
+    // unphysical when the transported rho has drifted below a physical
+    // floor (the lip episodes reach rho < 0): a sign-flipped alpha/beta
+    // feeds the Helmholtz diagonal with the wrong sign, the operator
+    // goes indefinite and one solve detonates.  Those cells get the
+    // coefficients of the EOS state (p, T) instead.  The bad count is
+    // reduced on every rank BEFORE thermo_.rho() so the fetch stays
+    // rank-uniform.
+    const scalar rhoFloor
+    (
+        pimple.dict().lookupOrDefault<scalar>("peqsiRhoCoeffFloor", 0.01)
+    );
+    label nBad = 0;
     forAll(rho, i)
     {
-        const scalar v = 1.0/rho[i];
-        const scalar dpdv = -sqr(rho[i])/psi[i];
-        const scalar dpdT = rho[i]*sqrt(max((cp[i] - cv[i])/(T[i]*psi[i]), 0.0));
+        if (rho[i] < rhoFloor) nBad++;
+    }
+    tmp<volScalarField> trhoE;
+    if (returnReduce(nBad, sumOp<label>()) > 0)
+    {
+        trhoE = thermo_.rho();
+    }
+    const scalarField* rhoEPtr =
+        trhoE.valid() ? &trhoE().primitiveField() : nullptr;
+
+    forAll(rho, i)
+    {
+        const scalar rhoC =
+            rho[i] < rhoFloor
+          ? max((*rhoEPtr)[i], rhoFloor)
+          : rho[i];
+        const scalar v = 1.0/rhoC;
+        const scalar dpdv = -sqr(rhoC)/psi[i];
+        const scalar dpdT = rhoC*sqrt(max((cp[i] - cv[i])/(T[i]*psi[i]), 0.0));
         const scalar xi = cv[i] + v*dpdT;
         const scalar dhdv = T[i]*dpdT + v*dpdv;
 
-        a[i] = dpdT/(rho[i]*xi);
-        b[i] = (dpdv - dpdT*dhdv/xi)/rho[i];
+        a[i] = dpdT/(rhoC*xi);
+        b[i] = (dpdv - dpdT*dhdv/xi)/rhoC;
 
         // App. D identity: beta/(1-alpha) == -rho c^2, c^2 = gamma/psi
         // (gamma = cp/cv from the already-evaluated fields -- the
         // thermo.gamma() call re-evaluates BOTH Cp and Cv sweeps)
         const scalar lhs = b[i]/(1.0 - a[i]);
-        const scalar rhs = -rho[i]*(cp[i]/cv[i])/psi[i];
+        const scalar rhs = -rhoC*(cp[i]/cv[i])/psi[i];
         maxDev = max(maxDev, mag(lhs - rhs)/max(mag(rhs), small));
     }
 

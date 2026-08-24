@@ -87,11 +87,20 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
 
     // n-state coefficient combination:
     //   coef = rho^n (1-alpha)/beta   ( == -1/c^2 < 0 by WKK App. D )
-    const volScalarField coef
+    volScalarField coef
     (
         "PEQSI:coef",
         rhoN_()*(1.0 - alpha_)/beta_
     );
+    // coef is -1/c^2 < 0 for any physical state (App. D identity); a
+    // cell whose TRANSPORTED rho^n has drifted negative flips its sign
+    // and the Helmholtz diagonal with it -- the operator goes indefinite
+    // and one solve detonates (rd0110 lip episode: dp reached 1e18 Pa in
+    // a single step).  Ceiling just below zero decouples such a cell
+    // from the acoustic update (its dp interpolates from the neighbours,
+    // the Eq. 11-13 increments vanish there) until advection restores
+    // the transported rho.
+    coef.min(dimensionedScalar(coef.dimensions(), -vSmall));
 
     // dp boundary types derived from the p field: a fixed-pressure
     // boundary (the 2-D jet outlet: p fixed to chamber pressure, PEQSI
@@ -372,6 +381,19 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
     //   rho^* h^* - ( rho^n h^n (1-alpha)/beta - 1 ) dp
     h_ = (rhoStar*hStar - (coef*hN_() - 1.0)*dp)/rho_;
     h_.correctBoundaryConditions();
+
+    // h-budget probe, acoustic side (see advectSubstep counterpart)
+    if (pimple.dict().lookupOrDefault<Switch>("peqsiStiffCensus", false))
+    {
+        const scalar rhAfter =
+            gSum(rho_.primitiveField()*h_.primitiveField()
+                *mesh.V().primitiveField());
+        const scalar rhStar =
+            gSum(rhoStar.primitiveField()*hStar.primitiveField()
+                *mesh.V().primitiveField());
+        Info<< "PEQSI h-budget: acoustic update d(int rho h) = "
+            << rhAfter - rhStar << " J" << endl;
+    }
 
     // Where the acoustic step's energy goes.  Subtracting p^{n+1} from
     // Eq. (24) gives d(rho e) = -coef h^n dp cell by cell, i.e. every
