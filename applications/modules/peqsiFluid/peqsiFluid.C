@@ -25,6 +25,7 @@ License
 
 #include "peqsiFluid.H"
 #include "thermodynamicConstants.H"
+#include "fvcFlux.H"
 #include "localEulerDdtScheme.H"
 #include "zeroGradientFvPatchFields.H"
 #include "addToRunTimeSelectionTable.H"
@@ -371,6 +372,49 @@ Foam::solvers::peqsiFluid::peqsiFluid(fvMesh& mesh)
                 << endl;
         }
         h_.correctBoundaryConditions();
+
+        // Full-state reseed (manifold mode only).  Measured on the
+        // rd0110 3M restart: the foreign initial field was CONVERGED
+        // under wrong inlet BCs (LOX 100 K instead of the canonical
+        // 143.3 K), leaving a 340k-cell core at rho ~1120 kg/m3 --
+        // 1.47x the table's entire oxidiser branch (761 at 143.3 K), a
+        // state the manifold cannot represent at all.  Reseeding h
+        // alone leaves that transported rho as a permanent 47% EOS
+        // mismatch feeding the injector-lip dp/rho regeneration loop
+        // (the thing that forced dt down to 1e-10).  Flushing it by
+        // advection would take ~ms of physical time; reseed instead:
+        // run the closure a SECOND time (the first h reseed moved the
+        // dh coordinate, so composition and the temperature guess must
+        // be re-looked-up at the new point), take the manifold
+        // temperature outright, and rebuild rho and phi from the EOS at
+        // that state.  What survives from the case: p, U, Z, c -- the
+        // dynamical memory.  What is discarded: every thermodynamic
+        // quantity of the off-anchor state.
+        if (restartH == "manifold")
+        {
+            fgmClosure();
+
+            volScalarField& Tw = const_cast<volScalarField&>(thermo_.T());
+            scalarField& Tf = Tw.primitiveFieldRef();
+            const scalarField& Tg = Tguess_();
+            forAll(Tf, celli)
+            {
+                if (Tg[celli] > 0)
+                {
+                    Tf[celli] =
+                        min(max(Tg[celli], scalar(50)), scalar(4000));
+                }
+            }
+            Tw.correctBoundaryConditions();
+
+            rho_ = thermo_.rho();
+            rho_.correctBoundaryConditions();
+            phi_ = fvc::flux(rho_*U_);
+
+            Info<< "PEQSI restart: T from the manifold and rho from the "
+                << "EOS at the reseeded state; phi rebuilt.  Case p, U, "
+                << "Z, c kept." << endl;
+        }
     }
 
     Info<< "peqsiFluid: PEQSI fractional-step solver "
