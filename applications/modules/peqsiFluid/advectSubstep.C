@@ -787,13 +787,29 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
     rho_ = r;
     rho_.correctBoundaryConditions();
 
-    U_ = ru/r;
+    // Magnitude-floored divisor: a drift-episode cell crossing rho = 0
+    // must not inject inf into u and h (see the Eq. 23/24 counterpart
+    // in correctPressurePEQSI.C)
+    volScalarField rDen("PEQSI:rDen", r);
+    {
+        scalarField& rd = rDen.primitiveFieldRef();
+        forAll(rd, celli)
+        {
+            if (mag(rd[celli]) < 0.01)
+            {
+                rd[celli] = rd[celli] < 0 ? -0.01 : 0.01;
+            }
+        }
+        rDen.correctBoundaryConditions();
+    }
+
+    U_ = ru/rDen;
     U_.correctBoundaryConditions();
 
     p_ = pw;
     p_.correctBoundaryConditions();
 
-    h_ = rh/r;
+    h_ = rh/rDen;
     h_.correctBoundaryConditions();
 
     // ------------------------------------------------------------------
@@ -905,10 +921,18 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
         const volScalarField rho0(rho_);
         rho_ += dt*fvc::laplacian(Gamma, rho0);
         rho_.correctBoundaryConditions();
-        const volScalarField rhoSafe
-        (
-            max(rho_, dimensionedScalar(dimDensity, small))
-        );
+        volScalarField rhoSafe("PEQSI:avRhoDen", rho_);
+        {
+            scalarField& rd = rhoSafe.primitiveFieldRef();
+            forAll(rd, celli)
+            {
+                if (mag(rd[celli]) < 0.01)
+                {
+                    rd[celli] = rd[celli] < 0 ? -0.01 : 0.01;
+                }
+            }
+            rhoSafe.correctBoundaryConditions();
+        }
 
         auto smooth = [&](volScalarField& q)
         {

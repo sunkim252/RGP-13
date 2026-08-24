@@ -374,12 +374,32 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
       - dt*gradPmid
     );
 
-    U_ = rhoUNew/rho_;
+    // A lip drift episode can carry the transported rho of single cells
+    // through zero while advection restores them; dividing by the raw
+    // field there injects inf into u and h and the NEXT step's kappa
+    // laplacian FPEs (rd0110, guarded run, step 203).  Divide by a
+    // magnitude-floored rho instead: healthy cells are untouched, a
+    // sick cell gets a finite (sign-consistent, wrong-anyway) value the
+    // closure clamps, instead of inf.
+    volScalarField rhoDen("PEQSI:rhoDen", rho_);
+    {
+        scalarField& rd = rhoDen.primitiveFieldRef();
+        forAll(rd, celli)
+        {
+            if (mag(rd[celli]) < 0.01)
+            {
+                rd[celli] = rd[celli] < 0 ? -0.01 : 0.01;
+            }
+        }
+        rhoDen.correctBoundaryConditions();
+    }
+
+    U_ = rhoUNew/rhoDen;
     U_.correctBoundaryConditions();
 
     // Eq. (24): rho^{n+1} h^{n+1} =
     //   rho^* h^* - ( rho^n h^n (1-alpha)/beta - 1 ) dp
-    h_ = (rhoStar*hStar - (coef*hN_() - 1.0)*dp)/rho_;
+    h_ = (rhoStar*hStar - (coef*hN_() - 1.0)*dp)/rhoDen;
     h_.correctBoundaryConditions();
 
     // h-budget probe, acoustic side (see advectSubstep counterpart)
