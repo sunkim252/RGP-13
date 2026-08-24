@@ -1324,6 +1324,39 @@ void Foam::solvers::peqsiFluid::invertTemperature()
 
     if (driftReport)
     {
+        // Who owns the coldest cells?  The manifold cannot return below
+        // its own T floor (80 K in the dp9lo2/dd2 lineage), so a cell at
+        // the solver's 50 K clamp must have come out of the Newton
+        // branch -- report which branch holds the minimum, and how many
+        // cells sit ON the clamp, so the question is answered from the
+        // log instead of by inference.
+        {
+            const scalarField& Tfd = thermo_.T().primitiveField();
+            const boolList* useT =
+                tabUsable_.valid() ? &tabUsable_() : nullptr;
+            label nAtFloor = 0, nFloorTab = 0;
+            scalar tMinTab = great, tMinNewt = great;
+            forAll(Tfd, i)
+            {
+                const bool fromTab = useT ? (*useT)[i] : false;
+                if (fromTab) tMinTab = min(tMinTab, Tfd[i]);
+                else tMinNewt = min(tMinNewt, Tfd[i]);
+                if (Tfd[i] < 50.5)
+                {
+                    nAtFloor++;
+                    if (fromTab) nFloorTab++;
+                }
+            }
+            reduce(nAtFloor, sumOp<label>());
+            reduce(nFloorTab, sumOp<label>());
+            reduce(tMinTab, minOp<scalar>());
+            reduce(tMinNewt, minOp<scalar>());
+            Info<< "PEQSI T floor census: on clamp (<50.5 K) " << nAtFloor
+                << " cells, of which manifold-path " << nFloorTab
+                << "; Tmin manifold-path = " << tMinTab
+                << ", Newton-path = " << tMinNewt << " K" << endl;
+        }
+
         Info<< "PEQSI thermo closure: T = ["
             << gMin(thermo_.T().primitiveField()) << ", "
             << gMax(thermo_.T().primitiveField())
