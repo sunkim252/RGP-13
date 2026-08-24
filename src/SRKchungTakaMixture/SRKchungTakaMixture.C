@@ -102,10 +102,16 @@ void Foam::SRKchungTakaMixture<ThermoType>::calculateRealGas
     scalar sigma3M = 0, epsilonkM0 = 0, omegaM0 = 0, MM0 = 0, miuiM0 = 0;
 
     // Diagonal terms (i == j)
+    // A zero-mole-fraction specie contributes exactly zero to every
+    // mixing sum here (all terms carry X[i]) -- skip it.  The 30-species
+    // FPV manifold writes Y onto the 106-species thermo, so ~76 species
+    // are identically zero and the pair loop shrinks ~13x, bit-identically
+    // (the test is an exact == 0, not a tolerance).
     if (needTransportMix)
     {
         forAll(COEF1_, i)
         {
+            if (X[i] == 0) continue;
             const scalar Xi2 = X[i]*X[i];
             coef1      += Xi2*COEF1_[i][i];
             coef2      += Xi2*COEF2_[i][i];
@@ -125,6 +131,7 @@ void Foam::SRKchungTakaMixture<ThermoType>::calculateRealGas
         // ~100 species this is the dominant cost, see the .H comment.
         forAll(COEF1_, i)
         {
+            if (X[i] == 0) continue;
             const scalar Xi2 = X[i]*X[i];
             coef1 += Xi2*COEF1_[i][i];
             coef2 += Xi2*COEF2_[i][i];
@@ -137,8 +144,10 @@ void Foam::SRKchungTakaMixture<ThermoType>::calculateRealGas
     {
         for (label i = 0; i < COEF1_.size(); i++)
         {
+            if (X[i] == 0) continue;
             for (label j = i + 1; j < COEF1_.size(); j++)
             {
+                if (X[j] == 0) continue;
                 const scalar twoXiXj = 2.0*X[i]*X[j];
                 coef1      += twoXiXj*COEF1_[i][j];
                 coef2      += twoXiXj*COEF2_[i][j];
@@ -156,8 +165,10 @@ void Foam::SRKchungTakaMixture<ThermoType>::calculateRealGas
     {
         for (label i = 0; i < COEF1_.size(); i++)
         {
+            if (X[i] == 0) continue;
             for (label j = i + 1; j < COEF1_.size(); j++)
             {
+                if (X[j] == 0) continue;
                 const scalar twoXiXj = 2.0*X[i]*X[j];
                 coef1 += twoXiXj*COEF1_[i][j];
                 coef2 += twoXiXj*COEF2_[i][j];
@@ -252,6 +263,7 @@ Foam::SRKchungTakaMixture<ThermoType>::calcMixture
         mixture_ = Y[0]*this->specieThermos()[0];
         for (label n = 1; n < Y.size(); n++)
         {
+            if (Y[n] == 0) continue;
             mixture_ += Y[n]*this->specieThermos()[n];
         }
     }
