@@ -1355,6 +1355,61 @@ void Foam::solvers::peqsiFluid::invertTemperature()
                 << " cells, of which manifold-path " << nFloorTab
                 << "; Tmin manifold-path = " << tMinTab
                 << ", Newton-path = " << tMinNewt << " K" << endl;
+
+            // Attribution: a clamped cell holds a (p, h) pair the EOS
+            // has no root for.  h enters from two places -- the
+            // advective substep and the acoustic Eq. 24 update -- so
+            // report, for the WORST clamped cell, its state and how
+            // much each stage moved h this step.  hN_ is the step's
+            // starting enthalpy and hStarSaved_ the value the substep
+            // handed to the acoustic stage, so the split is exact.
+            if (nAtFloor > 0)
+            {
+                scalar worstH = great;
+                label worstCell = -1;
+                forAll(Tfd, i)
+                {
+                    if (Tfd[i] < 50.5 && h_[i] < worstH)
+                    {
+                        worstH = h_[i];
+                        worstCell = i;
+                    }
+                }
+                scalar rep[8] = {great, 0, 0, 0, 0, 0, 0, 0};
+                if (worstCell >= 0)
+                {
+                    const scalar hAdv =
+                        hStarSaved_.valid()
+                      ? hStarSaved_()[worstCell] - hN_()[worstCell]
+                      : 0.0;
+                    const scalar hAco =
+                        hStarSaved_.valid()
+                      ? h_[worstCell] - hStarSaved_()[worstCell]
+                      : 0.0;
+                    rep[0] = worstH;
+                    rep[1] = p_[worstCell];
+                    rep[2] = rho_[worstCell];
+                    rep[3] = fgmActive_ ? Z_()[worstCell] : 0.0;
+                    rep[4] = fgmActive_ ? Yc_()[worstCell] : 0.0;
+                    rep[5] = hAdv;
+                    rep[6] = hAco;
+                    rep[7] = hN_()[worstCell];
+                }
+                // rank with the coldest h reports; ties are harmless
+                scalar key = rep[0];
+                reduce(key, minOp<scalar>());
+                if (rep[0] == key && worstCell >= 0)
+                {
+                    Pout<< "PEQSI T floor worst cell: h = " << rep[0]
+                        << " J/kg (h^n = " << rep[7]
+                        << "), p = " << rep[1]
+                        << ", rho = " << rep[2]
+                        << ", Z = " << rep[3]
+                        << ", Yc = " << rep[4]
+                        << " | dh advective = " << rep[5]
+                        << ", dh acoustic = " << rep[6] << endl;
+                }
+            }
         }
 
         Info<< "PEQSI thermo closure: T = ["

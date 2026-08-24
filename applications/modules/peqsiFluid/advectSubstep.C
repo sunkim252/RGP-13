@@ -976,6 +976,8 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
         }
     }
 
+    hStarSaved_.reset(new volScalarField("PEQSI:hStarSaved", h_));
+
     // h-budget probe (peqsiStiffCensus): who is heating the field?  The
     // rd0110 restart shows a LINEAR global T rise (~1.7 K/step over 88%
     // of cells) that survives outlet-BC and LES/laminar bisection; the

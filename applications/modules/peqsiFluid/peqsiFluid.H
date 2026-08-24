@@ -288,6 +288,11 @@ protected:
         //- h at step start (n-state)
         autoPtr<volScalarField> hN_;
 
+        //- Enthalpy as the advective substep left it, kept so the
+        //  closure diagnostics can split a cell's step change in h
+        //  between the substep and the acoustic Eq. 24 update
+        autoPtr<volScalarField> hStarSaved_;
+
         //- The advective substep's own compression bookkeeping
         //  sComp = (1/6 rho^n + 1/6 rho^(1) + 2/3 rho^(2)) div(phiv):
         //  the SSP-RK3 effective quadrature of rho div(u).  Using this as
