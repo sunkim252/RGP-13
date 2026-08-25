@@ -1538,7 +1538,26 @@ void Foam::solvers::peqsiFluid::invertTemperature()
                     << " alpha = " << alpha_[worstC]
                     << " beta = " << beta_[worstC]
                     << " rho(transported) = " << rho_[worstC]
-                    << " psi = " << thermo_.psi()[worstC] << endl;
+                    << " psi = " << thermo_.psi()[worstC];
+                // Covolume-wall margin: SRK dies at v = b_mix, i.e.
+                // rho_wall ~ W/b (Peneloux shift cM printed alongside
+                // for the exact wall).  margin > ~1 means the
+                // transported rho has left the EOS domain -- the
+                // sign-flip trigger the table session identified
+                // (p(v > wall) < 0, the observed -GPa signature).
+                if (RGfields_.size() > 4 && RGfields_[0].size())
+                {
+                    const scalar bMc = RGfields_[0][worstC];
+                    const scalar cMc = RGfields_[4][worstC];
+                    const scalar Wc = thermo_.W()()[worstC];
+                    Pout<< " bM = " << bMc
+                        << " cM = " << cMc
+                        << " W = " << Wc
+                        << " wallMargin(rho*bM/W) = "
+                        << (Wc > vSmall
+                              ? rho_[worstC]*bMc/Wc : -1.0);
+                }
+                Pout<< endl;
             }
         }
 
