@@ -1493,9 +1493,16 @@ void Foam::solvers::peqsiFluid::invertTemperature()
             reduce(key, minOp<scalar>());
             if (worstC >= 0 && worstDh == key && key < 0)
             {
+                // Both closure paths' temperatures: if the two-path
+                // density mismatch hypothesis is right (manifold T vs
+                // thermo-clamped T differing by 20+ K = ~10% rho on the
+                // same cell, regenerated every iteration), their gap
+                // widens just before an event.
                 Pout<< "PEQSI impossible-state worst: dh = " << worstDh
                     << " J/kg at " << mesh.C()[worstC]
-                    << " T = " << Tf2[worstC]
+                    << " T(thermo) = " << Tf2[worstC]
+                    << " T(manifold) = "
+                    << (Tguess_.valid() ? Tguess_()[worstC] : -1.0)
                     << " p = " << p_[worstC] << endl;
             }
         }
