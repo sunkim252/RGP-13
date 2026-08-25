@@ -90,10 +90,29 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
     // already fills per cell; with a 2% standoff so the sweep never
     // evaluates a state on the sign flip itself.  Cells past the wall
     // get the EOS-state coefficients, exactly like the floor cells.
+    const Switch covolGuard =
+        pimple.dict().lookupOrDefault<Switch>("peqsiCovolGuard", true);
     const bool haveWall =
-        pimple.dict().lookupOrDefault<Switch>("peqsiCovolGuard", true)
+        covolGuard
      && RGfields_.size() > 4
      && RGfields_[0].size() == rho.size();
+    if (covolGuard && !haveWall)
+    {
+        // A silent no-guard run is worse than a loud one: without the
+        // Tier-2 bM field only the composition-blind backstop below is
+        // active, and a case dying on the covolume trigger would leave
+        // no clue why the composition-aware net never fired.
+        static bool warned = false;
+        if (!warned)
+        {
+            WarningInFunction
+                << "peqsiCovolGuard is on but the Tier-2 bM field is "
+                << "not available (peqsiTier2 off or table without RG "
+                << "coefficients): only the composition-blind backstop "
+                << "rho > 1670 is active" << endl;
+            warned = true;
+        }
+    }
     tmp<volScalarField> tWmix;
     const scalarField* Wf = nullptr;
     if (haveWall)
@@ -103,15 +122,51 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
     }
     auto pastWall = [&](const label i) -> bool
     {
+        // Composition-blind backstop first: no composition's covolume
+        // wall exceeds 1669.7 kg/m3 (pure CO2), so rho > 1670 is a
+        // violation for ANY mixture -- a second net immune to a
+        // corrupted bM lookup.  It cannot replace the composition-aware
+        // test (cold LOX dies at 1490, fuel at 864).
+        if (covolGuard && rho[i] > 1670.0) return true;
         return
             haveWall
          && rho[i]*RGfields_[0][i] > 0.98*max((*Wf)[i], vSmall);
     };
 
     label nBad = 0;
+    label nWallFired = 0;
+    scalar wallBmMin = great, wallBmMax = -great;
     forAll(rho, i)
     {
-        if (rho[i] < rhoFloor || pastWall(i)) nBad++;
+        if (pastWall(i))
+        {
+            nBad++;
+            nWallFired++;
+            if (haveWall)
+            {
+                wallBmMin = min(wallBmMin, RGfields_[0][i]);
+                wallBmMax = max(wallBmMax, RGfields_[0][i]);
+            }
+        }
+        else if (rho[i] < rhoFloor) nBad++;
+    }
+    {
+        // Fired-cell audit (table session: a corrupted bM makes the
+        // guard fire LATE -- log the bM range of fired cells so a
+        // late fire is identifiable after the fact)
+        const label every =
+            pimple.dict().lookupOrDefault<label>("peqsiDiagInterval", 10);
+        static label n = 0;
+        label nW = nWallFired;
+        reduce(nW, sumOp<label>());
+        if (every > 0 && (n++ % every) == 0 && nW > 0)
+        {
+            reduce(wallBmMin, minOp<scalar>());
+            reduce(wallBmMax, maxOp<scalar>());
+            Info<< "PEQSI covolume guard: " << nW
+                << " cells past the wall, fired-cell bM in ["
+                << wallBmMin << ", " << wallBmMax << "]" << endl;
+        }
     }
     tmp<volScalarField> trhoE;
     if (returnReduce(nBad, sumOp<label>()) > 0)
