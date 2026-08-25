@@ -180,8 +180,39 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
         return sumYb.size() && rho[i]*sumYb[i] > covolMargin;
     };
 
+    // Consistency band (peqsiDriftGuardLo/Hi, default 0 = off): the
+    // floor catches rho < 0.01 and the wall catches rho near 1/sum(Yb),
+    // but the whole interval between them is unguarded for CONSISTENCY
+    // -- the measured worst error (rho 38.6 vs rho_EOS 854.8, 22x) sits
+    // exactly there and passes both.  When armed, a cell whose
+    // rho/rho_EOS leaves [lo, hi] gets the EOS-state coefficients like
+    // the other two.  Thresholds must come from the quiet-phase drift
+    // histogram (front cells carry large chronic drift legitimately);
+    // armed only when both knobs are set.
+    const scalar driftLo =
+        pimple.dict().lookupOrDefault<scalar>("peqsiDriftGuardLo", 0.0);
+    const scalar driftHi =
+        pimple.dict().lookupOrDefault<scalar>("peqsiDriftGuardHi", 0.0);
+    const bool driftGuard = (driftLo > 0 && driftHi > driftLo);
+    tmp<volScalarField> trhoEg;
+    const scalarField* rhoEg = nullptr;
+    if (driftGuard)
+    {
+        trhoEg = thermo_.rho();
+        rhoEg = &trhoEg().primitiveField();
+    }
+    auto offBand = [&](const label i) -> bool
+    {
+        if (!driftGuard) return false;
+        const scalar re = (*rhoEg)[i];
+        if (re <= vSmall) return false;   // wall guard's territory
+        const scalar r = rho[i]/re;
+        return r < driftLo || r > driftHi;
+    };
+
     label nBad = 0;
     label nWallFired = 0;
+    label nBandFired = 0;
     scalar wallSumYbMin = great, wallSumYbMax = -great;
     forAll(rho, i)
     {
@@ -196,6 +227,7 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
             }
         }
         else if (rho[i] < rhoFloor) nBad++;
+        else if (offBand(i)) { nBad++; nBandFired++; }
     }
 
     {
@@ -214,6 +246,14 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
             Info<< "PEQSI covolume guard: " << nW
                 << " cells past the wall, fired-cell sumYb in ["
                 << wallSumYbMin << ", " << wallSumYbMax << "]" << endl;
+        }
+        label nB = nBandFired;
+        reduce(nB, sumOp<label>());
+        if (every > 0 && (n % every) == 0 && nB > 0)
+        {
+            Info<< "PEQSI drift-band guard: " << nB
+                << " cells outside [" << driftLo << ", " << driftHi
+                << "] of rho_EOS" << endl;
         }
     }
 
@@ -267,7 +307,7 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
     forAll(rho, i)
     {
         const scalar rhoC =
-            (rho[i] < rhoFloor || pastWall(i))
+            (rho[i] < rhoFloor || pastWall(i) || offBand(i))
           ? max((*rhoEPtr)[i], rhoFloor)
           : rho[i];
         const scalar v = 1.0/rhoC;
