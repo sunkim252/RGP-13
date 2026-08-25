@@ -1451,6 +1451,55 @@ void Foam::solvers::peqsiFluid::invertTemperature()
             }
         }
 
+        // Physically-impossible-state census (table session request,
+        // 2026-08-25).  Pure O2 at 52.5 bar cannot reach dh below
+        // -163 kJ/kg for ANY temperature down to the triple point, and
+        // isentropic expansion of the liquid streams cools by ~2 K, not
+        // tens -- so a near-pure-oxidiser cell below that defect, or a
+        // near-pure-fuel cell below 240 K (n-decane freezes at 243.5),
+        // is a numerical undershoot by construction, not physics the
+        // table should chase.
+        if (fgmActive_ && dhF_.valid())
+        {
+            const scalarField& Zf2 = Z_().primitiveField();
+            const scalarField& Tf2 = thermo_.T().primitiveField();
+            const boolList* useT2 =
+                tabUsable_.valid() ? &tabUsable_() : nullptr;
+            label nOxBad = 0, nOxBadTab = 0, nFuelCold = 0;
+            scalar worstDh = 0;
+            label worstC = -1;
+            forAll(Zf2, i)
+            {
+                if (Zf2[i] < 0.05 && dhF_()[i] < -163e3)
+                {
+                    nOxBad++;
+                    if (useT2 && (*useT2)[i]) nOxBadTab++;
+                    if (dhF_()[i] < worstDh)
+                    {
+                        worstDh = dhF_()[i];
+                        worstC = i;
+                    }
+                }
+                if (Zf2[i] > 0.95 && Tf2[i] < 240.0) nFuelCold++;
+            }
+            reduce(nOxBad, sumOp<label>());
+            reduce(nOxBadTab, sumOp<label>());
+            reduce(nFuelCold, sumOp<label>());
+            Info<< "PEQSI impossible-state census: ox (Z<0.05, dh<-163k) "
+                << nOxBad << " cells (manifold-path " << nOxBadTab
+                << "), fuel (Z>0.95, T<240) " << nFuelCold
+                << " cells" << endl;
+            scalar key = worstDh;
+            reduce(key, minOp<scalar>());
+            if (worstC >= 0 && worstDh == key && key < 0)
+            {
+                Pout<< "PEQSI impossible-state worst: dh = " << worstDh
+                    << " J/kg at " << mesh.C()[worstC]
+                    << " T = " << Tf2[worstC]
+                    << " p = " << p_[worstC] << endl;
+            }
+        }
+
         Info<< "PEQSI thermo closure: T = ["
             << gMin(thermo_.T().primitiveField()) << ", "
             << gMax(thermo_.T().primitiveField())
