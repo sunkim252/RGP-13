@@ -92,64 +92,102 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
     // get the EOS-state coefficients, exactly like the floor cells.
     const Switch covolGuard =
         pimple.dict().lookupOrDefault<Switch>("peqsiCovolGuard", true);
-    const bool haveWall =
-        covolGuard
-     && RGfields_.size() > 4
-     && RGfields_[0].size() == rho.size();
-    if (covolGuard && !haveWall)
+
+    // Covolume wall from the TRANSPORTED composition.  The wall is
+    // rho_wall = 1/sum_k(Y_k b_k) with per-species mass covolumes b_k
+    // (SRK+Peneloux, bisected on the actual p sign flip; table session
+    // 2026-08-26).  The table-bM route was measured to MISS the one
+    // confirmed real violation: an off-manifold fuel-gallery cell
+    // (3.1% H2) whose true wall (704) the manifold composition
+    // overestimates by 25% -- rho is a transported quantity, so the
+    // composition the wall is judged on must be transported too.
+    static bool bkBuilt = false;
+    static labelList bkIdx;
+    static scalarList bkVal;
+    if (covolGuard && !bkBuilt)
     {
-        // A silent no-guard run is worse than a loud one: without the
-        // Tier-2 bM field only the composition-blind backstop below is
-        // active, and a case dying on the covolume trigger would leave
-        // no clue why the composition-aware net never fired.
-        static bool warned = false;
-        if (!warned)
+        const HashTable<scalar> bk
+        ({
+            {"O2", 6.713045e-04}, {"CO", 9.433968e-04},
+            {"NC10H22", 1.156827e-03}, {"CO2", 5.989275e-04},
+            {"CH4", 1.818376e-03}, {"H2O", 9.802690e-04},
+            {"C6H6", 9.470105e-04}, {"PHC3H7", 1.004178e-03},
+            {"C2H2", 1.466095e-03}, {"C2H4", 1.514882e-03},
+            {"CYC9H18", 1.052476e-03}, {"TOLUEN", 9.835832e-04},
+            {"OH", 6.542857e-04}, {"C3H6", 1.369163e-03},
+            {"H2", 9.783274e-03}, {"C4H6", 1.253522e-03},
+            {"PC3H4", 1.299461e-03}, {"O", 6.955082e-04},
+            {"STYREN", 9.651829e-04}, {"C2H6", 1.413318e-03},
+            {"C3H3", 1.175729e-03}, {"CH2CO", 9.066221e-04},
+            {"CH2O", 1.324750e-03}, {"AC7H14", 1.211563e-03},
+            {"C4H8", 1.291707e-03}, {"AC3H5", 1.267570e-03},
+            {"AC5H10", 1.257264e-03}, {"C4H2", 1.477722e-03},
+            {"IC4H3", 1.448554e-03}, {"DC10H21", 1.165081e-03},
+            // raw SRK (no Peneloux, +2.8% -> fires slightly early,
+            // the safe direction) for the default specie
+            {"N2", 9.560000e-04}
+        });
+        const PtrList<volScalarField>& Ysp =
+            thermo_.Y();
+        DynamicList<label> di;
+        DynamicList<scalar> dv;
+        forAll(Ysp, k)
         {
-            WarningInFunction
-                << "peqsiCovolGuard is on but the Tier-2 bM field is "
-                << "not available (peqsiTier2 off or table without RG "
-                << "coefficients): only the composition-blind backstop "
-                << "rho > 1670 is active" << endl;
-            warned = true;
+            if (bk.found(Ysp[k].name()))
+            {
+                di.append(k);
+                dv.append(bk[Ysp[k].name()]);
+            }
+        }
+        bkIdx.transfer(di);
+        bkVal.transfer(dv);
+        Info<< "PEQSI covolume guard: wall from transported Y over "
+            << bkIdx.size() << " species (+ backstop rho > 1670)"
+            << endl;
+        bkBuilt = true;
+    }
+
+    scalarField sumYb;
+    if (covolGuard && bkIdx.size())
+    {
+        sumYb.setSize(rho.size(), 0.0);
+        const PtrList<volScalarField>& Ysp =
+            thermo_.Y();
+        forAll(bkIdx, j)
+        {
+            const scalarField& Yk = Ysp[bkIdx[j]].primitiveField();
+            const scalar bkj = bkVal[j];
+            forAll(sumYb, i) sumYb[i] += bkj*Yk[i];
         }
     }
-    tmp<volScalarField> tWmix;
-    const scalarField* Wf = nullptr;
-    if (haveWall)
-    {
-        tWmix = thermo_.W();
-        Wf = &tWmix().primitiveField();
-    }
+
     auto pastWall = [&](const label i) -> bool
     {
-        // Composition-blind backstop first: no composition's covolume
-        // wall exceeds 1669.7 kg/m3 (pure CO2), so rho > 1670 is a
-        // violation for ANY mixture -- a second net immune to a
-        // corrupted bM lookup.  It cannot replace the composition-aware
-        // test (cold LOX dies at 1490, fuel at 864).
-        if (covolGuard && rho[i] > 1670.0) return true;
-        return
-            haveWall
-         && rho[i]*RGfields_[0][i] > 0.98*max((*Wf)[i], vSmall);
+        if (!covolGuard) return false;
+        // composition-blind backstop: no mixture's wall exceeds
+        // 1669.7 kg/m3 (pure CO2)
+        if (rho[i] > 1670.0) return true;
+        return sumYb.size() && rho[i]*sumYb[i] > 0.98;
     };
 
     label nBad = 0;
     label nWallFired = 0;
-    scalar wallBmMin = great, wallBmMax = -great;
+    scalar wallSumYbMin = great, wallSumYbMax = -great;
     forAll(rho, i)
     {
         if (pastWall(i))
         {
             nBad++;
             nWallFired++;
-            if (haveWall)
+            if (sumYb.size())
             {
-                wallBmMin = min(wallBmMin, RGfields_[0][i]);
-                wallBmMax = max(wallBmMax, RGfields_[0][i]);
+                wallSumYbMin = min(wallSumYbMin, sumYb[i]);
+                wallSumYbMax = max(wallSumYbMax, sumYb[i]);
             }
         }
         else if (rho[i] < rhoFloor) nBad++;
     }
+
     {
         // Fired-cell audit (table session: a corrupted bM makes the
         // guard fire LATE -- log the bM range of fired cells so a
@@ -161,11 +199,11 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
         reduce(nW, sumOp<label>());
         if (every > 0 && (n++ % every) == 0 && nW > 0)
         {
-            reduce(wallBmMin, minOp<scalar>());
-            reduce(wallBmMax, maxOp<scalar>());
+            reduce(wallSumYbMin, minOp<scalar>());
+            reduce(wallSumYbMax, maxOp<scalar>());
             Info<< "PEQSI covolume guard: " << nW
-                << " cells past the wall, fired-cell bM in ["
-                << wallBmMin << ", " << wallBmMax << "]" << endl;
+                << " cells past the wall, fired-cell sumYb in ["
+                << wallSumYbMin << ", " << wallSumYbMax << "]" << endl;
         }
     }
     tmp<volScalarField> trhoE;
