@@ -1520,12 +1520,22 @@ void Foam::solvers::peqsiFluid::invertTemperature()
                 // thermo-clamped T differing by 20+ K = ~10% rho on the
                 // same cell, regenerated every iteration), their gap
                 // widens just before an event.
+                // c^2 from the ACTUAL acoustic coefficients the
+                // dynamics used (App. D identity), plus the cached
+                // compressibility: the A''-mechanism signature is c^2
+                // sagging and psi inflating just before an event.
+                const scalar c2coef =
+                    -beta_[worstC]
+                    /max((1.0 - alpha_[worstC])
+                        *max(rho_[worstC], scalar(0.01)), vSmall);
                 Pout<< "PEQSI impossible-state worst: dh = " << worstDh
                     << " J/kg at " << mesh.C()[worstC]
                     << " T(thermo) = " << Tf2[worstC]
                     << " T(manifold) = "
                     << (Tguess_.valid() ? Tguess_()[worstC] : -1.0)
-                    << " p = " << p_[worstC] << endl;
+                    << " p = " << p_[worstC]
+                    << " c2(coef) = " << c2coef
+                    << " psi = " << thermo_.psi()[worstC] << endl;
             }
         }
 
