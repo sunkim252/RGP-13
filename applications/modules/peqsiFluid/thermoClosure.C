@@ -81,10 +81,37 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
     (
         pimple.dict().lookupOrDefault<scalar>("peqsiRhoCoeffFloor", 0.01)
     );
+    // Upper wall, symmetric with the floor: SRK leaves its domain at
+    // the covolume, v = b_mix, and past it p(v, T) flips sign (measured:
+    // 3.5% over gives -4.7 GPa -- the -GPa dp signature of the lip
+    // events).  The wall is temperature-independent and exact in
+    // composition: rho_wall = W/bM, i.e. the violation test is
+    // rho * bM / W > 1.  bM comes from the Tier-2 fields the closure
+    // already fills per cell; with a 2% standoff so the sweep never
+    // evaluates a state on the sign flip itself.  Cells past the wall
+    // get the EOS-state coefficients, exactly like the floor cells.
+    const bool haveWall =
+        pimple.dict().lookupOrDefault<Switch>("peqsiCovolGuard", true)
+     && RGfields_.size() > 4
+     && RGfields_[0].size() == rho.size();
+    tmp<volScalarField> tWmix;
+    const scalarField* Wf = nullptr;
+    if (haveWall)
+    {
+        tWmix = thermo_.W();
+        Wf = &tWmix().primitiveField();
+    }
+    auto pastWall = [&](const label i) -> bool
+    {
+        return
+            haveWall
+         && rho[i]*RGfields_[0][i] > 0.98*max((*Wf)[i], vSmall);
+    };
+
     label nBad = 0;
     forAll(rho, i)
     {
-        if (rho[i] < rhoFloor) nBad++;
+        if (rho[i] < rhoFloor || pastWall(i)) nBad++;
     }
     tmp<volScalarField> trhoE;
     if (returnReduce(nBad, sumOp<label>()) > 0)
@@ -97,7 +124,7 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
     forAll(rho, i)
     {
         const scalar rhoC =
-            rho[i] < rhoFloor
+            (rho[i] < rhoFloor || pastWall(i))
           ? max((*rhoEPtr)[i], rhoFloor)
           : rho[i];
         const scalar v = 1.0/rhoC;
