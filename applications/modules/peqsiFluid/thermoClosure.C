@@ -1757,6 +1757,34 @@ void Foam::solvers::peqsiFluid::fgmClosure()
     const scalar sinkScale =
         pimple.dict().lookupOrDefault<scalar>("peqsiSinkScale", 1.0);
 
+    // Density rescale of the tabulated source (peqsiSrcRhoExp, default
+    // 0 = off, bit-identical).  The table is baked at one pressure, but
+    // a reaction rate is a function of concentrations [X] = rho Y/W, so
+    // omega ~ rho^(m-1): bimolecular m = 2 gives exponent 1, and the
+    // table session measured n = 1.14 [1.10, 1.22] over the band
+    // carrying 98% of the source (2026-08-25).  Scale omega by
+    // (rho_cell/rho_tbl)^n.  Gated to non-negligible sources: below
+    // 0.3% of the table maximum the fitted exponent diverges (12%
+    // sign reversals) while the band carries 0.1% of the total -- an
+    // equilibrium residual not worth amplifying with a wrong power.
+    const scalar srcRhoExp =
+        pimple.dict().lookupOrDefault<scalar>("peqsiSrcRhoExp", 0.0);
+    scalar srcGate = 0.0;
+    if (srcRhoExp != 0)
+    {
+        static scalar srcMaxCache = -1;
+        static const void* srcMaxKey = nullptr;
+        if (srcMaxKey != &tbl || srcMaxCache < 0)
+        {
+            const List<scalar>& sv = tbl.sourcePVTable();
+            scalar m = 0;
+            forAll(sv, i) m = max(m, mag(sv[i]));
+            srcMaxCache = m;
+            srcMaxKey = &tbl;
+        }
+        srcGate = 3e-3*srcMaxCache;
+    }
+
     const scalar pvMin =
         pimple.dict().lookupOrDefault<scalar>("peqsiSourcePVMin", 0.0);
     const scalar pvMax =
@@ -1923,6 +1951,15 @@ void Foam::solvers::peqsiFluid::fgmClosure()
         // not, the table is exonerated and the bake would have been wasted.
         // Default 1 leaves the table untouched.
         if (pv < 0 && sinkScale != 1.0) pv *= sinkScale;
+
+        if (srcRhoExp != 0 && rhoTabF_.valid() && mag(pv) > srcGate)
+        {
+            const scalar rT = rhoTabF_()[celli];
+            if (rT > small)
+            {
+                pv *= pow(rhof[celli]/rT, srcRhoExp);
+            }
+        }
 
         if (pvClipOn)
         {
