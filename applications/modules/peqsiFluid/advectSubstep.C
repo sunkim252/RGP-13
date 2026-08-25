@@ -978,6 +978,58 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
 
     hStarSaved_.reset(new volScalarField("PEQSI:hStarSaved", h_));
 
+    // Algebraic subgrid mixture-fraction variance (peqsiZvarCoeff > 0):
+    // Pierce & Moin (Phys. Fluids 10:3041, 1998), constant-coefficient
+    // form Zvar = C_v Delta^2 |grad Z|^2 with Delta = V^(1/3), the
+    // standard closure of flamelet/FGM LES.  The solver's "Zvar" field
+    // is the SEGREGATION factor g = Zvar/(Z(1-Z)) -- the closure hands
+    // it to the table's gZ axis unscaled -- so the model value is
+    // normalised here and clamped to the axis range.  Cells of nearly
+    // pure stream (Z(1-Z) < 1e-6) carry no meaningful variance and get
+    // g = 0.  Overwrites the advected field: with the model armed the
+    // transport is a placeholder (revisit if a transported-variance
+    // model is ever wanted).  Default 0 keeps the old behaviour
+    // bit-identically.
+    const scalar zvarCv
+    (
+        pimple.dict().lookupOrDefault<scalar>("peqsiZvarCoeff", 0.0)
+    );
+    if (fgmActive_ && zvarCv > 0)
+    {
+        const tmp<volVectorField> tgZ(fvc::grad(Z_()));
+        const vectorField& gZ = tgZ().primitiveField();
+        const scalarField& Zf = Z_().primitiveField();
+        const scalarField& Vf = mesh.V();
+        scalarField& gv = Zvar_().primitiveFieldRef();
+        forAll(gv, i)
+        {
+            const scalar zz = Zf[i]*(1.0 - Zf[i]);
+            if (zz > 1e-6)
+            {
+                const scalar d2 = cbrt(sqr(Vf[i]));
+                gv[i] = min(zvarCv*d2*magSqr(gZ[i])/zz, scalar(0.99));
+            }
+            else
+            {
+                gv[i] = 0.0;
+            }
+        }
+        Zvar_().correctBoundaryConditions();
+
+        if (pimple.dict().lookupOrDefault<Switch>("peqsiStiffCensus", false))
+        {
+            const label every =
+                pimple.dict().lookupOrDefault<label>("peqsiDiagInterval", 10);
+            static label n = 0;
+            if (every > 0 && (n++ % every) == 0)
+            {
+                Info<< "PEQSI Zvar (Pierce-Moin): g max = "
+                    << gMax(Zvar_()) << ", mean = "
+                    << gAverage(Zvar_()) << endl;
+            }
+        }
+    }
+
     // h-budget probe (peqsiStiffCensus): who is heating the field?  The
     // rd0110 restart shows a LINEAR global T rise (~1.7 K/step over 88%
     // of cells) that survives outlet-BC and LES/laminar bisection; the
