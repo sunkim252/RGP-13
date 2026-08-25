@@ -334,13 +334,38 @@ Foam::solvers::peqsiFluid::peqsiFluid(fvMesh& mesh)
         {
             updateSegregation();
         }
+        // The closure pass below may re-invert T from the case h --
+        // which on a cold boot is a PLACEHOLDER.  Save the case T
+        // first: the "eos" mode's contract is that the case KEEPS its
+        // own temperature.
+        const scalarField Tcase(thermo_.T().primitiveField());
+
         fgmClosure();
 
         if (restartH == "eos")
         {
+            // Restore the case temperature, then make the whole
+            // thermodynamic state consistent AT that temperature before
+            // reading anything back: thermo_.rho()/he() return STORED
+            // fields refreshed only by correct() -- reading them
+            // without the correct() hands back a state evaluated at
+            // whatever T the closure pass left (measured on the v5
+            // cold boot: the chamber booted as T = 143 K with the
+            // rho of the 300 K placeholder evaluation, ~70 kg/m3
+            // against the EOS's ~770 -- an 11x inconsistency that then
+            // rode the whole campaign).
+            volScalarField& Tw = const_cast<volScalarField&>(thermo_.T());
+            Tw.primitiveFieldRef() = Tcase;
+            Tw.correctBoundaryConditions();
+            thermo_.correct();
+
             h_ = thermo_.he();
-            Info<< "PEQSI restart: h reseeded from he(p, T, Y_manifold) "
-                << "after one closure pass" << endl;
+            h_.correctBoundaryConditions();
+            rho_ = thermo_.rho();
+            rho_.correctBoundaryConditions();
+            phi_ = fvc::flux(rho_*U_);
+            Info<< "PEQSI restart: case T kept; h, rho from the EOS at "
+                << "(p, T_case, Y_manifold); phi rebuilt" << endl;
         }
         else
         {
@@ -455,6 +480,11 @@ Foam::solvers::peqsiFluid::peqsiFluid(fvMesh& mesh)
                 }
             }
             Tw.correctBoundaryConditions();
+
+            // Same stale-state pitfall as the eos branch: rho() returns
+            // the STORED field, refreshed only by correct() -- without
+            // this the rho read back belongs to the pre-injection T.
+            thermo_.correct();
 
             rho_ = thermo_.rho();
             rho_.correctBoundaryConditions();
