@@ -1161,6 +1161,43 @@ void Foam::solvers::peqsiFluid::advectManifoldStage
             Q3.correctBoundaryConditions();
         }
 
+        // Operand check (peqsiPackCheck): the vector-WENO FPE names
+        // calcCoeff but not its input -- scan the carrier for
+        // non-finite components BEFORE the reconstruction and dump the
+        // first offender's cell state, so "bad input" and "bad scheme
+        // math" are told apart without burning a dt ladder (the
+        // Cantera high-chi chain precedent: two plausible physical
+        // stories, the real cause only visible in the operand).
+        if (pimple.dict().lookupOrDefault<Switch>("peqsiPackCheck", false))
+        {
+            const vectorField& Qf = Q3.primitiveField();
+            label bad = -1;
+            forAll(Qf, i)
+            {
+                const vector& q = Qf[i];
+                if
+                (
+                    !std::isfinite(q.x())
+                 || !std::isfinite(q.y())
+                 || !std::isfinite(q.z())
+                )
+                {
+                    bad = i;
+                    break;
+                }
+            }
+            if (bad >= 0)
+            {
+                Pout<< "PEQSI pack check: NON-FINITE carrier at "
+                    << mesh.C()[bad]
+                    << " Q3 = " << Qf[bad]
+                    << " rho = " << rho_[bad]
+                    << " h = " << h_[bad]
+                    << " p = " << p_[bad]
+                    << " T = " << thermo_.T()[bad] << endl;
+            }
+        }
+
         const volVectorField LQ3
         (
             -(fvc::div(phiv, Q3, "div(phiv,Zpack)") - Q3*divPhiv)

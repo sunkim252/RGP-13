@@ -251,7 +251,7 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
                     mag(rho[i] - rp[i])/max(mag(rp[i]), scalar(1e-3));
                 label b =
                     r <= 1e-8 ? 0
-                  : min(label(64.0*(log10(r) + 8.0)/8.0), label(63));
+                  : min(label(64.0*(log10(r) + 8.0)/9.0), label(63));
                 bins[b]++;
             }
             reduce(bins, sumOp<labelList>());
@@ -265,7 +265,7 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
                     c += bins[b];
                     if (c >= target)
                     {
-                        return pow(10.0, -8.0 + 8.0*(b + 1)/64.0);
+                        return pow(10.0, -8.0 + 9.0*(b + 1)/64.0);
                     }
                 }
                 return 1.0;
