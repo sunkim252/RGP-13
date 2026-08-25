@@ -1535,6 +1535,9 @@ void Foam::solvers::peqsiFluid::invertTemperature()
                     << (Tguess_.valid() ? Tguess_()[worstC] : -1.0)
                     << " p = " << p_[worstC]
                     << " c2(coef) = " << c2coef
+                    << " alpha = " << alpha_[worstC]
+                    << " beta = " << beta_[worstC]
+                    << " rho(transported) = " << rho_[worstC]
                     << " psi = " << thermo_.psi()[worstC] << endl;
             }
         }
