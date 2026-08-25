@@ -390,6 +390,44 @@ Foam::solvers::peqsiFluid::peqsiFluid(fvMesh& mesh)
         // that state.  What survives from the case: p, U, Z, c -- the
         // dynamical memory.  What is discarded: every thermodynamic
         // quantity of the off-anchor state.
+        // peqsiYcFromC: derive the transported progress mass from a
+        // NORMALISED progress-variable field (object "C"), for booting
+        // off an fgmFluid-lineage solution (e.g. the rd0110M canonical
+        // 143.3/283.4 LTS field) whose Yc does not exist: Yc = c *
+        // Cnorm(Z).  Runs BEFORE the reseed closure so the (Z, gz, c)
+        // coordinates the reseed uses are the mapped ones.
+        if
+        (
+            pimple.dict().lookupOrDefault<Switch>("peqsiYcFromC", false)
+         && fgmActive_ && fgmTable_.valid() && fgmTable_().hasCnorm()
+        )
+        {
+            const volScalarField Cin
+            (
+                IOobject
+                (
+                    "C",
+                    runTime.name(),
+                    mesh,
+                    IOobject::MUST_READ
+                ),
+                mesh
+            );
+            const scalarField& Cf = Cin.primitiveField();
+            const scalarField& Zf = Z_().primitiveField();
+            scalarField& Ycf = Yc_().primitiveFieldRef();
+            forAll(Ycf, celli)
+            {
+                const scalar Zcl = min(max(Zf[celli], 0.0), 1.0);
+                const scalar Cn = fgmTable_().interpolateCnorm(Zcl);
+                Ycf[celli] =
+                    min(max(Cf[celli], 0.0), 1.0)*max(Cn, 0.0);
+            }
+            Yc_().correctBoundaryConditions();
+            Info<< "PEQSI restart: Yc derived from the normalised C "
+                << "field (Yc = c Cnorm(Z))" << endl;
+        }
+
         if (restartH == "manifold")
         {
             fgmClosure();
