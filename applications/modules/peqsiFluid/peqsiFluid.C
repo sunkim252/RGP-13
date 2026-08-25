@@ -522,17 +522,83 @@ Foam::solvers::peqsiFluid::~peqsiFluid()
 
 Foam::scalar Foam::solvers::peqsiFluid::maxDeltaT() const
 {
-    const scalar coDt = isothermalFluid::maxDeltaT();
+    scalar dtLim = isothermalFluid::maxDeltaT();
 
-    if (ladDtLimit_ < coDt)
+    if (ladDtLimit_ < dtLim)
     {
         Info<< "PEQSI dt limit: LAD explicit-diffusion bound "
-            << ladDtLimit_ << " s (Courant bound " << coDt << " s)"
+            << ladDtLimit_ << " s (Courant bound " << dtLim << " s)"
             << endl;
-        return ladDtLimit_;
+        dtLim = ladDtLimit_;
     }
 
-    return coDt;
+    // Acoustic-Courant bound (peqsiMaxAcousticCo > 0 to enable).
+    //
+    // The acoustic substep is Crank-Nicolson-SPLIT, not fully
+    // implicit: the Helmholtz RHS carries the explicit laplacian of
+    // (p* + p^n) and the momentum update the explicit half of
+    // grad((p^n+1 + p^n)/2).  At start-up U ~ 0, so the convective
+    // Courant number binds nothing and dt climbs until the acoustic
+    // one bites: the consistent-boot runs died deterministically at
+    // fuel-sound-speed Courant 0.88-0.96 under EVERY advection scheme
+    // (vector WENO and vanLeerV, same step, same time).  So bound the
+    // per-face acoustic Courant number c dt/dx directly, with c from
+    // the closure coefficients (c2 = -beta/((1 - alpha) rho)) and dx
+    // from the face deltaCoeffs -- no nominal spacing, no hand-picked
+    // maxDeltaT cap.  Cells inside guard fallbacks can carry c2 <= 0;
+    // they are excluded rather than allowed to zero the bound.
+    const scalar maxAcCo =
+        pimple.dict().lookupOrDefault<scalar>("peqsiMaxAcousticCo", 0);
+
+    if (maxAcCo > 0)
+    {
+        const scalarField c2
+        (
+            -beta_.primitiveField()
+           /((1.0 - alpha_.primitiveField())*rho_.primitiveField())
+        );
+
+        const labelUList& own = mesh.owner();
+        const labelUList& nei = mesh.neighbour();
+        const surfaceScalarField& dCoeffs = mesh.deltaCoeffs();
+
+        scalar maxCdx = 0;
+        forAll(own, facei)
+        {
+            const scalar c2f = max(c2[own[facei]], c2[nei[facei]]);
+            if (c2f > vSmall)
+            {
+                maxCdx = max(maxCdx, sqrt(c2f)*dCoeffs[facei]);
+            }
+        }
+
+        forAll(mesh.boundary(), patchi)
+        {
+            if (!mesh.boundary()[patchi].coupled()) continue;
+
+            const scalarField& dcp = dCoeffs.boundaryField()[patchi];
+            const labelUList& fc = mesh.boundary()[patchi].faceCells();
+            forAll(fc, i)
+            {
+                if (c2[fc[i]] > vSmall)
+                {
+                    maxCdx = max(maxCdx, sqrt(c2[fc[i]])*dcp[i]);
+                }
+            }
+        }
+
+        reduce(maxCdx, maxOp<scalar>());
+
+        if (maxCdx > vSmall && maxAcCo/maxCdx < dtLim)
+        {
+            Info<< "PEQSI dt limit: acoustic Courant bound "
+                << maxAcCo/maxCdx << " s (max c/dx = " << maxCdx
+                << " 1/s, other bounds " << dtLim << " s)" << endl;
+            dtLim = maxAcCo/maxCdx;
+        }
+    }
+
+    return dtLim;
 }
 
 
