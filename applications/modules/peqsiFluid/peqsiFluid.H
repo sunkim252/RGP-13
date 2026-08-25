@@ -293,6 +293,10 @@ protected:
         //  between the substep and the acoustic Eq. 24 update
         autoPtr<volScalarField> hStarSaved_;
 
+        //- Previous step's covolume-wall margin field (rho sum(Y b)),
+        //  for the crossing-speed diagnostic of the guard
+        autoPtr<scalarField> covolMarginPrev_;
+
         //- Previous step's temperature-floor-clamp mask, for the
         //  chatter census: cells crossing the clamp boundary between
         //  consecutive steps distinguish a clamp-chatter instability

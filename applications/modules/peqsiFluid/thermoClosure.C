@@ -161,13 +161,23 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
         }
     }
 
+    // Threshold 0.95, not 0.98: the pressure response is so steep near
+    // the wall that margin 0.97 already means ~820 MPa (156x chamber)
+    // in cold O2 -- while legitimate 60 K LOX sits at margin 0.883, so
+    // the usable window is [0.89, 0.97] and 0.95 (413 MPa, before the
+    // sign flip; 7% above normal LOX) is the working point.  This is a
+    // LAST LINE, not a fix: a cell at 0.95 is already physically wrong,
+    // the guard only prevents the FPE/e18 runaway and buys time for
+    // the real cure (front-normalisation of the rho/h undershoot).
+    const scalar covolMargin =
+        pimple.dict().lookupOrDefault<scalar>("peqsiCovolMargin", 0.95);
     auto pastWall = [&](const label i) -> bool
     {
         if (!covolGuard) return false;
         // composition-blind backstop: no mixture's wall exceeds
         // 1669.7 kg/m3 (pure CO2)
         if (rho[i] > 1670.0) return true;
-        return sumYb.size() && rho[i]*sumYb[i] > 0.98;
+        return sumYb.size() && rho[i]*sumYb[i] > covolMargin;
     };
 
     label nBad = 0;
@@ -205,6 +215,46 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
                 << " cells past the wall, fired-cell sumYb in ["
                 << wallSumYbMin << ", " << wallSumYbMax << "]" << endl;
         }
+    }
+
+    // Crossing-speed diagnostic: the margin of the worst fired cell on
+    // the PREVIOUS step tells how fast the undershoot travels from the
+    // legitimate 0.883 toward the wall -- the target number for the
+    // front-normalisation work.  If a cell crosses in a single step the
+    // guard itself cannot catch it in time.
+    if (covolGuard && sumYb.size())
+    {
+        label worstI = -1;
+        scalar worstM = 0;
+        forAll(rho, i)
+        {
+            const scalar m = rho[i]*sumYb[i];
+            if (m > covolMargin && m > worstM)
+            {
+                worstM = m;
+                worstI = i;
+            }
+        }
+        if (worstI >= 0)
+        {
+            const scalar mPrev =
+                (covolMarginPrev_.valid()
+              && covolMarginPrev_().size() == rho.size())
+              ? covolMarginPrev_()[worstI] : -1.0;
+            Pout<< "PEQSI covolume crossing: margin "
+                << mPrev << " -> " << worstM
+                << " in one step at " << mesh.C()[worstI] << endl;
+        }
+        if
+        (
+            !covolMarginPrev_.valid()
+         || covolMarginPrev_().size() != rho.size()
+        )
+        {
+            covolMarginPrev_.reset(new scalarField(rho.size(), 0.0));
+        }
+        scalarField& mp = covolMarginPrev_();
+        forAll(rho, i) mp[i] = rho[i]*sumYb[i];
     }
     tmp<volScalarField> trhoE;
     if (returnReduce(nBad, sumOp<label>()) > 0)
