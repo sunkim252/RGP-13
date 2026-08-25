@@ -1364,6 +1364,28 @@ void Foam::solvers::peqsiFluid::invertTemperature()
                     if (fromTab) nFloorTab++;
                 }
             }
+            // Clamp-boundary chatter census: count cells that changed
+            // clamp state since the previous step.  A persistent-state
+            // mismatch keeps the same cells clamped (crossings ~ 0); a
+            // chatter instability flips cells every step (crossings
+            // large and oscillating).
+            {
+                boolList cur(Tfd.size(), false);
+                forAll(Tfd, i) cur[i] = (Tfd[i] < TminC + 0.5);
+                label nCross = 0;
+                if (clampPrev_.valid()
+                 && clampPrev_().size() == cur.size())
+                {
+                    const boolList& prev = clampPrev_();
+                    forAll(cur, i) if (cur[i] != prev[i]) nCross++;
+                }
+                reduce(nCross, sumOp<label>());
+                Info<< "PEQSI clamp chatter: " << nCross
+                    << " cells crossed the floor boundary since the "
+                    << "previous census" << endl;
+                clampPrev_.reset(new boolList(cur));
+            }
+
             reduce(nAtFloor, sumOp<label>());
             reduce(nFloorTab, sumOp<label>());
             reduce(tMinTab, minOp<scalar>());

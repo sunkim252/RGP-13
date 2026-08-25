@@ -293,6 +293,12 @@ protected:
         //  between the substep and the acoustic Eq. 24 update
         autoPtr<volScalarField> hStarSaved_;
 
+        //- Previous step's temperature-floor-clamp mask, for the
+        //  chatter census: cells crossing the clamp boundary between
+        //  consecutive steps distinguish a clamp-chatter instability
+        //  (many, oscillating) from a persistent-state mismatch (few)
+        autoPtr<boolList> clampPrev_;
+
         //- The advective substep's own compression bookkeeping
         //  sComp = (1/6 rho^n + 1/6 rho^(1) + 2/3 rho^(2)) div(phiv):
         //  the SSP-RK3 effective quadrature of rho div(u).  Using this as
