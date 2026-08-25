@@ -402,7 +402,18 @@ Foam::solvers::peqsiFluid::peqsiFluid(fvMesh& mesh)
                 if (Tg[celli] > 0)
                 {
                     Tf[celli] =
-                        min(max(Tg[celli], scalar(50)), scalar(4000));
+                        min
+                        (
+                            max
+                            (
+                                Tg[celli],
+                                pimple.dict().lookupOrDefault<scalar>
+                                (
+                                    "peqsiTmin", 100
+                                )
+                            ),
+                            scalar(4000)
+                        );
                 }
             }
             Tw.correctBoundaryConditions();

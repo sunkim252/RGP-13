@@ -344,12 +344,14 @@ void Foam::solvers::peqsiFluid::invertTemperature()
         {
             volScalarField& Tw0 = const_cast<volScalarField&>(thermo_.T());
             scalarField& Tf0 = Tw0.primitiveFieldRef();
+            const scalar Tmin =
+                pimple.dict().lookupOrDefault<scalar>("peqsiTmin", 100);
             const scalarField& Tg = Tguess_();
             forAll(Tf0, i)
             {
                 if (Tg[i] > 0)
                 {
-                    Tf0[i] = min(max(Tg[i], scalar(50)), scalar(4000));
+                    Tf0[i] = min(max(Tg[i], Tmin), scalar(4000));
                 }
             }
             Tw0.correctBoundaryConditions();
@@ -434,7 +436,20 @@ void Foam::solvers::peqsiFluid::invertTemperature()
         const scalar dTmax = 25;    // per-pass step clamp [K]: keeps the
                                     // iterate inside the SRK validity range
                                     // across the interface cells
-        const scalar Tmin = 50, Tmax = 4000;
+        // Search floor (peqsiTmin).  The default is 100 K, not the old
+        // 50: at 52.5 bar the oxygen melting line sits at ~54.5 K, so a
+        // 50 K result was already in the SOLID region -- SRK "solves"
+        // there only because it knows nothing about the solid phase.
+        // 100 K is reachable for every Z <= 0.95 mixing-line state
+        // (peer-measured SRK minima: 50-95 K over that range), so a
+        // cell ON this clamp now marks a genuine anomaly instead of
+        // being silently parked outside physics.  Pure fuel (Z = 1)
+        // has an SRK minimum of ~110 K, but its stream enters at
+        // 283.4 K with a freezing point of ~245 K -- reaching 100 K
+        // there is itself the pathology the clamp should flag.
+        const scalar Tmin =
+            pimple.dict().lookupOrDefault<scalar>("peqsiTmin", 100);
+        const scalar Tmax = 4000;
         label iter = 0;
         scalar maxRel = great;
         label nSaturated_ = 0;
@@ -1331,6 +1346,8 @@ void Foam::solvers::peqsiFluid::invertTemperature()
         // cells sit ON the clamp, so the question is answered from the
         // log instead of by inference.
         {
+            const scalar TminC =
+                pimple.dict().lookupOrDefault<scalar>("peqsiTmin", 100);
             const scalarField& Tfd = thermo_.T().primitiveField();
             const boolList* useT =
                 tabUsable_.valid() ? &tabUsable_() : nullptr;
@@ -1341,7 +1358,7 @@ void Foam::solvers::peqsiFluid::invertTemperature()
                 const bool fromTab = useT ? (*useT)[i] : false;
                 if (fromTab) tMinTab = min(tMinTab, Tfd[i]);
                 else tMinNewt = min(tMinNewt, Tfd[i]);
-                if (Tfd[i] < 50.5)
+                if (Tfd[i] < TminC + 0.5)
                 {
                     nAtFloor++;
                     if (fromTab) nFloorTab++;
@@ -1351,7 +1368,8 @@ void Foam::solvers::peqsiFluid::invertTemperature()
             reduce(nFloorTab, sumOp<label>());
             reduce(tMinTab, minOp<scalar>());
             reduce(tMinNewt, minOp<scalar>());
-            Info<< "PEQSI T floor census: on clamp (<50.5 K) " << nAtFloor
+            Info<< "PEQSI T floor census: on clamp (<" << TminC + 0.5
+                << " K) " << nAtFloor
                 << " cells, of which manifold-path " << nFloorTab
                 << "; Tmin manifold-path = " << tMinTab
                 << ", Newton-path = " << tMinNewt << " K" << endl;
@@ -1369,7 +1387,7 @@ void Foam::solvers::peqsiFluid::invertTemperature()
                 label worstCell = -1;
                 forAll(Tfd, i)
                 {
-                    if (Tfd[i] < 50.5 && h_[i] < worstH)
+                    if (Tfd[i] < TminC + 0.5 && h_[i] < worstH)
                     {
                         worstH = h_[i];
                         worstCell = i;
@@ -1400,6 +1418,23 @@ void Foam::solvers::peqsiFluid::invertTemperature()
                 reduce(key, minOp<scalar>());
                 if (rep[0] == key && worstCell >= 0)
                 {
+                    // Where does that state sit on the table's own 4th
+                    // axis?  dhF_ is the enthalpy defect the closure
+                    // computed for this cell; comparing it with the
+                    // axis ends says whether the cell is simply OFF the
+                    // table (h too low for its own Z) rather than the
+                    // victim of a bad step.
+                    scalar dhCell = 0, dhLo = 0, dhHi = 0;
+                    if (dhF_.valid() && fgmTable_.valid())
+                    {
+                        dhCell = dhF_()[worstCell];
+                        const List<scalar>& ax = fgmTable_().chiAxis();
+                        if (ax.size())
+                        {
+                            dhLo = ax[0];
+                            dhHi = ax[ax.size() - 1];
+                        }
+                    }
                     Pout<< "PEQSI T floor worst cell: h = " << rep[0]
                         << " J/kg (h^n = " << rep[7]
                         << "), p = " << rep[1]
@@ -1407,7 +1442,11 @@ void Foam::solvers::peqsiFluid::invertTemperature()
                         << ", Z = " << rep[3]
                         << ", Yc = " << rep[4]
                         << " | dh advective = " << rep[5]
-                        << ", dh acoustic = " << rep[6] << endl;
+                        << ", dh acoustic = " << rep[6]
+                        << " | dh coord = " << dhCell
+                        << " in axis [" << dhLo << ", " << dhHi << "]"
+                        << " at " << mesh.C()[worstCell]
+                        << endl;
                 }
             }
         }
