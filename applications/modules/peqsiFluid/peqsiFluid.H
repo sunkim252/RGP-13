@@ -293,6 +293,12 @@ protected:
         //  between the substep and the acoustic Eq. 24 update
         autoPtr<volScalarField> hStarSaved_;
 
+        //- Previous step's transported rho, for the rate guard: the
+        //  per-step |drho|/rho separates lethal transients (30%/step)
+        //  from chronic front drift (~0.1%/step) by 2-3 orders of
+        //  magnitude, where a level-based band cannot separate at all
+        autoPtr<scalarField> rhoPrevGuard_;
+
         //- Previous step's covolume-wall margin field (rho sum(Y b)),
         //  for the crossing-speed diagnostic of the guard
         autoPtr<scalarField> covolMarginPrev_;

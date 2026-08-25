@@ -210,9 +210,30 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
         return r < driftLo || r > driftHi;
     };
 
+    // Rate guard (peqsiRateGuard, default 0 = off): the per-step
+    // |drho|/rho separates the lethal transient (measured 30%/step at
+    // the blowing cell) from chronic front drift (quiet-phase 500-step
+    // accumulations top out at 61%, i.e. ~0.1%/step) by 2-3 orders of
+    // magnitude -- the one signal where the two populations do not
+    // overlap, unlike any level-based band.  A cell moving faster than
+    // the threshold gets the EOS-state coefficients for that step.
+    const scalar rateGuard =
+        pimple.dict().lookupOrDefault<scalar>("peqsiRateGuard", 0.0);
+    const bool haveRate =
+        rateGuard > 0
+     && rhoPrevGuard_.valid()
+     && rhoPrevGuard_().size() == rho.size();
+    auto tooFast = [&](const label i) -> bool
+    {
+        if (!haveRate) return false;
+        const scalar rp = rhoPrevGuard_()[i];
+        return mag(rho[i] - rp) > rateGuard*max(mag(rp), scalar(1e-3));
+    };
+
     label nBad = 0;
     label nWallFired = 0;
     label nBandFired = 0;
+    label nRateFired = 0;
     scalar wallSumYbMin = great, wallSumYbMax = -great;
     forAll(rho, i)
     {
@@ -228,6 +249,22 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
         }
         else if (rho[i] < rhoFloor) nBad++;
         else if (offBand(i)) { nBad++; nBandFired++; }
+        else if (tooFast(i)) { nBad++; nRateFired++; }
+    }
+    if (rateGuard > 0)
+    {
+        if
+        (
+            !rhoPrevGuard_.valid()
+         || rhoPrevGuard_().size() != rho.size()
+        )
+        {
+            rhoPrevGuard_.reset(new scalarField(rho));
+        }
+        else
+        {
+            rhoPrevGuard_() = rho;
+        }
     }
 
     {
@@ -254,6 +291,14 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
             Info<< "PEQSI drift-band guard: " << nB
                 << " cells outside [" << driftLo << ", " << driftHi
                 << "] of rho_EOS" << endl;
+        }
+        label nR = nRateFired;
+        reduce(nR, sumOp<label>());
+        if (every > 0 && (n % every) == 0 && nR > 0)
+        {
+            Info<< "PEQSI rate guard: " << nR
+                << " cells moved more than " << rateGuard
+                << " of their rho in one step" << endl;
         }
     }
 
@@ -307,7 +352,7 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
     forAll(rho, i)
     {
         const scalar rhoC =
-            (rho[i] < rhoFloor || pastWall(i) || offBand(i))
+            (rho[i] < rhoFloor || pastWall(i) || offBand(i) || tooFast(i))
           ? max((*rhoEPtr)[i], rhoFloor)
           : rho[i];
         const scalar v = 1.0/rhoC;
