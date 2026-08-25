@@ -219,10 +219,72 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
     // the threshold gets the EOS-state coefficients for that step.
     const scalar rateGuard =
         pimple.dict().lookupOrDefault<scalar>("peqsiRateGuard", 0.0);
+    // Observe-only census (peqsiRateCensus): per-step |drho|/rho
+    // quantiles with no intervention -- the measurement that sets the
+    // guard threshold and, against the physical bound U dt/delta =
+    // 0.1-3 %/step, judges whether the front scheme itself is inside
+    // its legitimate range.
+    const Switch rateCensus =
+        pimple.dict().lookupOrDefault<Switch>("peqsiRateCensus", false);
     const bool haveRate =
         rateGuard > 0
      && rhoPrevGuard_.valid()
      && rhoPrevGuard_().size() == rho.size();
+    if
+    (
+        rateCensus
+     && rhoPrevGuard_.valid()
+     && rhoPrevGuard_().size() == rho.size()
+    )
+    {
+        const label every =
+            pimple.dict().lookupOrDefault<label>("peqsiDiagInterval", 10);
+        static label nC = 0;
+        if (every > 0 && (nC++ % every) == 0)
+        {
+            // quantiles via a fixed log histogram (64 bins, 1e-8..1)
+            labelList bins(64, label(0));
+            const scalarField& rp = rhoPrevGuard_();
+            forAll(rho, i)
+            {
+                const scalar r =
+                    mag(rho[i] - rp[i])/max(mag(rp[i]), scalar(1e-3));
+                label b =
+                    r <= 1e-8 ? 0
+                  : min(label(64.0*(log10(r) + 8.0)/8.0), label(63));
+                bins[b]++;
+            }
+            reduce(bins, sumOp<labelList>());
+            label total = 0;
+            forAll(bins, b) total += bins[b];
+            auto quant = [&](const scalar q) -> scalar
+            {
+                label target = label(q*total), c = 0;
+                forAll(bins, b)
+                {
+                    c += bins[b];
+                    if (c >= target)
+                    {
+                        return pow(10.0, -8.0 + 8.0*(b + 1)/64.0);
+                    }
+                }
+                return 1.0;
+            };
+            Info<< "PEQSI rate census: |drho|/rho per step p50 < "
+                << quant(0.50) << ", p99 < " << quant(0.99)
+                << ", p99.99 < " << quant(0.9999)
+                << " (log-bin upper bounds)" << endl;
+        }
+    }
+    if
+    (
+        (rateGuard > 0 || rateCensus)
+     && (!rhoPrevGuard_.valid()
+      || rhoPrevGuard_().size() != rho.size())
+    )
+    {
+        rhoPrevGuard_.reset(new scalarField(rho));
+    }
     auto tooFast = [&](const label i) -> bool
     {
         if (!haveRate) return false;
@@ -251,20 +313,9 @@ void Foam::solvers::peqsiFluid::updateCoefficients()
         else if (offBand(i)) { nBad++; nBandFired++; }
         else if (tooFast(i)) { nBad++; nRateFired++; }
     }
-    if (rateGuard > 0)
+    if ((rateGuard > 0 || rateCensus) && rhoPrevGuard_.valid())
     {
-        if
-        (
-            !rhoPrevGuard_.valid()
-         || rhoPrevGuard_().size() != rho.size()
-        )
-        {
-            rhoPrevGuard_.reset(new scalarField(rho));
-        }
-        else
-        {
-            rhoPrevGuard_() = rho;
-        }
+        rhoPrevGuard_() = rho;
     }
 
     {
