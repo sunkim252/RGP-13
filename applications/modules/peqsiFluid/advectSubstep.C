@@ -1288,20 +1288,27 @@ void Foam::solvers::peqsiFluid::advectManifoldStage
         //
         // rho*D = kappa/(cp Le) with the MOLECULAR conductivity, not
         // the one the energy equation has already had muSgs folded
-        // into -- otherwise the subgrid part is counted twice.  The
-        // default Le = 0.29 is the median of the mixture-averaged
-        // Lewis number the dd8 flamelets were solved with (0.25-0.35
-        // across the mixing line), so the solver transports Z the way
-        // the manifold was built.
+        // into -- otherwise the subgrid part is counted twice.
+        //
+        // Le = 1 is not an assumption here, it is the manifold's own
+        // convention worked through: the table defines the mixture
+        // fraction's Lewis number as Le_Z = Pr = nu/alpha, so the
+        // diffusivity it implies is D_Z = nu/Le_Z = alpha exactly, and
+        // the viscosity cancels.  That cancellation is worth having --
+        // high-pressure Chung overpredicts mu by ~300x in the cold
+        // fuel, and none of that error reaches Z through this term.
+        // The progress variable is a different matter (Le_C uses a
+        // Takahashi-corrected D and does not cancel), but Yc is zero
+        // throughout a non-reacting run.
         const scalar leZ =
-            pimple.dict().lookupOrDefault<scalar>("peqsiLe", 0.29);
+            pimple.dict().lookupOrDefault<scalar>("peqsiLe", 1.0);
 
         if ((sgsActive_ && scSgs > 0) || leZ > 0)
         {
             volScalarField Dsgs
             (
                 "PEQSI:Dsgs",
-                0.0*rhoN_()
+                0.0*rhoN_()*dimensionedScalar(dimArea/dimTime, 1.0)
             );
 
             if (leZ > 0)
