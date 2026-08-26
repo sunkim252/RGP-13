@@ -303,6 +303,15 @@ protected:
         //  for the crossing-speed diagnostic of the guard
         autoPtr<scalarField> covolMarginPrev_;
 
+        //- Reference int(rho Z) dV, for the conservation audit.  The
+        //  mass and energy sums have always been reported; the mixture
+        //  fraction was not, and it is the one that can drift without
+        //  a boundary flux, because Z is advanced as a primitive
+        //  variable while h travels as rho h.  Any drift in it enters
+        //  the manifold's mixing line at h_fu - h_ox, or 1.6 MJ per kg
+        //  of imbalance.
+        mutable scalar initialRhoZ_ = -1;
+
         //- Per-cell accumulation of the acoustic step's defect
         //  booking, sum over steps of dh*dm.  A global sum is
         //  dominated by wherever |dm| is largest, and the

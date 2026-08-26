@@ -616,16 +616,29 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
                *mesh.V().primitiveField()
             );
 
+        const scalar Zm =
+            fgmActive_
+          ? gSum
+            (
+                rho_.primitiveField()*Z_().primitiveField()
+               *mesh.V().primitiveField()
+            )
+          : 0.0;
+
         if (initialMass_ < 0)
         {
             initialMass_ = M;
             initialRhoH_ = E;
+            initialRhoZ_ = Zm;
         }
 
         Info<< "PEQSI conservation: mass rel = "
             << (M - initialMass_)/initialMass_
             << ", rho*h rel = "
             << (E - initialRhoH_)/max(mag(initialRhoH_), small)
+            << ", rho*Z rel = "
+            << (Zm - initialRhoZ_)/max(mag(initialRhoZ_), small)
+            << ", rho*Z abs = " << Zm - initialRhoZ_ << " kg"
             << endl;
         }
     }
