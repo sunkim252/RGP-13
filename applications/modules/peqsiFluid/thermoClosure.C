@@ -1396,10 +1396,22 @@ void Foam::solvers::peqsiFluid::invertTemperature()
         driftDiagN > 0 && (driftCount++ % driftDiagN) == 0;
     if (driftReport)
     {
+        driftHist_.setSize(64, 0);
+        forAll(driftHist_, b) driftHist_[b] = 0;
+
         const scalarField& re = thermo_.rho()().primitiveField();
         const scalarField& rt = rho_.primitiveField();
         const scalarField& vol = mesh.V();
 
+        // Log-binned distribution alongside max and mean.  Those two
+        // bracket the population from opposite ends and neither sees
+        // the part that matters: the maximum is one cell and carries
+        // the boot transient, the volume mean saturates (measured
+        // t^0.105, so a decade of time buys 1.26x).  Every failure this
+        // campaign chased lived between them -- the cold cells grew
+        // 42x in count while their mean deficit moved 31%, and the
+        // reachability violations grew 56% at the worst while the count
+        // moved 9%.  Sixty-four bins over 1e-6..10.
         forAll(rt, i)
         {
             const scalar d = mag(re[i] - rt[i])/max(rt[i], small);
@@ -1412,6 +1424,11 @@ void Foam::solvers::peqsiFluid::invertTemperature()
             volWeighted += d*vol[i];
             if (d > 0.10) { volAbove10 += vol[i]; nAbove10++; }
             if (d > 0.01) { volAbove1 += vol[i]; nAbove1++; }
+
+            const label b =
+                d <= 1e-6 ? 0
+              : min(label(64.0*(log10(d) + 6.0)/7.0), label(63));
+            driftHist_[b]++;
         }
 
         scalar maxDriftLocal = maxDrift;
@@ -1422,6 +1439,8 @@ void Foam::solvers::peqsiFluid::invertTemperature()
         reduce(volWeighted, sumOp<scalar>());
         reduce(nAbove10, sumOp<label>());
         reduce(nAbove1, sumOp<label>());
+        Pstream::listCombineGather(driftHist_, plusEqOp<label>());
+        Pstream::listCombineScatter(driftHist_);
 
         // Only the rank actually holding the maximum reports its state
         if (maxCell >= 0 && mag(maxDriftLocal - maxDrift) < small)
@@ -1889,6 +1908,35 @@ void Foam::solvers::peqsiFluid::invertTemperature()
             << ", vol-mean = " << volWeighted/max(volTot, vSmall)
             << ", vol frac >1% = " << volAbove1/max(volTot, vSmall)
             << ", >10% = " << volAbove10/max(volTot, vSmall) << endl;
+
+        // Quantiles of the same drift, from the log histogram.  Report
+        // the upper edge of the bin the quantile falls in, as the rate
+        // census does.
+        {
+            label tot = 0;
+            forAll(driftHist_, b) tot += driftHist_[b];
+            if (tot > 0)
+            {
+                auto q = [&](const scalar f)
+                {
+                    const label target = label(f*tot);
+                    label acc = 0;
+                    forAll(driftHist_, b)
+                    {
+                        acc += driftHist_[b];
+                        if (acc >= target)
+                        {
+                            return pow(10.0, -6.0 + 7.0*(b + 1)/64.0);
+                        }
+                    }
+                    return scalar(10);
+                };
+                Info<< "PEQSI drift quantiles: p50 < " << q(0.50)
+                    << ", p99 < " << q(0.99)
+                    << ", p99.9 < " << q(0.999)
+                    << " (log-bin upper bounds)" << endl;
+            }
+        }
     }
 
     // Cell-COUNT fractions as well as volume fractions.  On a strongly

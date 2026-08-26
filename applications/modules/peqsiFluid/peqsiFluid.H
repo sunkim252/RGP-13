@@ -303,6 +303,13 @@ protected:
         //  for the crossing-speed diagnostic of the guard
         autoPtr<scalarField> covolMarginPrev_;
 
+        //- Log-binned density-drift distribution, 64 bins over
+        //  1e-6..10.  The maximum and the volume mean bracket the
+        //  population from opposite ends and neither sees the part
+        //  between them -- which is where every failure this campaign
+        //  chased actually lived.
+        mutable List<label> driftHist_;
+
         //- Previous step's temperature-floor-clamp mask, for the
         //  chatter census: cells crossing the clamp boundary between
         //  consecutive steps distinguish a clamp-chatter instability
