@@ -1242,13 +1242,48 @@ void Foam::solvers::peqsiFluid::advectManifoldStage
         const scalar scSgs =
             pimple.dict().lookupOrDefault<scalar>("peqsiScSGS", 0.7);
 
-        if (sgsActive_ && scSgs > 0)
+        // Molecular species diffusion (peqsiLe > 0 to enable).
+        //
+        // Takahashi is off at Tier-0, so the mixture fraction carried
+        // no molecular diffusion either -- only the subgrid term above
+        // and the scheme's own dissipation, while the enthalpy has
+        // always had the full thermal conductivity.  That asymmetry is
+        // the larger of the two: at Le = 0.29 the molecular
+        // diffusivity is 2.1x the subgrid one in the fuel and 1.5x in
+        // the chamber, which is why closing only the subgrid half
+        // slowed the reachability violations without stopping them.
+        //
+        // rho*D = kappa/(cp Le) with the MOLECULAR conductivity, not
+        // the one the energy equation has already had muSgs folded
+        // into -- otherwise the subgrid part is counted twice.  The
+        // default Le = 0.29 is the median of the mixture-averaged
+        // Lewis number the dd8 flamelets were solved with (0.25-0.35
+        // across the mixing line), so the solver transports Z the way
+        // the manifold was built.
+        const scalar leZ =
+            pimple.dict().lookupOrDefault<scalar>("peqsiLe", 0.29);
+
+        if ((sgsActive_ && scSgs > 0) || leZ > 0)
         {
             volScalarField Dsgs
             (
                 "PEQSI:Dsgs",
-                rhoN_()*momentumTransport->nut()/scSgs
+                0.0*rhoN_()
             );
+
+            if (leZ > 0)
+            {
+                const volScalarField kappaMol
+                (
+                    completeField("PEQSI:kappaMol", mesh, thermo_.kappa())
+                );
+                Dsgs += kappaMol/(thermo_.Cp()*leZ);
+            }
+
+            if (sgsActive_ && scSgs > 0)
+            {
+                Dsgs += rhoN_()*momentumTransport->nut()/scSgs;
+            }
 
             {
                 ensureDirGeometry();
