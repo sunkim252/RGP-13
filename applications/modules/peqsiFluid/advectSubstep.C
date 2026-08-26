@@ -559,13 +559,25 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
     // active and the composition is no longer linear in Z.  Species
     // that are absent are skipped, which on the non-reacting case
     // leaves four of thirty.
-    if
-    (
+    // peqsiSpeciesEnthalpyFluxK scales the term for diagnosis only.
+    // If it really is a linear source of the reachability defect then
+    // dE(k) = dE(0) + k dE', so running k = 0, 1, 3, 10 both amplifies
+    // an effect too small to clear a decision threshold at k = 1 and
+    // tests the linearity the derivation assumes -- a sweep that comes
+    // back curved refutes the derivation directly, which no single
+    // on/off comparison can do.  Production is k = 1.
+    const scalar sefK =
         pimple.dict().lookupOrDefault<Switch>
         (
             "peqsiSpeciesEnthalpyFlux", true
         )
-    )
+      ? pimple.dict().lookupOrDefault<scalar>
+        (
+            "peqsiSpeciesEnthalpyFluxK", 1.0
+        )
+      : 0.0;
+
+    if (sefK != 0)
     {
         const scalar leZh =
             pimple.dict().lookupOrDefault<scalar>("peqsiLe", 1.0);
@@ -632,7 +644,7 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
                    *rhoDf*fvc::snGrad(Yk[k])()*mesh.magSf();
             }
 
-            Lh += fvc::div(jh);
+            Lh += sefK*fvc::div(jh);
         }
     }
 
@@ -1303,7 +1315,8 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
                 << " J (E = " << eA << " J on " << nE
                 << " cells, ends " << hChamber_ << " / " << hFuelRef_
                 << " J/kg frozen, booked " << envBooked_
-                << " vs E-E0 " << eA - envE0_ << " J)" << endl;
+                << " vs E-E0 " << eA - envE0_ << " J, sefK = "
+                << sefK << ")" << endl;
 
             envExcessPrev_ = eA;
         }
