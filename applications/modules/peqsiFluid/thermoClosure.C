@@ -1931,9 +1931,19 @@ void Foam::solvers::peqsiFluid::invertTemperature()
                     }
                     return scalar(10);
                 };
+                // p99 is reported but carries no discrimination here:
+                // it lands in the same bin as the median, because the
+                // bulk of the field sits inside a single 1.29x bin.
+                // The A/B signal is entirely in the two deeper
+                // quantiles, and two of them are needed rather than
+                // one -- with a single tail point there is no way to
+                // separate a real divergence from bin noise.  At 3.2M
+                // cells p99.9 averages 3220 cells and p99.99 averages
+                // 322, both large enough to be stable.
                 Info<< "PEQSI drift quantiles: p50 < " << q(0.50)
                     << ", p99 < " << q(0.99)
                     << ", p99.9 < " << q(0.999)
+                    << ", p99.99 < " << q(0.9999)
                     << " (log-bin upper bounds)" << endl;
             }
         }
