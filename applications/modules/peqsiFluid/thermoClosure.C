@@ -1832,6 +1832,37 @@ void Foam::solvers::peqsiFluid::invertTemperature()
             reduce(nOxBad, sumOp<label>());
             reduce(nOxBadTab, sumOp<label>());
             reduce(nFuelCold, sumOp<label>());
+            // dh-axis excursions.  A lookup outside the fourth axis is
+            // clamped, and the clamp is itself a defect source, so any
+            // diagnostic that scales a term has to know whether the
+            // scaled run has left the table behind.
+            {
+                label nDhLo = 0, nDhHi = 0;
+                if
+                (
+                    dhF_.valid() && fgmTable_.valid()
+                 && fgmTable_().chiMax() > fgmTable_().chiMin()
+                )
+                {
+                    const scalar lo = fgmTable_().chiMin();
+                    const scalar hi = fgmTable_().chiMax();
+                    forAll(dhF_(), i)
+                    {
+                        if (dhF_()[i] < lo) nDhLo++;
+                        else if (dhF_()[i] > hi) nDhHi++;
+                    }
+                    reduce(nDhLo, sumOp<label>());
+                    reduce(nDhHi, sumOp<label>());
+                    if (nDhLo || nDhHi)
+                    {
+                        Info<< "PEQSI dh axis: below on " << nDhLo
+                            << ", above on " << nDhHi
+                            << " cells (axis [" << lo << ", " << hi
+                            << "] J/kg)" << endl;
+                    }
+                }
+            }
+
             Info<< "PEQSI impossible-state census: ox (Z<0.05, dh<-163k) "
                 << nOxBad << " cells (manifold-path " << nOxBadTab
                 << "), fuel (Z>0.95, T<240) " << nFuelCold

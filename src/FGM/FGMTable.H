@@ -449,6 +449,19 @@ public:
             //- The 4th-axis coordinate a legacy 3-D query collapses to.
             inline scalar chi0() const { return chi_axis_[0]; }
 
+            //- Bounds of the fourth axis, which holds dh [J/kg] in the
+            //  enthalpy-extended tables.  A lookup outside them is
+            //  clamped, and a clamped lookup is itself a source of the
+            //  very defect a diagnostic sweep is trying to measure --
+            //  so a sweep that scales a term until h leaves the axis
+            //  reports curvature that belongs to the table, not to the
+            //  term.  Exposed so the count can be reported.
+            inline scalar chiMin() const { return chi_axis_[0]; }
+            inline scalar chiMax() const
+            {
+                return chi_axis_[chi_axis_.size() - 1];
+            }
+
             //- The c-axis node interval bracketing C: [cLo, cHi].
             //  The manifold is piecewise-linear in c between two nodes, so a
             //  difference taken across this interval IS the interpolant's
