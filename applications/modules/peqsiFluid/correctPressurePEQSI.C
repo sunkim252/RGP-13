@@ -639,6 +639,9 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
             << ", rho*Z rel = "
             << (Zm - initialRhoZ_)/max(mag(initialRhoZ_), small)
             << ", rho*Z abs = " << Zm - initialRhoZ_ << " kg"
+            << " | abs: int(rho) = " << M
+            << " kg, int(rho h) = " << E
+            << " J, int(rho Z) = " << Zm << " kg"
             << endl;
         }
     }
