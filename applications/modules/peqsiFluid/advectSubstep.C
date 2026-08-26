@@ -1094,6 +1094,45 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
                 *mesh.V().primitiveField());
         Info<< "PEQSI h-budget: advective substep d(int rho h) = "
             << rhAfter - rhBefore << " J" << endl;
+
+        // The same substep measured against the manifold rather than
+        // against zero.  d(int rho h) answers "is the field heating",
+        // which a uniform compression also does; the defect
+        // int rho (h - h_mix(Z)) answers "is h leaving Z behind",
+        // which is the thing the manifold cannot tolerate.  Printing
+        // it here in the same units the acoustic ledger uses makes the
+        // two substeps' contributions addable, and that sum is what
+        // decides which of them creates the defect and which absorbs
+        // it -- a distinction we cannot make from either number alone.
+        if (fgmActive_ && fgmTable_.valid())
+        {
+            const scalar hOx = fgmTable_().hOx();
+            const scalar hFu = fgmTable_().hFuel();
+            const scalarField& V = mesh.V();
+            const scalarField& Za = Z_().primitiveField();
+            const scalarField& Zb = ZN_().primitiveField();
+            const scalarField& ra = rho_.primitiveField();
+            const scalarField& rb = rhoN_().primitiveField();
+            const scalarField& ha = h_.primitiveField();
+            const scalarField& hb = hN_().primitiveField();
+
+            scalar dAfter = 0, dBefore = 0;
+            forAll(V, i)
+            {
+                const scalar za = min(max(Za[i], 0.0), 1.0);
+                const scalar zb = min(max(Zb[i], 0.0), 1.0);
+                dAfter +=
+                    ra[i]*(ha[i] - ((1.0 - za)*hOx + za*hFu))*V[i];
+                dBefore +=
+                    rb[i]*(hb[i] - ((1.0 - zb)*hOx + zb*hFu))*V[i];
+            }
+            reduce(dAfter, sumOp<scalar>());
+            reduce(dBefore, sumOp<scalar>());
+
+            Info<< "PEQSI defect budget: advective d(int rho dh) = "
+                << dAfter - dBefore << " J (level " << dAfter
+                << " J)" << endl;
+        }
     }
 
     mark(tPhase_[3]);

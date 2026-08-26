@@ -498,6 +498,12 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
         static label nAc = 0;
         if (every > 0 && (nAc++ % every) == 0)
         {
+            // The acoustic contribution to the same defect the
+            // advective probe reports, so the two are addable and the
+            // source can be told from the sink.
+            Info<< "PEQSI defect budget: acoustic d(int rho dh) = "
+                << dE + dPV << " J" << endl;
+
             Info<< "PEQSI acoustic ledger (datum "
                 << (dhp ? "dh" : "global") << "): d(mass) = " << dM
                 << " kg, dh*dm = " << dE
