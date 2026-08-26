@@ -303,6 +303,15 @@ protected:
         //  for the crossing-speed diagnostic of the guard
         autoPtr<scalarField> covolMarginPrev_;
 
+        //- Fixed enthalpy datum for the acoustic ledger, set to the
+        //  domain-mean h on the first pass.  Absolute enthalpy carries
+        //  a formation datum, so summing h_i dm_i books a term
+        //  hbar*dM that is two orders larger than the redistribution
+        //  it is meant to expose -- and changing the datum changes the
+        //  reported sign.  Subtracting a constant leaves only the part
+        //  that depends on WHERE the mass went.
+        mutable scalar hLedgerRef_ = GREAT;
+
         //- Log-binned density-drift distribution, 64 bins over
         //  1e-6..10.  The maximum and the volume mean bracket the
         //  population from opposite ends and neither sees the part

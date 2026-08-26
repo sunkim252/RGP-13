@@ -432,12 +432,16 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
         const scalarField& dpf = dp.primitiveField();
         const scalarField& hf = hN_().primitiveField();
 
+        if (hLedgerRef_ == GREAT)
+        {
+            hLedgerRef_ = gAverage(h_.primitiveField());
+        }
         scalar dM = 0, dE = 0, dEabs = 0;
         forAll(dpf, i)
         {
             dM -= cf[i]*dpf[i]*dV[i];
-            dE -= cf[i]*hf[i]*dpf[i]*dV[i];
-            dEabs += mag(cf[i]*hf[i]*dpf[i])*dV[i];
+            dE -= cf[i]*(hf[i] - hLedgerRef_)*dpf[i]*dV[i];
+            dEabs += mag(cf[i]*(hf[i] - hLedgerRef_)*dpf[i])*dV[i];
         }
         reduce(dM, sumOp<scalar>());
         reduce(dE, sumOp<scalar>());
@@ -448,7 +452,8 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
         static label nAc = 0;
         if (every > 0 && (nAc++ % every) == 0)
         {
-            Info<< "PEQSI acoustic ledger: d(mass) = " << dM
+            Info<< "PEQSI acoustic ledger (h datum "
+                << hLedgerRef_ << "): d(mass) = " << dM
                 << " kg, d(rho e) = " << dE
                 << " J, cancellation = " << dE/max(dEabs, vSmall)
                 << endl;
