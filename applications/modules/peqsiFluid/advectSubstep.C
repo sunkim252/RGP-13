@@ -29,6 +29,7 @@ License
 #include "fvcGrad.H"
 #include "fvcFlux.H"
 #include "fvcLaplacian.H"
+#include "fvcSnGrad.H"
 #include "fvcSurfaceIntegrate.H"
 #include "localMax.H"
 
@@ -533,13 +534,89 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
 
     // L_h: enthalpy-equation RHS without Dp/Dt (WKK Eq. 3) -- conduction
     // with the TK Eq. (33) artificial conductivity when active.
-    const volScalarField Lh
+    volScalarField Lh
     (
         "PEQSI:Lh",
         tKappaArt.valid()
       ? fvc::laplacian((kappa + tKappaArt())(), thermo_.T())()
       : fvc::laplacian(kappa, thermo_.T())()
     );
+
+    // The other half of the multicomponent heat flux.
+    //
+    // q = -kappa gradT + sum_k h_k j_k, and only the first term was
+    // here.  The species fluxes j_k = -rho D grad Y_k are not
+    // hypothetical: the mixture fraction is diffused with exactly that
+    // coefficient a few hundred lines below, so fuel mass leaves a cell
+    // carrying h_fu and oxidiser arrives carrying h_ox while the
+    // enthalpy equation is told nothing about it.  With h_fu - h_ox of
+    // order 1.8 MJ/kg across these two streams, moving 5% of a cell's
+    // mixture fraction is worth ~90 kJ/kg of enthalpy -- which is the
+    // size of the defect the reachability census has been reporting.
+    //
+    // Written from the transported Y rather than from stream
+    // compositions, so it stays correct once the progress variable is
+    // active and the composition is no longer linear in Z.  Species
+    // that are absent are skipped, which on the non-reacting case
+    // leaves four of thirty.
+    if
+    (
+        pimple.dict().lookupOrDefault<Switch>
+        (
+            "peqsiSpeciesEnthalpyFlux", true
+        )
+    )
+    {
+        const scalar leZh =
+            pimple.dict().lookupOrDefault<scalar>("peqsiLe", 1.0);
+        const scalar scSgsh =
+            pimple.dict().lookupOrDefault<scalar>("peqsiScSGS", 0.7);
+
+        tmp<volScalarField> tRhoD;
+        if (leZh > 0)
+        {
+            const volScalarField kmol
+            (
+                completeField("PEQSI:kappaMolH", mesh, thermo_.kappa())
+            );
+            tRhoD = (kmol/(thermo_.Cp()*leZh)).ptr();
+        }
+        if (sgsActive_ && scSgsh > 0)
+        {
+            const volScalarField mus
+            (
+                "PEQSI:muSgsH", rhoN_()*momentumTransport->nut()
+            );
+            if (tRhoD.valid()) tRhoD.ref() += mus/scSgsh;
+            else tRhoD = mus/scSgsh;
+        }
+
+        if (tRhoD.valid())
+        {
+            const surfaceScalarField rhoDf
+            (
+                "PEQSI:rhoDf", fvc::interpolate(tRhoD())
+            );
+            surfaceScalarField jh
+            (
+                "PEQSI:jh",
+                0.0*rhoDf*mesh.magSf()
+               *dimensionedScalar(dimEnergy/dimMass/dimLength, 1.0)
+            );
+
+            const PtrList<volScalarField>& Yk = thermo_.Y();
+            forAll(Yk, k)
+            {
+                if (gMax(Yk[k].primitiveField()) < 1e-6) continue;
+
+                jh +=
+                    fvc::interpolate(thermo_.hai(k, p_, thermo_.T()))
+                   *rhoDf*fvc::snGrad(Yk[k])()*mesh.magSf();
+            }
+
+            Lh += fvc::div(jh);
+        }
+    }
 
     mark(tPhase_[2]);
 
