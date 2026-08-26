@@ -1001,13 +1001,24 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
         const scalarField& Zf = Z_().primitiveField();
         const scalarField& Vf = mesh.V();
         scalarField& gv = Zvar_().primitiveFieldRef();
+        // Track the RAW model output as well as the stored (clamped)
+        // one.  g = Zvar/(Z(1-Z)) is a segregation factor and cannot
+        // exceed 1 for any realisable state, so a raw value above the
+        // clamp is the model reporting that its input |grad Z| is not
+        // the gradient of a filtered field.  The stored field alone
+        // cannot show this -- it saturates at 0.99 and looks healthy.
+        scalar gRawMax = 0;
+        label nOver = 0;
         forAll(gv, i)
         {
             const scalar zz = Zf[i]*(1.0 - Zf[i]);
             if (zz > 1e-6)
             {
                 const scalar d2 = cbrt(sqr(Vf[i]));
-                gv[i] = min(zvarCv*d2*magSqr(gZ[i])/zz, scalar(0.99));
+                const scalar raw = zvarCv*d2*magSqr(gZ[i])/zz;
+                gRawMax = max(gRawMax, raw);
+                if (raw > 0.99) nOver++;
+                gv[i] = min(raw, scalar(0.99));
             }
             else
             {
@@ -1023,9 +1034,13 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
             static label n = 0;
             if (every > 0 && (n++ % every) == 0)
             {
+                reduce(gRawMax, maxOp<scalar>());
+                reduce(nOver, sumOp<label>());
                 Info<< "PEQSI Zvar (Pierce-Moin): g max = "
                     << gMax(Zvar_()) << ", mean = "
-                    << gAverage(Zvar_()) << endl;
+                    << gAverage(Zvar_())
+                    << ", raw max = " << gRawMax
+                    << ", above clamp on " << nOver << " cells" << endl;
             }
         }
     }
@@ -1241,11 +1256,39 @@ void Foam::solvers::peqsiFluid::advectManifoldStage
                 const scalarField& rf0 = rho_.primitiveField();
                 scalarField& Df = Dsgs.primitiveFieldRef();
                 const scalar rdt = 0.45/runTime.deltaTValue();
+                label nCap = 0;
                 forAll(Df, i)
                 {
-                    Df[i] = min(Df[i], rdt*sqr(dmin[i])*rf0[i]);
+                    const scalar cap = rdt*sqr(dmin[i])*rf0[i];
+                    if (Df[i] > cap) { Df[i] = cap; nCap++; }
                 }
                 Dsgs.correctBoundaryConditions();
+
+                // A capped subgrid diffusivity is a subgrid model that
+                // is not being applied.  Without this count, "the SGS
+                // flux did not help" and "the SGS flux never got in"
+                // read the same in the log.
+                if
+                (
+                    pimple.dict().lookupOrDefault<Switch>
+                    (
+                        "peqsiStiffCensus", false
+                    )
+                )
+                {
+                    reduce(nCap, sumOp<label>());
+                    const label every =
+                        pimple.dict().lookupOrDefault<label>
+                        (
+                            "peqsiDiagInterval", 10
+                        );
+                    static label nS = 0;
+                    if (every > 0 && (nS++ % every) == 0 && nCap)
+                    {
+                        Info<< "PEQSI SGS scalar flux: diffusivity "
+                            << "capped on " << nCap << " cells" << endl;
+                    }
+                }
             }
 
             const volScalarField rhoSafe

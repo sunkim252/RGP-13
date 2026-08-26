@@ -1867,10 +1867,21 @@ void Foam::solvers::peqsiFluid::invertTemperature()
             }
         }
 
+        // Compression bound alongside the temperature range.  In a
+        // non-reacting run the only ways a cell can exceed the
+        // isentropic temperature for the pressure it actually sits at
+        // are viscous heating (bounded at ~1 K here, from the measured
+        // muSgs and shear) and error.  Reporting p_max next to T_max
+        // makes the comparison a subtraction instead of a separate
+        // analysis, and it caught the rd0110 degradation at t = 23 us
+        // where the threshold diagnostics stayed silent until 300 us.
         Info<< "PEQSI thermo closure: T = ["
             << gMin(thermo_.T().primitiveField()) << ", "
             << gMax(thermo_.T().primitiveField())
-            << "] K, rho drift (EOS vs transported) max = "
+            << "] K, p = ["
+            << gMin(p_.primitiveField())/1e6 << ", "
+            << gMax(p_.primitiveField())/1e6
+            << "] MPa, rho drift (EOS vs transported) max = "
             << maxDrift
             << ", vol-mean = " << volWeighted/max(volTot, vSmall)
             << ", vol frac >1% = " << volAbove1/max(volTot, vSmall)
