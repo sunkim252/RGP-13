@@ -1198,10 +1198,99 @@ void Foam::solvers::peqsiFluid::advectManifoldStage
             }
         }
 
-        const volVectorField LQ3
+        volVectorField LQ3
         (
             -(fvc::div(phiv, Q3, "div(phiv,Zpack)") - Q3*divPhiv)
         );
+
+        // Subgrid scalar flux (peqsiScSGS > 0 to enable).
+        //
+        // The energy equation adds muSgs*Cp/PrSgs to kappa, but the
+        // mixture fraction had no subgrid term at all: h was closed by
+        // an explicit SGS model and Z by the scheme's implicit
+        // dissipation alone.  Measured on rd0110: muSgs reaches 2x the
+        // molecular viscosity at the median chamber cell and 90x in the
+        // tail, so the two are not closed alike, and the manifold
+        // assumes they move together.  What that asymmetry produced is
+        // documented: the resolved |grad Z| is too steep, the algebraic
+        // segregation factor exceeds its own realizability bound
+        // (measured g = 2.02 against g <= 1), cells leave the manifold
+        // on the specific-volume gate, the EOS fallback is handed an
+        // (h, v) pair no temperature satisfies, and the floor clamp
+        // fills with cells until the run collapses (t = 404 us).
+        //
+        // Standard gradient-diffusion closure, D_sgs = nu_t/Sc_sgs, in
+        // the advective form the substep uses: (1/rho) div(mu_sgs/Sc
+        // grad q).  Carries the same explicit-stability cap as the
+        // bounding diffusivity below -- an unstable subgrid term would
+        // amplify what it exists to smooth.
+        const scalar scSgs =
+            pimple.dict().lookupOrDefault<scalar>("peqsiScSGS", 0.7);
+
+        if (sgsActive_ && scSgs > 0)
+        {
+            volScalarField Dsgs
+            (
+                "PEQSI:Dsgs",
+                rhoN_()*momentumTransport->nut()/scSgs
+            );
+
+            {
+                ensureDirGeometry();
+                const scalarField& dmin = ladDeltaMin_();
+                const scalarField& rf0 = rho_.primitiveField();
+                scalarField& Df = Dsgs.primitiveFieldRef();
+                const scalar rdt = 0.45/runTime.deltaTValue();
+                forAll(Df, i)
+                {
+                    Df[i] = min(Df[i], rdt*sqr(dmin[i])*rf0[i]);
+                }
+                Dsgs.correctBoundaryConditions();
+            }
+
+            const volScalarField rhoSafe
+            (
+                "PEQSI:rhoSgsDen",
+                max(rho_, dimensionedScalar(dimDensity, 0.01))
+            );
+
+            const volScalarField dZ
+            (
+                "PEQSI:sgsZ", fvc::laplacian(Dsgs, Z_())/rhoSafe
+            );
+            const volScalarField dZv
+            (
+                "PEQSI:sgsZvar", fvc::laplacian(Dsgs, Zvar_())/rhoSafe
+            );
+            const volScalarField dYc
+            (
+                "PEQSI:sgsYc", fvc::laplacian(Dsgs, Yc_())/rhoSafe
+            );
+
+            vectorField& Lw = LQ3.primitiveFieldRef();
+            const scalarField& a = dZ.primitiveField();
+            const scalarField& b = dZv.primitiveField();
+            const scalarField& c = dYc.primitiveField();
+            forAll(Lw, i)
+            {
+                Lw[i] += vector(a[i], b[i], c[i]);
+            }
+
+            forAll(LQ3.boundaryFieldRef(), patchi)
+            {
+                fvPatchVectorField& Lb = LQ3.boundaryFieldRef()[patchi];
+                const fvPatchScalarField& ab =
+                    dZ.boundaryField()[patchi];
+                const fvPatchScalarField& bb =
+                    dZv.boundaryField()[patchi];
+                const fvPatchScalarField& cb =
+                    dYc.boundaryField()[patchi];
+                forAll(Lb, i)
+                {
+                    Lb[i] += vector(ab[i], bb[i], cb[i]);
+                }
+            }
+        }
 
         const vectorField& Lf = LQ3.primitiveField();
         const scalarField& Sf = sourceYc_().primitiveField();
