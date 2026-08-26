@@ -1254,18 +1254,21 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
             // the violation itself.
             if (hChamber_ == GREAT)
             {
-                scalar num = 0, den = 0;
+                // The WARMEST oxidiser-side state, not their mean.
+                // Both the chamber gas and the LOX sit at Z = 0, so a
+                // mass-weighted mean over Z < 1e-6 lands between them
+                // and puts the chamber itself above its own envelope --
+                // every cell in the domain then counts as a violation,
+                // which is the same population error one level down.
+                // The upper edge is defined by mixing fuel with the
+                // hottest oxidiser present, so take the maximum.
+                scalar hMaxOx = -GREAT;
                 forAll(V, i)
                 {
-                    if (Zb[i] < 1e-6)
-                    {
-                        num += rb[i]*hb[i]*V[i];
-                        den += rb[i]*V[i];
-                    }
+                    if (Zb[i] < 1e-6) hMaxOx = max(hMaxOx, hb[i]);
                 }
-                reduce(num, sumOp<scalar>());
-                reduce(den, sumOp<scalar>());
-                hChamber_ = den > 0 ? num/den : hOx;
+                reduce(hMaxOx, maxOp<scalar>());
+                hChamber_ = hMaxOx > -GREAT ? hMaxOx : hOx;
             }
 
             scalar eA = 0, eB = 0;
