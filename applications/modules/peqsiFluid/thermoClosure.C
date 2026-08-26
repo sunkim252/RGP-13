@@ -1945,6 +1945,33 @@ void Foam::solvers::peqsiFluid::invertTemperature()
                     << ", p99.9 < " << q(0.999)
                     << ", p99.99 < " << q(0.9999)
                     << " (log-bin upper bounds)" << endl;
+
+                // The bin counts themselves (peqsiDriftHist), because
+                // every quantile above is derived from them and a
+                // derived number can only answer the question it was
+                // written for.  This campaign has restarted runs three
+                // times for want of a statistic nobody had thought to
+                // print: a clamped g hid a raw value 111x its cap, a
+                // global Tmax was compared against a global pmax from
+                // a different cell, and a tail quantile had to be
+                // added mid-run.  Sixty-four integers cost a few
+                // hundred bytes per diagnostic interval and make the
+                // next such question answerable from the log.
+                if
+                (
+                    pimple.dict().lookupOrDefault<Switch>
+                    (
+                        "peqsiDriftHist", true
+                    )
+                )
+                {
+                    Info<< "PEQSI drift hist [1e-6,10] 64 bins:";
+                    forAll(driftHist_, b)
+                    {
+                        Info<< ' ' << driftHist_[b];
+                    }
+                    Info<< endl;
+                }
             }
         }
     }
