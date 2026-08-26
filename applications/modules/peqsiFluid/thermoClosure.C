@@ -1881,7 +1881,10 @@ void Foam::solvers::peqsiFluid::invertTemperature()
             << "] K, p = ["
             << gMin(p_.primitiveField())/1e6 << ", "
             << gMax(p_.primitiveField())/1e6
-            << "] MPa, rho drift (EOS vs transported) max = "
+            << "] MPa, rho = ["
+            << gMin(rho_.primitiveField()) << ", "
+            << gMax(rho_.primitiveField())
+            << "], rho drift (EOS vs transported) max = "
             << maxDrift
             << ", vol-mean = " << volWeighted/max(volTot, vSmall)
             << ", vol frac >1% = " << volAbove1/max(volTot, vSmall)
