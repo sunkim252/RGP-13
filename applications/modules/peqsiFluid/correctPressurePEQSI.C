@@ -684,7 +684,73 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
     // T from h(T,v) Newton inversion, then transport properties and the
     // alpha/beta coefficient fields for the next step.
     // ------------------------------------------------------------------
+    // The closure's contribution to the envelope excess, split into
+    // the part that is definitional and the part that is not.
+    //
+    // E is mass-weighted, so the EOS re-equilibration inside the
+    // closure moves it simply by moving rho -- that is not a defect,
+    // it is what E means.  What would be a defect is h changing here,
+    // since h is the transported variable and T the derived one; the
+    // only routes are the temperature floor and the manifold's
+    // rewrite of the composition.  Freezing rho at its pre-closure
+    // value separates the two in a single step:
+    //
+    //   rho share = E(rho_new, x_new) - E(rho_old, x_new)
+    //   h   share = E(rho_old, x_new) - E(rho_old, x_old)
+    //
+    // Between them they are the 35% of the envelope excess that
+    // neither substep ledger books, because the closure runs after
+    // both.
+    const bool envSplit =
+        fgmActive_ && fgmTable_.valid() && hChamber_ != GREAT
+     && pimple.dict().lookupOrDefault<Switch>("peqsiEnvSplit", true);
+
+    autoPtr<scalarField> rhoPre, hPre;
+    if (envSplit)
+    {
+        rhoPre.set(new scalarField(rho_.primitiveField()));
+        hPre.set(new scalarField(h_.primitiveField()));
+    }
+
     invertTemperature();
+
+    if (envSplit)
+    {
+        const scalar hFu = fgmTable_().hFuel();
+        const scalarField& Zf = Z_().primitiveField();
+        const scalarField& hc = h_.primitiveField();
+        const scalarField& rc = rho_.primitiveField();
+        const scalarField& Vc = mesh.V();
+
+        scalar eOld = 0, eFroz = 0, eNew = 0;
+        forAll(Vc, i)
+        {
+            const scalar zc = min(max(Zf[i], 0.0), 1.0);
+            const scalar hHi = (1.0 - zc)*hChamber_ + zc*hFuelRef_;
+            const scalar xOld = hPre()[i] - hHi;
+            const scalar xNew = hc[i] - hHi;
+            if (xOld > 0) eOld += rhoPre()[i]*xOld*Vc[i];
+            if (xNew > 0)
+            {
+                eFroz += rhoPre()[i]*xNew*Vc[i];
+                eNew  += rc[i]*xNew*Vc[i];
+            }
+        }
+        reduce(eOld, sumOp<scalar>());
+        reduce(eFroz, sumOp<scalar>());
+        reduce(eNew, sumOp<scalar>());
+
+        const label every =
+            pimple.dict().lookupOrDefault<label>("peqsiDiagInterval", 10);
+        static label nS = 0;
+        if (every > 0 && (nS++ % every) == 0)
+        {
+            Info<< "PEQSI envelope budget: closure dE = " << eNew - eOld
+                << " J (rho share " << eNew - eFroz
+                << ", h share " << eFroz - eOld << " J)" << endl;
+        }
+        envBooked_ += eNew - eOld;
+    }
     mark(tPhase_[7]);
     updateCoefficients();
     mark(tPhase_[8]);
