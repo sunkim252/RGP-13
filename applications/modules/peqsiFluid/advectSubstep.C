@@ -1262,13 +1262,21 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
                 // which is the same population error one level down.
                 // The upper edge is defined by mixing fuel with the
                 // hottest oxidiser present, so take the maximum.
-                scalar hMaxOx = -GREAT;
+                scalar hMaxOx = -GREAT, hMaxFu = -GREAT;
                 forAll(V, i)
                 {
                     if (Zb[i] < 1e-6) hMaxOx = max(hMaxOx, hb[i]);
+                    if (Zb[i] > 1.0 - 1e-6) hMaxFu = max(hMaxFu, hb[i]);
                 }
                 reduce(hMaxOx, maxOp<scalar>());
+                reduce(hMaxFu, maxOp<scalar>());
                 hChamber_ = hMaxOx > -GREAT ? hMaxOx : hOx;
+
+                // Both endpoints from the field, for the same reason.
+                // Taking one from the field and the other from the
+                // table's constant is what put the whole fuel stream
+                // outside its own envelope.
+                hFuelRef_ = hMaxFu > -GREAT ? hMaxFu : hFu;
             }
 
             scalar eA = 0, eB = 0;
@@ -1278,9 +1286,9 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
                 const scalar za = min(max(Za[i], 0.0), 1.0);
                 const scalar zb = min(max(Zb[i], 0.0), 1.0);
                 const scalar ea =
-                    ha[i] - ((1.0 - za)*hChamber_ + za*hFu);
+                    ha[i] - ((1.0 - za)*hChamber_ + za*hFuelRef_);
                 const scalar eb =
-                    hb[i] - ((1.0 - zb)*hChamber_ + zb*hFu);
+                    hb[i] - ((1.0 - zb)*hChamber_ + zb*hFuelRef_);
                 if (ea > 0) { eA += ra[i]*ea*V[i]; nE++; }
                 if (eb > 0) eB += rb[i]*eb*V[i];
             }
@@ -1288,10 +1296,14 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
             reduce(eB, sumOp<scalar>());
             reduce(nE, sumOp<label>());
 
+            if (envBooked_ == 0 && envExcessPrev_ < 0) envE0_ = eB;
+            envBooked_ += eA - eB;
+
             Info<< "PEQSI envelope budget: advective dE = " << eA - eB
                 << " J (E = " << eA << " J on " << nE
-                << " cells, h_chamber = " << hChamber_ << " J/kg)"
-                << endl;
+                << " cells, ends " << hChamber_ << " / " << hFuelRef_
+                << " J/kg frozen, booked " << envBooked_
+                << " vs E-E0 " << eA - envE0_ << " J)" << endl;
 
             envExcessPrev_ = eA;
         }

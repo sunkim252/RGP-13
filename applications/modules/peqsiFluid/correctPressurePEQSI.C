@@ -545,15 +545,19 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
                 {
                     const scalar zc = min(max(Zf[i], 0.0), 1.0);
                     const scalar e =
-                        hc[i] - ((1.0 - zc)*hChamber_ + zc*hFu);
+                        hc[i] - ((1.0 - zc)*hChamber_ + zc*hFuelRef_);
                     if (e > 0) { eNow += rc[i]*e*Vc[i]; nE++; }
                 }
                 reduce(eNow, sumOp<scalar>());
                 reduce(nE, sumOp<label>());
 
+                envBooked_ += eNow - envExcessPrev_;
+
                 Info<< "PEQSI envelope budget: acoustic dE = "
                     << eNow - envExcessPrev_ << " J (E = " << eNow
-                    << " J on " << nE << " cells)" << endl;
+                    << " J on " << nE << " cells, booked "
+                    << envBooked_ << " vs E-E0 " << eNow - envE0_
+                    << " J)" << endl;
             }
 
             Info<< "PEQSI acoustic ledger (datum "

@@ -313,6 +313,24 @@ protected:
         //  bookkeeping.
         mutable scalar hChamber_ = GREAT;
 
+        //- Fuel-side envelope endpoint, taken from the field at boot
+        //  rather than from the table's calibration constant.  The
+        //  reachable set is defined by what actually enters: the fuel
+        //  arrives 1.1 kJ/kg above the table's h_fuel, and anchoring
+        //  the envelope on the table put every fuel cell outside it by
+        //  construction -- 72% of the excess at the first step.
+        mutable scalar hFuelRef_ = GREAT;
+
+        //- Running sum of the per-step envelope-excess bookings, to be
+        //  compared against E(t) - E(0).  A budget that does not
+        //  reproduce the quantity it claims to explain cannot be used
+        //  to compare two runs.
+        mutable scalar envBooked_ = 0;
+
+        //- Envelope excess at the first pass, so the growth can be
+        //  separated from the pile that boot leaves behind.
+        mutable scalar envE0_ = 0;
+
         //- Envelope excess int(rho max(0, h - h_hi(Z))) dV after the
         //  previous acoustic update, so each substep's contribution to
         //  it can be differenced out.  Zero in every cell that lies
