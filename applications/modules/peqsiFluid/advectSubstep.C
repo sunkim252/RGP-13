@@ -261,6 +261,36 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
         )
     );
 
+    // peqsiLADKappaCoeff defaults to 0.01 whenever the mass LAD is on,
+    // which is harmless for a single-species case but not for a
+    // manifold one: the artificial conductivity and the artificial
+    // mass diffusivity both act on the enthalpy side (kappa, and the
+    // laplacians of rho and rho*h) while the mixture fraction gets
+    // neither.  A manifold assumes h and Z move together, and every
+    // route that diffuses one without the other pushes cells to states
+    // no stream combination can reach -- the failure that ended the
+    // rd0110 run at t = 404 us.  Enabling the mass LAD here therefore
+    // switches on a third such route silently, so say so.
+    if
+    (
+        fgmActive_ && ladKappaCoeff > 0
+     && pimple.dict().lookupOrDefault<Switch>("peqsiLADWarn", true)
+    )
+    {
+        static bool warned = false;
+        if (!warned)
+        {
+            warned = true;
+            WarningInFunction
+                << "peqsiLADKappaCoeff = " << ladKappaCoeff
+                << " with the manifold active: the LAD adds artificial"
+                << " diffusion to h but none to Z, which drives cells"
+                << " off the manifold.  Set peqsiLADKappaCoeff 0 unless"
+                << " a matching scalar term is added (peqsiLADWarn no"
+                << " silences this)." << endl;
+        }
+    }
+
     tmp<volScalarField> tDart;      // rho_art [m2/s]
     tmp<volScalarField> tKappaArt;  // kappa_art [W/(m K)]
 
