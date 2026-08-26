@@ -340,6 +340,47 @@ Foam::solvers::peqsiFluid::peqsiFluid(fvMesh& mesh)
         // own temperature.
         const scalarField Tcase(thermo_.T().primitiveField());
 
+        // Realizability BEFORE the first lookup, not after.  The same
+        // Yc <= Cnorm(Z) bound is applied every step in the advective
+        // substep, but the boot lookup used to run on the raw case
+        // field: an ignition kernel painted as Yc = 1 where Z = 0 asked
+        // the manifold for c = 1 in a cell holding no fuel, and the
+        // burnt enthalpy it returned stuck in h even though the substep
+        // clamped Yc back to ~0 on the first step.  Measured on the v5
+        // IC: 53.7% of cells booted at 591 K with half the intended
+        // density.  Clamping first makes the lookup see c = 0 there and
+        // return the unburnt state, so a kernel that overlaps low-Z
+        // cells can no longer seed a hot pocket.
+        if
+        (
+            pimple.dict().lookupOrDefault<Switch>("peqsiBoundYc", true)
+         && fgmActive_ && fgmTable_.valid() && fgmTable_().hasCnorm()
+        )
+        {
+            const scalarField& Zf = Z_().primitiveField();
+            scalarField& Ycf = Yc_().primitiveFieldRef();
+            label nClamped = 0;
+            forAll(Ycf, celli)
+            {
+                const scalar Cn =
+                    fgmTable_().interpolateCnorm
+                    (
+                        min(max(Zf[celli], 0.0), 1.0)
+                    );
+                const scalar Yb = min(max(Ycf[celli], 0.0), Cn);
+                if (Yb != Ycf[celli]) nClamped++;
+                Ycf[celli] = Yb;
+            }
+            Yc_().correctBoundaryConditions();
+            reduce(nClamped, sumOp<label>());
+            if (nClamped)
+            {
+                Info<< "PEQSI restart: Yc clamped to [0, Cnorm(Z)] on "
+                    << nClamped << " cells before the boot lookup"
+                    << endl;
+            }
+        }
+
         fgmClosure();
 
         if (restartH == "eos")
@@ -589,12 +630,18 @@ Foam::scalar Foam::solvers::peqsiFluid::maxDeltaT() const
 
         reduce(maxCdx, maxOp<scalar>());
 
-        if (maxCdx > vSmall && maxAcCo/maxCdx < dtLim)
+        if (maxCdx > vSmall)
         {
-            Info<< "PEQSI dt limit: acoustic Courant bound "
-                << maxAcCo/maxCdx << " s (max c/dx = " << maxCdx
-                << " 1/s, other bounds " << dtLim << " s)" << endl;
-            dtLim = maxAcCo/maxCdx;
+            // Report unconditionally: knowing the acoustic Courant
+            // number the run is actually operating at is the point,
+            // whether or not it binds.  Set peqsiMaxAcousticCo above
+            // any reachable value for a pure diagnostic.
+            Info<< "PEQSI acoustic Courant: max c/dx = " << maxCdx
+                << " 1/s, aCo at dt " << mesh.time().deltaTValue()
+                << " = " << maxCdx*mesh.time().deltaTValue()
+                << ", bound dt = " << maxAcCo/maxCdx << " s" << endl;
+
+            dtLim = min(dtLim, maxAcCo/maxCdx);
         }
     }
 
