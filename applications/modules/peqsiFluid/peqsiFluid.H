@@ -303,6 +303,14 @@ protected:
         //  for the crossing-speed diagnostic of the guard
         autoPtr<scalarField> covolMarginPrev_;
 
+        //- Per-cell accumulation of the acoustic step's defect
+        //  booking, sum over steps of dh*dm.  A global sum is
+        //  dominated by wherever |dm| is largest, and the
+        //  reachability violations are local, so the two cannot be
+        //  matched up without the field itself.  Written with the
+        //  time directories (peqsiLeakField).
+        autoPtr<volScalarField> dhLeak_;
+
         //- Fixed enthalpy datum for the acoustic ledger, set to the
         //  domain-mean h on the first pass.  Absolute enthalpy carries
         //  a formation datum, so summing h_i dm_i books a term

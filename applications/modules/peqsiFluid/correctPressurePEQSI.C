@@ -436,13 +436,59 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
         {
             hLedgerRef_ = gAverage(h_.primitiveField());
         }
-        scalar dM = 0, dE = 0, dEabs = 0;
+
+        // Book against the manifold's own datum where it is available.
+        // What the acoustic step does to the manifold is measured by
+        // dh = h - h_mix(Z), because Z is untouched here: writing the
+        // update as a defect density D = rho h - rho h_mix(Z) gives
+        // D^{n+1} - D* = dh dm + dp, so the first term is the part
+        // that moving mass creates and the second is compression, which
+        // is physical but sits outside a constant-pressure envelope.
+        // A single global datum is not enough -- it leaves the fuel
+        // cells carrying an offset of order 1.9e6 J/kg, which is the
+        // same disease in weaker form.
+        const scalarField* dhp =
+            dhF_.valid() && dhF_().size() == dpf.size()
+          ? &dhF_() : nullptr;
+
+        const bool leakField =
+            pimple.dict().lookupOrDefault<Switch>("peqsiLeakField", false);
+
+        if (leakField && !dhLeak_.valid())
+        {
+            dhLeak_.set
+            (
+                new volScalarField
+                (
+                    IOobject
+                    (
+                        "PEQSI:dhLeak",
+                        runTime.name(),
+                        mesh,
+                        IOobject::NO_READ,
+                        IOobject::AUTO_WRITE
+                    ),
+                    mesh,
+                    dimensionedScalar(dimEnergy, 0)
+                )
+            );
+        }
+
+        scalar dM = 0, dE = 0, dEabs = 0, dPV = 0;
+        scalarField* lk =
+            leakField ? &dhLeak_().primitiveFieldRef() : nullptr;
+
         forAll(dpf, i)
         {
+            const scalar hb = dhp ? (*dhp)[i] : (hf[i] - hLedgerRef_);
+            const scalar e = -cf[i]*hb*dpf[i]*dV[i];
             dM -= cf[i]*dpf[i]*dV[i];
-            dE -= cf[i]*(hf[i] - hLedgerRef_)*dpf[i]*dV[i];
-            dEabs += mag(cf[i]*(hf[i] - hLedgerRef_)*dpf[i])*dV[i];
+            dE += e;
+            dEabs += mag(cf[i]*hb*dpf[i])*dV[i];
+            dPV += dpf[i]*dV[i];
+            if (lk) (*lk)[i] += e;
         }
+        reduce(dPV, sumOp<scalar>());
         reduce(dM, sumOp<scalar>());
         reduce(dE, sumOp<scalar>());
         reduce(dEabs, sumOp<scalar>());
@@ -452,9 +498,10 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
         static label nAc = 0;
         if (every > 0 && (nAc++ % every) == 0)
         {
-            Info<< "PEQSI acoustic ledger (h datum "
-                << hLedgerRef_ << "): d(mass) = " << dM
-                << " kg, d(rho e) = " << dE
+            Info<< "PEQSI acoustic ledger (datum "
+                << (dhp ? "dh" : "global") << "): d(mass) = " << dM
+                << " kg, dh*dm = " << dE
+                << " J, dp*dV = " << dPV
                 << " J, cancellation = " << dE/max(dEabs, vSmall)
                 << endl;
         }
