@@ -1243,6 +1243,54 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
                 << dAfter - dBefore << " J (level " << dAfter
                 << " J), Z outside [0,1] on " << zOver
                 << " m3 worth " << zOverE << " J" << endl;
+
+            // The same accounting restricted to the population the
+            // reachability census actually counts.  int rho dh is
+            // 98.7% chamber gas sitting above the cold LOX anchor --
+            // correct, expected, and six orders larger than the
+            // interface excess, so nothing done at the interface can
+            // move it.  Excess above the upper mixing line is exactly
+            // zero wherever the state is reachable, so what is left is
+            // the violation itself.
+            if (hChamber_ == GREAT)
+            {
+                scalar num = 0, den = 0;
+                forAll(V, i)
+                {
+                    if (Zb[i] < 1e-6)
+                    {
+                        num += rb[i]*hb[i]*V[i];
+                        den += rb[i]*V[i];
+                    }
+                }
+                reduce(num, sumOp<scalar>());
+                reduce(den, sumOp<scalar>());
+                hChamber_ = den > 0 ? num/den : hOx;
+            }
+
+            scalar eA = 0, eB = 0;
+            label nE = 0;
+            forAll(V, i)
+            {
+                const scalar za = min(max(Za[i], 0.0), 1.0);
+                const scalar zb = min(max(Zb[i], 0.0), 1.0);
+                const scalar ea =
+                    ha[i] - ((1.0 - za)*hChamber_ + za*hFu);
+                const scalar eb =
+                    hb[i] - ((1.0 - zb)*hChamber_ + zb*hFu);
+                if (ea > 0) { eA += ra[i]*ea*V[i]; nE++; }
+                if (eb > 0) eB += rb[i]*eb*V[i];
+            }
+            reduce(eA, sumOp<scalar>());
+            reduce(eB, sumOp<scalar>());
+            reduce(nE, sumOp<label>());
+
+            Info<< "PEQSI envelope budget: advective dE = " << eA - eB
+                << " J (E = " << eA << " J on " << nE
+                << " cells, h_chamber = " << hChamber_ << " J/kg)"
+                << endl;
+
+            envExcessPrev_ = eA;
         }
     }
 

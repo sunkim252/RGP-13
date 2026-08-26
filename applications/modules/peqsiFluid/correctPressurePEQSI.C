@@ -527,6 +527,35 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
             Info<< "PEQSI defect budget: acoustic d(int rho dh) = "
                 << dE + dPV << " J" << endl;
 
+            // And to the envelope excess, which is the quantity the
+            // reachability census counts.  The advective probe leaves
+            // its post-substep value in envExcessPrev_, so the
+            // difference here is the acoustic step's own contribution.
+            if (fgmActive_ && fgmTable_.valid() && envExcessPrev_ >= 0)
+            {
+                const scalar hFu = fgmTable_().hFuel();
+                const scalarField& Zf = Z_().primitiveField();
+                const scalarField& hc = h_.primitiveField();
+                const scalarField& rc = rho_.primitiveField();
+                const scalarField& Vc = mesh.V();
+
+                scalar eNow = 0;
+                label nE = 0;
+                forAll(Vc, i)
+                {
+                    const scalar zc = min(max(Zf[i], 0.0), 1.0);
+                    const scalar e =
+                        hc[i] - ((1.0 - zc)*hChamber_ + zc*hFu);
+                    if (e > 0) { eNow += rc[i]*e*Vc[i]; nE++; }
+                }
+                reduce(eNow, sumOp<scalar>());
+                reduce(nE, sumOp<label>());
+
+                Info<< "PEQSI envelope budget: acoustic dE = "
+                    << eNow - envExcessPrev_ << " J (E = " << eNow
+                    << " J on " << nE << " cells)" << endl;
+            }
+
             Info<< "PEQSI acoustic ledger (datum "
                 << (dhp ? "dh" : "global") << "): d(mass) = " << dM
                 << " kg, dh*dm = " << dE

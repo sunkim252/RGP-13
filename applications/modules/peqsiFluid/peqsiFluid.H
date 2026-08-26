@@ -303,6 +303,23 @@ protected:
         //  for the crossing-speed diagnostic of the guard
         autoPtr<scalarField> covolMarginPrev_;
 
+        //- Enthalpy of the chamber's oxidiser at its initial state,
+        //  captured on the first pass.  The reachability envelope's
+        //  upper edge is the mixing line between this and the fuel
+        //  stream, and the manifold's own h_ox is the cold LOX anchor
+        //  instead -- which is why an integral taken against h_ox
+        //  reports the chamber sitting 285 kJ/kg above it and drowns
+        //  the interface in six orders of magnitude of correct
+        //  bookkeeping.
+        mutable scalar hChamber_ = GREAT;
+
+        //- Envelope excess int(rho max(0, h - h_hi(Z))) dV after the
+        //  previous acoustic update, so each substep's contribution to
+        //  it can be differenced out.  Zero in every cell that lies
+        //  inside the envelope, which is the whole point: this is the
+        //  quantity the reachability census counts, budgeted.
+        mutable scalar envExcessPrev_ = -1;
+
         //- Reference int(rho Z) dV, for the conservation audit.  The
         //  mass and energy sums have always been reported; the mixture
         //  fraction was not, and it is the one that can drift without
