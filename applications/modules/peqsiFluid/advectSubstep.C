@@ -273,7 +273,7 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
     // switches on a third such route silently, so say so.
     if
     (
-        fgmActive_ && ladKappaCoeff > 0
+        fgmActive_ && (ladKappaCoeff > 0 || ladCoeff > 0)
      && pimple.dict().lookupOrDefault<Switch>("peqsiLADWarn", true)
     )
     {
@@ -282,12 +282,15 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
         {
             warned = true;
             WarningInFunction
-                << "peqsiLADKappaCoeff = " << ladKappaCoeff
-                << " with the manifold active: the LAD adds artificial"
-                << " diffusion to h but none to Z, which drives cells"
-                << " off the manifold.  Set peqsiLADKappaCoeff 0 unless"
-                << " a matching scalar term is added (peqsiLADWarn no"
-                << " silences this)." << endl;
+                << "LAD active with the manifold (peqsiLADCoeff = "
+                << ladCoeff << ", peqsiLADKappaCoeff = "
+                << ladKappaCoeff << "): both terms diffuse the enthalpy"
+                << " side and neither touches Z -- the conductivity"
+                << " through kappa, and the mass coefficient through"
+                << " the laplacians of rho AND rho*h, so zeroing"
+                << " peqsiLADKappaCoeff alone does not remove the"
+                << " asymmetry.  It drives cells off the manifold"
+                << " (peqsiLADWarn no silences this)." << endl;
         }
     }
 
