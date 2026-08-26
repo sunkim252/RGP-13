@@ -447,9 +447,32 @@ void Foam::solvers::peqsiFluid::pressureCorrector()
         // A single global datum is not enough -- it leaves the fuel
         // cells carrying an offset of order 1.9e6 J/kg, which is the
         // same disease in weaker form.
-        const scalarField* dhp =
-            dhF_.valid() && dhF_().size() == dpf.size()
-          ? &dhF_() : nullptr;
+        // Linear, unclamped mixing line -- deliberately NOT dhF_.
+        //
+        // The manifold's own dh subtracts dhRef(Z, gZ, c), a tabulated
+        // nonlinear function, so int rho dhF dV moves whenever gZ moves
+        // even if no defect is created: mixing two parcels gives
+        // mean[dhRef(Z)] != dhRef(mean[Z]), and gZ grows as the
+        // interface develops.  A ledger built on it reports the
+        // manifold's reference surface shifting as though the substep
+        // had made defect.  The advective probe already uses the linear
+        // form and the reachability envelope is defined on it, so use
+        // it here too and keep all three commensurable.
+        tmp<scalarField> tDhLin;
+        if (fgmActive_ && fgmTable_.valid())
+        {
+            const scalar hOx = fgmTable_().hOx();
+            const scalar hFu = fgmTable_().hFuel();
+            const scalarField& Zf = Z_().primitiveField();
+            const scalarField& hcell = h_.primitiveField();
+            tDhLin = new scalarField(Zf.size());
+            scalarField& dl = tDhLin.ref();
+            forAll(dl, i)
+            {
+                dl[i] = hcell[i] - ((1.0 - Zf[i])*hOx + Zf[i]*hFu);
+            }
+        }
+        const scalarField* dhp = tDhLin.valid() ? &tDhLin() : nullptr;
 
         const bool leakField =
             pimple.dict().lookupOrDefault<Switch>("peqsiLeakField", false);

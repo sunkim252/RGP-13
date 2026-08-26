@@ -1211,22 +1211,38 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
             const scalarField& ha = h_.primitiveField();
             const scalarField& hb = hN_().primitiveField();
 
-            scalar dAfter = 0, dBefore = 0;
+            // Unclamped on purpose.  The manifold lookup clamps Z to
+            // [0, 1] before forming its mixing line, so a cell sitting
+            // at 1 + eps has h_mix evaluated at 1 and books
+            // eps*(h_fu - h_ox) of defect every step -- 1.6 J/kg per
+            // 1e-6 of overshoot, from neither scheme nor diffusion.
+            // Using the clamped value here would hide that in the
+            // budget instead of showing it, so the excursion is
+            // counted separately below.
+            scalar dAfter = 0, dBefore = 0, zOver = 0, zOverE = 0;
             forAll(V, i)
             {
-                const scalar za = min(max(Za[i], 0.0), 1.0);
-                const scalar zb = min(max(Zb[i], 0.0), 1.0);
                 dAfter +=
-                    ra[i]*(ha[i] - ((1.0 - za)*hOx + za*hFu))*V[i];
+                    ra[i]*(ha[i] - ((1.0 - Za[i])*hOx + Za[i]*hFu))*V[i];
                 dBefore +=
-                    rb[i]*(hb[i] - ((1.0 - zb)*hOx + zb*hFu))*V[i];
+                    rb[i]*(hb[i] - ((1.0 - Zb[i])*hOx + Zb[i]*hFu))*V[i];
+
+                const scalar zc = min(max(Za[i], 0.0), 1.0);
+                if (zc != Za[i])
+                {
+                    zOver += mag(Za[i] - zc)*V[i];
+                    zOverE += ra[i]*(Za[i] - zc)*(hFu - hOx)*V[i];
+                }
             }
+            reduce(zOver, sumOp<scalar>());
+            reduce(zOverE, sumOp<scalar>());
             reduce(dAfter, sumOp<scalar>());
             reduce(dBefore, sumOp<scalar>());
 
             Info<< "PEQSI defect budget: advective d(int rho dh) = "
                 << dAfter - dBefore << " J (level " << dAfter
-                << " J)" << endl;
+                << " J), Z outside [0,1] on " << zOver
+                << " m3 worth " << zOverE << " J" << endl;
         }
     }
 
