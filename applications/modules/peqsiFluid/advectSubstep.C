@@ -604,13 +604,31 @@ void Foam::solvers::peqsiFluid::momentumPredictor()
                *dimensionedScalar(dimEnergy/dimMass/dimLength, 1.0)
             );
 
+            // Referenced to the mixture enthalpy, not used raw.  The
+            // sum is physically invariant to a common datum because
+            // sum_k grad Y_k = 0, but only if that identity holds in
+            // the discrete field -- and it does not, both because the
+            // manifold's mass fractions carry interpolation error and
+            // because the loop below skips absent species.  With
+            // absolute enthalpies of order 1e6 J/kg, a residual of
+            // 1e-6 in the sum of gradients is already worth joules per
+            // kilogram, and the first attempt at this term drove the
+            // temperature to its floor within thirty steps.
+            // Subtracting h makes the cancellation exact by
+            // construction rather than by hope.
             const PtrList<volScalarField>& Yk = thermo_.Y();
             forAll(Yk, k)
             {
                 if (gMax(Yk[k].primitiveField()) < 1e-6) continue;
 
+                const volScalarField hRel
+                (
+                    "PEQSI:hRel",
+                    thermo_.hai(k, p_, thermo_.T()) - h_
+                );
+
                 jh +=
-                    fvc::interpolate(thermo_.hai(k, p_, thermo_.T()))
+                    fvc::interpolate(hRel)
                    *rhoDf*fvc::snGrad(Yk[k])()*mesh.magSf();
             }
 
